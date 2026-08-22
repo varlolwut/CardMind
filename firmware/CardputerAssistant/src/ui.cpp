@@ -261,12 +261,12 @@ void drawCarouselFrame(const std::vector<CarouselCard>& cards,
         drawCarouselCard(cards[selectedIndex], selectedX);
     }
     if (!cards.empty()) {
-        const int dotsWidth = static_cast<int>(cards.size() * 9U + 3U);
-        const int firstDotX = (240 - dotsWidth) / 2;
+        const int dotsSpan = static_cast<int>((cards.size() - 1U) * 9U);
+        const int firstDotX = (240 - dotsSpan) / 2;
         for (std::size_t index = 0; index < cards.size(); ++index) {
             const int dotX = firstDotX + static_cast<int>(index * 9U);
             if (index == selectedIndex) {
-                canvas->fillRoundRect(dotX - 3, 107, 10, 4, 2,
+                canvas->fillRoundRect(dotX - 5, 107, 10, 4, 2,
                                       cards[selectedIndex].accentColor);
             } else {
                 canvas->fillCircle(dotX, 109, 2, TFT_DARKGREY);
