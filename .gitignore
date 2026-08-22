@@ -1,5 +1,7 @@
 build/
 vendor/
+ROADMAP.md
+toolchain/arduino-cli.yaml
 toolchain/data/
 toolchain/downloads/
 toolchain/user/

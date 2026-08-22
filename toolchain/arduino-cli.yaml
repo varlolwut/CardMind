@@ -1,7 +1,0 @@
-board_manager:
-  additional_urls:
-    - https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
-directories:
-  data: C:/Users/84vs1/Desktop/cardputer-assistant/toolchain/data
-  downloads: C:/Users/84vs1/Desktop/cardputer-assistant/toolchain/downloads
-  user: C:/Users/84vs1/Desktop/cardputer-assistant/toolchain/user
