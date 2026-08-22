@@ -607,7 +607,9 @@ void showTextEditor(const String& title,
                     const std::string& input,
                     KeyboardLayout layout,
                     std::size_t maximumBytes,
-                    const String& status)
+                    const String& status,
+                    const String& emptyHint,
+                    const String& footer)
 {
     constexpr std::size_t maximumVisibleLines = 7;
     canvas->fillScreen(TFT_BLACK);
@@ -621,7 +623,9 @@ void showTextEditor(const String& title,
     canvas->setCursor(213, 2);
     canvas->print(layout == KeyboardLayout::Russian ? "RU" : "EN");
 
-    const std::string visibleInput = input.empty() ? std::string("(No instructions)_") : input + "_";
+    const std::string visibleInput = input.empty()
+        ? std::string(emptyHint.c_str()) + "_"
+        : input + "_";
     const auto wrapped = wrapUtf8Text(visibleInput, 38);
     const std::size_t firstLine = wrapped.size() > maximumVisibleLines
         ? wrapped.size() - maximumVisibleLines
@@ -642,7 +646,7 @@ void showTextEditor(const String& title,
     canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
-    canvas->print("ENTER save  ESC cancel  Fn+3 lang");
+    canvas->print(clippedLine(footer, 44));
     canvas->pushSprite(0, 0);
 }
 

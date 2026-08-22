@@ -13,7 +13,20 @@ namespace cardputer {
 namespace {
 
 constexpr const char* kWorkspaceDirectory = "/assistant/files";
+constexpr const char* kBookmarksPath = "/assistant/file_bookmarks.json";
 constexpr std::size_t kCopyBufferBytes = 1024;
+constexpr std::size_t kMaximumSearchBytes = 128;
+
+struct BookmarkEntry {
+    String name;
+    std::uint32_t offset;
+};
+
+struct BookmarkEntriesResult {
+    bool success;
+    std::vector<BookmarkEntry> entries;
+    String error;
+};
 
 OperationResult removeIfPresent(const String& path)
 {
@@ -134,6 +147,72 @@ OperationResult prepareTemporaryPaths(const String& temporary, const String& bac
 {
     const OperationResult temporaryResult = removeIfPresent(temporary);
     return temporaryResult.success ? removeIfPresent(backup) : temporaryResult;
+}
+
+BookmarkEntriesResult loadBookmarkEntries()
+{
+    if (!SD.exists(kBookmarksPath)) {
+        return {true, {}, ""};
+    }
+    File file = SD.open(kBookmarksPath, FILE_READ);
+    if (!file) {
+        return {false, {}, "Failed to open workspace bookmark metadata"};
+    }
+    JsonDocument document;
+    const DeserializationError parseError = deserializeJson(document, file);
+    file.close();
+    if (parseError) {
+        return {false, {}, "Workspace bookmark metadata is invalid JSON: " +
+                            String(parseError.c_str())};
+    }
+    if (!document["bookmarks"].is<JsonArray>()) {
+        return {false, {}, "Workspace bookmark metadata is missing the bookmarks array"};
+    }
+    std::vector<BookmarkEntry> entries;
+    for (JsonObjectConst item : document["bookmarks"].as<JsonArrayConst>()) {
+        if (!item["name"].is<const char*>() || !item["offset"].is<std::uint32_t>()) {
+            return {false, {}, "Workspace bookmark entry is missing name or offset"};
+        }
+        const String name = item["name"].as<const char*>();
+        if (!isValidWorkspaceFilename(name.c_str())) {
+            return {false, {}, "Workspace bookmark contains an invalid filename"};
+        }
+        entries.push_back({name, item["offset"].as<std::uint32_t>()});
+        if (entries.size() > kMaximumWorkspaceFiles) {
+            return {false, {}, "Workspace bookmark metadata contains more than 40 entries"};
+        }
+    }
+    return {true, entries, ""};
+}
+
+OperationResult saveBookmarkEntries(const std::vector<BookmarkEntry>& entries)
+{
+    const String target = kBookmarksPath;
+    const String temporary = target + ".tmp";
+    const String backup = target + ".bak";
+    OperationResult result = prepareTemporaryPaths(temporary, backup);
+    if (!result.success) {
+        return result;
+    }
+    JsonDocument document;
+    JsonArray bookmarks = document["bookmarks"].to<JsonArray>();
+    for (const auto& entry : entries) {
+        JsonObject item = bookmarks.add<JsonObject>();
+        item["name"] = entry.name;
+        item["offset"] = entry.offset;
+    }
+    File file = SD.open(temporary, FILE_WRITE);
+    if (!file) {
+        return {false, "Failed to create temporary workspace bookmark metadata"};
+    }
+    const std::size_t written = serializeJson(document, file);
+    file.flush();
+    file.close();
+    if (written == 0) {
+        removeIfPresent(temporary);
+        return {false, "Failed to write workspace bookmark metadata"};
+    }
+    return commitTemporaryFile(target, temporary, backup);
 }
 
 ToolExecutionResult listFilesTool()
@@ -385,6 +464,125 @@ WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
             nextOffset == totalBytes, ""};
 }
 
+WorkspaceFindResult findWorkspaceText(const String& name,
+                                      const std::string& query,
+                                      std::uint32_t startOffset)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, false, 0, "Invalid workspace filename"};
+    }
+    if (query.empty() || query.size() > kMaximumSearchBytes || !isValidUtf8(query)) {
+        return {false, false, 0, "Search text must be valid UTF-8 between 1 and 128 bytes"};
+    }
+    File file = SD.open(workspaceFilePath(name), FILE_READ);
+    if (!file) {
+        return {false, false, 0, "Workspace file does not exist: " + name};
+    }
+    const std::size_t totalBytes = file.size();
+    if (totalBytes > kMaximumWorkspaceFileBytes || startOffset > totalBytes ||
+        !isFileUtf8Boundary(file, startOffset, totalBytes) || !file.seek(startOffset)) {
+        file.close();
+        return {false, false, 0,
+                "Search offset is outside the file or not a UTF-8 boundary"};
+    }
+    std::string window;
+    window.reserve(kCopyBufferBytes + query.size());
+    std::uint32_t windowOffset = startOffset;
+    std::uint8_t buffer[kCopyBufferBytes] = {};
+    while (file.available() > 0) {
+        const std::size_t readBytes = file.read(buffer, sizeof(buffer));
+        if (readBytes == 0) {
+            file.close();
+            return {false, false, 0, "Workspace search stopped before end of file"};
+        }
+        window.append(reinterpret_cast<const char*>(buffer), readBytes);
+        const std::size_t match = window.find(query);
+        if (match != std::string::npos) {
+            file.close();
+            return {true, true, windowOffset + static_cast<std::uint32_t>(match), ""};
+        }
+        const std::size_t overlap = std::min(query.size() - 1, window.size());
+        const std::size_t consumed = window.size() - overlap;
+        windowOffset += static_cast<std::uint32_t>(consumed);
+        window.erase(0, consumed);
+    }
+    file.close();
+    return {true, false, 0, ""};
+}
+
+WorkspaceBookmarkResult loadWorkspaceBookmark(const String& name)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, false, 0, "Invalid workspace filename"};
+    }
+    const BookmarkEntriesResult loaded = loadBookmarkEntries();
+    if (!loaded.success) {
+        return {false, false, 0, loaded.error};
+    }
+    for (const auto& entry : loaded.entries) {
+        if (entry.name == name) {
+            File file = SD.open(workspaceFilePath(name), FILE_READ);
+            if (!file) {
+                return {false, false, 0, "Bookmarked workspace file does not exist"};
+            }
+            const std::size_t totalBytes = file.size();
+            const bool valid = entry.offset <= totalBytes &&
+                isFileUtf8Boundary(file, entry.offset, totalBytes);
+            file.close();
+            return valid
+                ? WorkspaceBookmarkResult{true, true, entry.offset, ""}
+                : WorkspaceBookmarkResult{false, false, 0,
+                                          "Stored bookmark is outside the file"};
+        }
+    }
+    return {true, false, 0, ""};
+}
+
+OperationResult saveWorkspaceBookmark(const String& name, std::uint32_t offset)
+{
+    File file = SD.open(workspaceFilePath(name), FILE_READ);
+    if (!file) {
+        return {false, "Workspace file does not exist: " + name};
+    }
+    const std::size_t totalBytes = file.size();
+    const bool valid = offset <= totalBytes && isFileUtf8Boundary(file, offset, totalBytes);
+    file.close();
+    if (!valid) {
+        return {false, "Bookmark offset is outside the file or not a UTF-8 boundary"};
+    }
+    BookmarkEntriesResult loaded = loadBookmarkEntries();
+    if (!loaded.success) {
+        return {false, loaded.error};
+    }
+    for (auto& entry : loaded.entries) {
+        if (entry.name == name) {
+            entry.offset = offset;
+            return saveBookmarkEntries(loaded.entries);
+        }
+    }
+    if (loaded.entries.size() >= kMaximumWorkspaceFiles) {
+        return {false, "Workspace bookmark limit of 40 entries reached"};
+    }
+    loaded.entries.push_back({name, offset});
+    return saveBookmarkEntries(loaded.entries);
+}
+
+OperationResult clearWorkspaceBookmark(const String& name)
+{
+    BookmarkEntriesResult loaded = loadBookmarkEntries();
+    if (!loaded.success) {
+        return {false, loaded.error};
+    }
+    const auto retained = std::remove_if(
+        loaded.entries.begin(), loaded.entries.end(),
+        [&name](const BookmarkEntry& entry) { return entry.name == name; });
+    if (retained == loaded.entries.end()) {
+        return {true, ""};
+    }
+    loaded.entries.erase(retained, loaded.entries.end());
+    return saveBookmarkEntries(loaded.entries);
+}
+
 OperationResult createWorkspaceFile(const String& name)
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
@@ -496,6 +694,16 @@ OperationResult copyWorkspaceFile(const String& sourceName, const String& destin
         removeIfPresent(temporary);
         return {false, "Failed to commit copied workspace file"};
     }
+    const WorkspaceBookmarkResult bookmark = loadWorkspaceBookmark(sourceName);
+    if (!bookmark.success) {
+        return {false, "File was copied, but its bookmark could not be read: " + bookmark.error};
+    }
+    if (bookmark.found) {
+        result = saveWorkspaceBookmark(destinationName, bookmark.offset);
+        if (!result.success) {
+            return {false, "File was copied, but its bookmark could not be copied: " + result.error};
+        }
+    }
     return {true, ""};
 }
 
@@ -513,9 +721,24 @@ OperationResult renameWorkspaceFile(const String& sourceName, const String& dest
     if (SD.exists(destination)) {
         return {false, "Workspace file already exists: " + destinationName};
     }
-    return SD.rename(source, destination)
-        ? OperationResult{true, ""}
-        : OperationResult{false, "Failed to rename workspace file"};
+    const WorkspaceBookmarkResult bookmark = loadWorkspaceBookmark(sourceName);
+    if (!bookmark.success) {
+        return {false, bookmark.error};
+    }
+    if (!SD.rename(source, destination)) {
+        return {false, "Failed to rename workspace file"};
+    }
+    if (bookmark.found) {
+        OperationResult result = saveWorkspaceBookmark(destinationName, bookmark.offset);
+        if (!result.success) {
+            return {false, "File was renamed, but its bookmark could not be moved: " + result.error};
+        }
+        result = clearWorkspaceBookmark(sourceName);
+        if (!result.success) {
+            return {false, "File was renamed, but its old bookmark could not be removed: " + result.error};
+        }
+    }
+    return {true, ""};
 }
 
 OperationResult deleteWorkspaceFile(const String& name)
@@ -526,6 +749,10 @@ OperationResult deleteWorkspaceFile(const String& name)
     const String path = workspaceFilePath(name);
     if (!SD.exists(path)) {
         return {false, "Workspace file does not exist: " + name};
+    }
+    OperationResult result = clearWorkspaceBookmark(name);
+    if (!result.success) {
+        return result;
     }
     return SD.remove(path)
         ? OperationResult{true, ""}

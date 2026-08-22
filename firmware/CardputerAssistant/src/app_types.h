@@ -87,6 +87,20 @@ struct WorkspaceChunkResult {
     String error;
 };
 
+struct WorkspaceFindResult {
+    bool success;
+    bool found;
+    std::uint32_t offset;
+    String error;
+};
+
+struct WorkspaceBookmarkResult {
+    bool success;
+    bool found;
+    std::uint32_t offset;
+    String error;
+};
+
 struct VoiceRecordingResult {
     bool success;
     std::uint32_t sampleCount;
