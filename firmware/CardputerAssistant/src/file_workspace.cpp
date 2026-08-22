@@ -6,6 +6,7 @@
 #include <SD.h>
 
 #include <algorithm>
+#include <limits>
 #include <string>
 
 namespace cardputer {
@@ -77,6 +78,40 @@ OperationResult copyFile(const String& sourcePath, const String& destinationPath
         : OperationResult{false, "Workspace copy size does not match source size"};
 }
 
+OperationResult copyExactBytes(File& source,
+                               File& destination,
+                               std::size_t byteCount,
+                               const String& operation)
+{
+    std::uint8_t buffer[kCopyBufferBytes] = {};
+    std::size_t remaining = byteCount;
+    while (remaining > 0) {
+        const std::size_t blockBytes = std::min(remaining, sizeof(buffer));
+        const std::size_t readBytes = source.read(buffer, blockBytes);
+        if (readBytes != blockBytes) {
+            return {false, operation + " could not read a complete source block"};
+        }
+        const std::size_t writtenBytes = destination.write(buffer, readBytes);
+        if (writtenBytes != readBytes) {
+            return {false, operation + " could not write a complete destination block"};
+        }
+        remaining -= blockBytes;
+    }
+    return {true, ""};
+}
+
+bool isFileUtf8Boundary(File& file, std::size_t offset, std::size_t totalBytes)
+{
+    if (offset == 0 || offset == totalBytes) {
+        return true;
+    }
+    if (!file.seek(static_cast<std::uint32_t>(offset))) {
+        return false;
+    }
+    const int value = file.read();
+    return value >= 0 && (static_cast<std::uint8_t>(value) & 0xC0U) != 0x80U;
+}
+
 OperationResult commitTemporaryFile(const String& target,
                                     const String& temporary,
                                     const String& backup)
@@ -122,50 +157,22 @@ ToolExecutionResult readFileTool(const String& name,
                                  std::size_t offset,
                                  std::size_t maximumBytes)
 {
-    if (!isValidWorkspaceFilename(name.c_str())) {
-        return toolFailure("Invalid filename; use ASCII letters, digits, ._- and a text extension");
+    if (offset > std::numeric_limits<std::uint32_t>::max()) {
+        return toolFailure("read_file offset exceeds the supported 32-bit file range");
     }
-    if (maximumBytes == 0 || maximumBytes > kMaximumWorkspaceToolChunkBytes) {
-        return toolFailure("read_file max_bytes must be between 1 and 12288");
+    const WorkspaceChunkResult result = readWorkspaceFileChunk(
+        name, static_cast<std::uint32_t>(offset), maximumBytes);
+    if (!result.success) {
+        return toolFailure(result.error);
     }
-    const String path = workspaceFilePath(name);
-    File file = SD.open(path, FILE_READ);
-    if (!file) {
-        return toolFailure("Workspace file does not exist: " + name);
-    }
-    const std::size_t totalBytes = file.size();
-    if (totalBytes > kMaximumWorkspaceFileBytes) {
-        file.close();
-        return toolFailure("Workspace file exceeds the 491520-byte size limit");
-    }
-    if (offset > totalBytes || !file.seek(static_cast<std::uint32_t>(offset))) {
-        file.close();
-        return toolFailure("read_file offset is outside the file or could not be selected");
-    }
-    const std::size_t requestedBytes = std::min(maximumBytes, totalBytes - offset);
-    std::string content(requestedBytes, '\0');
-    const std::size_t readBytes = requestedBytes == 0
-        ? 0
-        : file.read(reinterpret_cast<std::uint8_t*>(&content[0]), requestedBytes);
-    file.close();
-    if (readBytes != requestedBytes) {
-        return toolFailure("microSD read ended before the requested file chunk was complete");
-    }
-    while (!content.empty() && !isValidUtf8(content)) {
-        content.pop_back();
-    }
-    if (requestedBytes > 0 && content.empty()) {
-        return toolFailure("read_file offset does not point to a UTF-8 code-point boundary");
-    }
-    const std::size_t nextOffset = offset + content.size();
     JsonDocument document;
     document["ok"] = true;
     document["name"] = name;
-    document["total_bytes"] = totalBytes;
-    document["offset"] = offset;
-    document["next_offset"] = nextOffset;
-    document["eof"] = nextOffset == totalBytes;
-    document["content"] = content;
+    document["total_bytes"] = result.totalBytes;
+    document["offset"] = result.offset;
+    document["next_offset"] = result.nextOffset;
+    document["eof"] = result.eof;
+    document["content"] = result.content;
     return {true, jsonOutput(document), ""};
 }
 
@@ -325,6 +332,204 @@ WorkspaceFilesResult listWorkspaceFiles()
         return left.name < right.name;
     });
     return {true, files, ""};
+}
+
+WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
+                                            std::uint32_t offset,
+                                            std::size_t maximumBytes)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, "", 0, 0, 0, true,
+                "Invalid filename; use ASCII letters, digits, ._- and a text extension"};
+    }
+    if (maximumBytes == 0 || maximumBytes > kMaximumWorkspaceToolChunkBytes) {
+        return {false, "", 0, 0, 0, true,
+                "Workspace read size must be between 1 and 12288 bytes"};
+    }
+    File file = SD.open(workspaceFilePath(name), FILE_READ);
+    if (!file) {
+        return {false, "", 0, 0, 0, true, "Workspace file does not exist: " + name};
+    }
+    const std::size_t totalBytes = file.size();
+    if (totalBytes > kMaximumWorkspaceFileBytes) {
+        file.close();
+        return {false, "", 0, 0, 0, true,
+                "Workspace file exceeds the 491520-byte size limit"};
+    }
+    if (offset > totalBytes || !isFileUtf8Boundary(file, offset, totalBytes) ||
+        !file.seek(offset)) {
+        file.close();
+        return {false, "", 0, 0, 0, true,
+                "Workspace offset is outside the file or not a UTF-8 boundary"};
+    }
+    const std::size_t availableBytes = totalBytes - static_cast<std::size_t>(offset);
+    const std::size_t requestedBytes = std::min(maximumBytes, availableBytes);
+    std::string content(requestedBytes, '\0');
+    const std::size_t readBytes = requestedBytes == 0
+        ? 0
+        : file.read(reinterpret_cast<std::uint8_t*>(&content[0]), requestedBytes);
+    file.close();
+    if (readBytes != requestedBytes) {
+        return {false, "", 0, 0, 0, true,
+                "microSD read ended before the requested file chunk was complete"};
+    }
+    while (!content.empty() && !isValidUtf8(content)) {
+        content.pop_back();
+    }
+    if (requestedBytes > 0 && content.empty()) {
+        return {false, "", 0, 0, 0, true,
+                "Workspace chunk does not contain a complete UTF-8 code point"};
+    }
+    const std::uint32_t nextOffset = offset + static_cast<std::uint32_t>(content.size());
+    return {true, content, offset, nextOffset, static_cast<std::uint32_t>(totalBytes),
+            nextOffset == totalBytes, ""};
+}
+
+OperationResult createWorkspaceFile(const String& name)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, "Invalid filename; use ASCII letters, digits, ._- and a text extension"};
+    }
+    const String path = workspaceFilePath(name);
+    if (SD.exists(path)) {
+        return {false, "Workspace file already exists: " + name};
+    }
+    File file = SD.open(path, FILE_WRITE);
+    if (!file) {
+        return {false, "Failed to create workspace file: " + name};
+    }
+    file.close();
+    return {true, ""};
+}
+
+OperationResult replaceWorkspaceFileRange(const String& name,
+                                          std::uint32_t offset,
+                                          std::uint32_t originalBytes,
+                                          const std::string& replacement)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, "Invalid workspace filename"};
+    }
+    if (!isValidUtf8(replacement)) {
+        return {false, "Replacement content must be valid UTF-8 text"};
+    }
+    const String target = workspaceFilePath(name);
+    File source = SD.open(target, FILE_READ);
+    if (!source) {
+        return {false, "Workspace file does not exist: " + name};
+    }
+    const std::size_t totalBytes = source.size();
+    const std::size_t rangeEnd = static_cast<std::size_t>(offset) + originalBytes;
+    if (offset > totalBytes || rangeEnd > totalBytes ||
+        !isFileUtf8Boundary(source, offset, totalBytes) ||
+        !isFileUtf8Boundary(source, rangeEnd, totalBytes)) {
+        source.close();
+        return {false, "Edit range is outside the file or splits a UTF-8 code point"};
+    }
+    const std::size_t resultBytes = totalBytes - originalBytes + replacement.size();
+    if (resultBytes > kMaximumWorkspaceFileBytes) {
+        source.close();
+        return {false, "Edited file would exceed the 491520-byte size limit"};
+    }
+    const String temporary = target + ".tmp";
+    const String backup = target + ".bak";
+    OperationResult result = prepareTemporaryPaths(temporary, backup);
+    if (!result.success) {
+        source.close();
+        return result;
+    }
+    File destination = SD.open(temporary, FILE_WRITE);
+    if (!destination) {
+        source.close();
+        return {false, "Failed to create temporary file for atomic edit"};
+    }
+    source.seek(0);
+    result = copyExactBytes(source, destination, offset, "Workspace edit prefix copy");
+    if (result.success && !source.seek(rangeEnd)) {
+        result = {false, "Workspace edit could not select the suffix"};
+    }
+    if (result.success && !replacement.empty()) {
+        const std::size_t written = destination.write(
+            reinterpret_cast<const std::uint8_t*>(replacement.data()), replacement.size());
+        if (written != replacement.size()) {
+            result = {false, "Workspace edit could not write the complete replacement"};
+        }
+    }
+    if (result.success) {
+        result = copyExactBytes(source, destination, totalBytes - rangeEnd,
+                                "Workspace edit suffix copy");
+    }
+    destination.flush();
+    source.close();
+    destination.close();
+    if (!result.success) {
+        removeIfPresent(temporary);
+        return result;
+    }
+    return commitTemporaryFile(target, temporary, backup);
+}
+
+OperationResult copyWorkspaceFile(const String& sourceName, const String& destinationName)
+{
+    if (!isValidWorkspaceFilename(sourceName.c_str()) ||
+        !isValidWorkspaceFilename(destinationName.c_str())) {
+        return {false, "Invalid source or destination workspace filename"};
+    }
+    const String source = workspaceFilePath(sourceName);
+    const String destination = workspaceFilePath(destinationName);
+    if (!SD.exists(source)) {
+        return {false, "Workspace file does not exist: " + sourceName};
+    }
+    if (SD.exists(destination)) {
+        return {false, "Workspace file already exists: " + destinationName};
+    }
+    const String temporary = destination + ".tmp";
+    OperationResult result = removeIfPresent(temporary);
+    if (result.success) {
+        result = copyFile(source, temporary);
+    }
+    if (!result.success) {
+        removeIfPresent(temporary);
+        return result;
+    }
+    if (!SD.rename(temporary, destination)) {
+        removeIfPresent(temporary);
+        return {false, "Failed to commit copied workspace file"};
+    }
+    return {true, ""};
+}
+
+OperationResult renameWorkspaceFile(const String& sourceName, const String& destinationName)
+{
+    if (!isValidWorkspaceFilename(sourceName.c_str()) ||
+        !isValidWorkspaceFilename(destinationName.c_str())) {
+        return {false, "Invalid source or destination workspace filename"};
+    }
+    const String source = workspaceFilePath(sourceName);
+    const String destination = workspaceFilePath(destinationName);
+    if (!SD.exists(source)) {
+        return {false, "Workspace file does not exist: " + sourceName};
+    }
+    if (SD.exists(destination)) {
+        return {false, "Workspace file already exists: " + destinationName};
+    }
+    return SD.rename(source, destination)
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Failed to rename workspace file"};
+}
+
+OperationResult deleteWorkspaceFile(const String& name)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, "Invalid workspace filename"};
+    }
+    const String path = workspaceFilePath(name);
+    if (!SD.exists(path)) {
+        return {false, "Workspace file does not exist: " + name};
+    }
+    return SD.remove(path)
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Failed to delete workspace file: " + name};
 }
 
 ToolExecutionResult executeWorkspaceTool(const ToolCall& call)

@@ -598,8 +598,8 @@ void showTextViewer(const String& title,
     canvas->setCursor(4, 118);
     canvas->print(clippedLine(position, 18));
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
-    canvas->setCursor(102, 118);
-    canvas->print("UP/DOWN   ESC back");
+    canvas->setCursor(91, 118);
+    canvas->print("UP/DOWN  ENTER edit  ESC");
     canvas->pushSprite(0, 0);
 }
 
@@ -643,6 +643,86 @@ void showTextEditor(const String& title,
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
     canvas->print("ENTER save  ESC cancel  Fn+3 lang");
+    canvas->pushSprite(0, 0);
+}
+
+void showFileEditor(const String& title,
+                    const std::string& input,
+                    KeyboardLayout layout,
+                    std::size_t maximumBytes,
+                    const String& position,
+                    const String& status)
+{
+    constexpr std::size_t maximumVisibleLines = 7;
+    canvas->fillScreen(TFT_BLACK);
+    canvas->fillRect(0, 0, 240, 17, TFT_NAVY);
+    canvas->drawBitmap(4, 4, kChatsIcon, 8, 8, TFT_SKYBLUE);
+    canvas->setFont(&fonts::efontCN_12);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(16, 2);
+    canvas->print(clippedLine(title, 24));
+    canvas->fillRoundRect(207, 1, 31, 15, 3,
+                          layout == KeyboardLayout::Russian ? TFT_MAROON : TFT_DARKCYAN);
+    canvas->setCursor(213, 2);
+    canvas->print(layout == KeyboardLayout::Russian ? "RU" : "EN");
+
+    const std::string visibleInput = input + "_";
+    const auto wrapped = wrapUtf8Text(visibleInput, 38);
+    const std::size_t firstLine = wrapped.size() > maximumVisibleLines
+        ? wrapped.size() - maximumVisibleLines
+        : 0;
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    for (std::size_t row = 0; row < maximumVisibleLines && firstLine + row < wrapped.size(); ++row) {
+        canvas->setCursor(3, 19 + static_cast<int>(row * 13));
+        canvas->print(wrapped[firstLine + row].c_str());
+    }
+
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(status.isEmpty() ? TFT_CYAN : TFT_YELLOW, TFT_BLACK);
+    canvas->setCursor(4, 105);
+    const String detail = status.isEmpty()
+        ? position + "  " + String(input.size()) + "/" + String(maximumBytes) + " B"
+        : status;
+    canvas->print(clippedLine(detail, 42));
+    canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(4, 120);
+    canvas->print("ENTER save  Fn+ENTER line  ESC back");
+    canvas->pushSprite(0, 0);
+}
+
+void showFilenameEntry(const String& title,
+                       const std::string& input,
+                       const String& status)
+{
+    canvas->fillScreen(TFT_BLACK);
+    canvas->fillRect(0, 0, 240, 17, TFT_NAVY);
+    canvas->drawBitmap(4, 4, kChatsIcon, 8, 8, TFT_SKYBLUE);
+    canvas->setFont(&fonts::efontCN_12);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(16, 2);
+    canvas->print(clippedLine(title, 30));
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->setCursor(5, 27);
+    canvas->print("ASCII name with extension:");
+    canvas->drawRoundRect(4, 47, 232, 25, 4, TFT_DARKGREY);
+    canvas->setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas->setCursor(9, 52);
+    canvas->print(clippedLine(String(input.c_str()) + "_", 34));
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(status.isEmpty() ? TFT_CYAN : TFT_YELLOW, TFT_BLACK);
+    canvas->setCursor(5, 83);
+    canvas->print(clippedLine(status.isEmpty()
+                                  ? String(".txt .md .json .csv .html .svg")
+                                  : status,
+                              42));
+    canvas->setCursor(5, 101);
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->print(String(input.size()) + "/48 bytes");
+    canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(4, 120);
+    canvas->print("ENTER confirm   ESC cancel");
     canvas->pushSprite(0, 0);
 }
 

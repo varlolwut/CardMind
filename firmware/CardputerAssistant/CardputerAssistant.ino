@@ -39,6 +39,7 @@ constexpr std::uint8_t kTtsVolumeStep = 64;
 constexpr std::uint32_t kBatteryRefreshIntervalMs = 30000;
 constexpr std::size_t kFileViewerChunkBytes = 2048;
 constexpr std::size_t kFileViewerPageLines = 8;
+constexpr std::size_t kFileEditorMaximumBytes = 4096;
 
 enum class Screen {
     Chat,
@@ -47,7 +48,11 @@ enum class Screen {
     DeviceMenu,
     FilesMenu,
     WorkspaceFileList,
+    FileActions,
     FileViewer,
+    FileEditor,
+    FileNameEntry,
+    DeleteFileConfirm,
     Diagnostics,
     ControlsHelp,
     ModelPicker,
@@ -57,6 +62,12 @@ enum class Screen {
     DeleteChatConfirm,
     WifiPicker,
     WifiPassword,
+};
+
+enum class FileNameAction {
+    Create,
+    Copy,
+    Rename,
 };
 
 cardputer::Settings settings;
@@ -93,6 +104,7 @@ std::size_t voiceMenuIndex = 0;
 std::size_t deviceMenuIndex = 0;
 std::size_t filesMenuIndex = 0;
 std::size_t workspaceFileIndex = 0;
+std::size_t fileActionsIndex = 0;
 std::size_t diagnosticsIndex = 0;
 std::size_t controlsHelpIndex = 0;
 std::size_t modelPickerIndex = 0;
@@ -100,6 +112,7 @@ std::size_t wifiPickerIndex = 0;
 std::vector<cardputer::WifiNetwork> scannedWifiNetworks;
 std::vector<cardputer::WorkspaceFile> workspaceFiles;
 String fileViewerName;
+std::string fileViewerContent;
 std::vector<std::string> fileViewerLines;
 std::vector<std::uint32_t> fileViewerPreviousOffsets;
 std::size_t fileViewerFirstLine = 0;
@@ -107,6 +120,15 @@ std::uint32_t fileViewerChunkOffset = 0;
 std::uint32_t fileViewerNextOffset = 0;
 std::uint32_t fileViewerTotalBytes = 0;
 bool fileViewerEof = true;
+std::string fileEditorInput;
+std::uint32_t fileEditorOffset = 0;
+std::uint32_t fileEditorOriginalBytes = 0;
+String fileEditorStatus;
+FileNameAction fileNameAction = FileNameAction::Create;
+std::string fileNameInput;
+String fileNameSource;
+String fileNameStatus;
+String deleteFileName;
 std::string wifiPasswordInput;
 String menuStatus;
 bool voiceStorageReady = false;
@@ -133,6 +155,9 @@ void renderChatList();
 void renderControlsHelp();
 void renderDeviceMenu();
 void renderDiagnostics();
+void renderFileActions();
+void renderFileEditor();
+void renderFileNameEntry();
 void renderFileViewer();
 void renderFilesMenu();
 void renderModelPicker();
@@ -385,8 +410,21 @@ void render()
     case Screen::WorkspaceFileList:
         renderWorkspaceFileList();
         return;
+    case Screen::FileActions:
+        renderFileActions();
+        return;
     case Screen::FileViewer:
         renderFileViewer();
+        return;
+    case Screen::FileEditor:
+        renderFileEditor();
+        return;
+    case Screen::FileNameEntry:
+        renderFileNameEntry();
+        return;
+    case Screen::DeleteFileConfirm:
+        cardputer::showConfirmation("DELETE FILE", deleteFileName,
+                                    "ENTER delete  ESC cancel");
         return;
     case Screen::Diagnostics:
         renderDiagnostics();
@@ -631,6 +669,81 @@ void runStorageTest()
                   fileVerified && fileCleanup ? "pass" : "failed");
 }
 
+void runFileWorkspaceEditTest()
+{
+    const String sourceName = "firmware_editor_test.txt";
+    const String copyName = "firmware_editor_copy.txt";
+    const String renamedName = "firmware_editor_renamed.txt";
+    const String sourcePath = cardputer::workspaceFilePath(sourceName);
+    const String copyPath = cardputer::workspaceFilePath(copyName);
+    const String renamedPath = cardputer::workspaceFilePath(renamedName);
+    if (SD.exists(sourcePath)) {
+        SD.remove(sourcePath);
+    }
+    if (SD.exists(copyPath)) {
+        SD.remove(copyPath);
+    }
+    if (SD.exists(renamedPath)) {
+        SD.remove(renamedPath);
+    }
+    cardputer::OperationResult result = cardputer::createWorkspaceFile(sourceName);
+    if (result.success) {
+        File file = SD.open(sourcePath, FILE_WRITE);
+        if (!file) {
+            result = {false, "Failed to open maximum-size workspace test file"};
+        } else {
+            std::uint8_t block[1024] = {};
+            std::fill(block, block + sizeof(block), static_cast<std::uint8_t>('a'));
+            std::size_t written = 0;
+            while (result.success && written < cardputer::kMaximumWorkspaceFileBytes) {
+                const std::size_t blockBytes = std::min(
+                    sizeof(block), cardputer::kMaximumWorkspaceFileBytes - written);
+                if (file.write(block, blockBytes) != blockBytes) {
+                    result = {false, "Failed to write maximum-size workspace test file"};
+                }
+                written += blockBytes;
+            }
+            file.flush();
+            file.close();
+        }
+    }
+    constexpr std::uint32_t editOffset = 245760;
+    const std::string replacement = "мир";
+    if (result.success) {
+        result = cardputer::replaceWorkspaceFileRange(
+            sourceName, editOffset, static_cast<std::uint32_t>(replacement.size()), replacement);
+    }
+    const cardputer::WorkspaceChunkResult read = result.success
+        ? cardputer::readWorkspaceFileChunk(sourceName, editOffset, 32)
+        : cardputer::WorkspaceChunkResult{false, "", 0, 0, 0, true, result.error};
+    if (result.success && (!read.success || read.content.rfind(replacement, 0) != 0 ||
+                           read.totalBytes != cardputer::kMaximumWorkspaceFileBytes)) {
+        result = {false, "Workspace editor content verification failed"};
+    }
+    if (result.success) {
+        result = cardputer::copyWorkspaceFile(sourceName, copyName);
+    }
+    if (result.success) {
+        result = cardputer::renameWorkspaceFile(copyName, renamedName);
+    }
+    if (result.success) {
+        result = cardputer::deleteWorkspaceFile(sourceName);
+    }
+    if (result.success) {
+        result = cardputer::deleteWorkspaceFile(renamedName);
+    }
+    if (SD.exists(sourcePath)) {
+        SD.remove(sourcePath);
+    }
+    if (SD.exists(copyPath)) {
+        SD.remove(copyPath);
+    }
+    if (SD.exists(renamedPath)) {
+        SD.remove(renamedPath);
+    }
+    Serial.printf("FILETEST result=%s\n", result.success ? "pass" : "failed");
+}
+
 void runToolApiTest()
 {
     ensureNetworkReady();
@@ -679,6 +792,10 @@ void handleSerialCommand(const String& command)
     }
     if (command == "STORAGETEST") {
         runStorageTest();
+        return;
+    }
+    if (command == "FILETEST") {
+        runFileWorkspaceEditTest();
         return;
     }
     if (command == "TOOLTEST") {
@@ -1202,12 +1319,24 @@ std::vector<String> diagnosticsItems()
 
 std::vector<String> workspaceFileItems()
 {
-    std::vector<String> items;
-    items.reserve(workspaceFiles.size());
+    std::vector<String> items = {"+ New text file"};
+    items.reserve(workspaceFiles.size() + 1);
     for (const auto& file : workspaceFiles) {
         items.push_back(file.name + "  " + String(file.size) + " B");
     }
     return items;
+}
+
+std::vector<String> fileActionItems()
+{
+    return {
+        "View file",
+        "Edit current chunk",
+        "Save copy as...",
+        "Rename...",
+        "Delete file",
+        "Back",
+    };
 }
 
 std::vector<cardputer::CarouselCard> carouselCards()
@@ -1339,12 +1468,34 @@ void renderWorkspaceFileList()
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
 }
 
+void renderFileActions()
+{
+    cardputer::showSelectionList(fileViewerName, fileActionItems(), fileActionsIndex,
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
 void renderFileViewer()
 {
     const String position = String(fileViewerChunkOffset) + "/" +
         String(fileViewerTotalBytes) + " B";
     cardputer::showTextViewer(fileViewerName, fileViewerLines,
                               fileViewerFirstLine, position);
+}
+
+void renderFileEditor()
+{
+    const String position = String(fileEditorOffset) + "/" + String(fileViewerTotalBytes) + " B";
+    cardputer::showFileEditor(fileViewerName, fileEditorInput, keyboardLayout,
+                             kFileEditorMaximumBytes, position, fileEditorStatus);
+}
+
+void renderFileNameEntry()
+{
+    const String title = fileNameAction == FileNameAction::Create
+        ? String("CREATE FILE")
+        : (fileNameAction == FileNameAction::Copy ? String("SAVE COPY AS")
+                                                   : String("RENAME FILE"));
+    cardputer::showFilenameEntry(title, fileNameInput, fileNameStatus);
 }
 
 void renderDiagnostics()
@@ -1433,54 +1584,50 @@ void openWorkspaceFileList()
     renderWorkspaceFileList();
 }
 
-cardputer::OperationResult loadFileViewerChunk(std::uint32_t offset)
+cardputer::OperationResult selectWorkspaceFileByName(const String& name)
 {
-    JsonDocument request;
-    request["name"] = fileViewerName;
-    request["offset"] = offset;
-    request["max_bytes"] = kFileViewerChunkBytes;
-    String arguments;
-    serializeJson(request, arguments);
-    const cardputer::ToolExecutionResult result = cardputer::executeWorkspaceTool(
-        {"viewer-read", "read_file", arguments.c_str()});
+    const cardputer::WorkspaceFilesResult result = cardputer::listWorkspaceFiles();
     if (!result.success) {
         return {false, result.error};
     }
-
-    JsonDocument response;
-    const DeserializationError parseError = deserializeJson(response, result.output);
-    if (parseError) {
-        return {false, "File viewer could not parse read_file output: " + String(parseError.c_str())};
+    workspaceFiles = result.files;
+    for (std::size_t index = 0; index < workspaceFiles.size(); ++index) {
+        if (workspaceFiles[index].name == name) {
+            workspaceFileIndex = index + 1;
+            return {true, ""};
+        }
     }
-    if (!response["content"].is<const char*>() ||
-        !response["offset"].is<std::uint32_t>() ||
-        !response["next_offset"].is<std::uint32_t>() ||
-        !response["total_bytes"].is<std::uint32_t>() ||
-        !response["eof"].is<bool>()) {
-        return {false, "File viewer read_file output is missing required fields"};
-    }
+    return {false, "Workspace file was not found after the operation: " + name};
+}
 
-    const std::string content = response["content"].as<const char*>();
-    fileViewerLines = cardputer::wrapUtf8Text(content, 38);
+cardputer::OperationResult loadFileViewerChunk(std::uint32_t offset)
+{
+    const cardputer::WorkspaceChunkResult result = cardputer::readWorkspaceFileChunk(
+        fileViewerName, offset, kFileViewerChunkBytes);
+    if (!result.success) {
+        return {false, result.error};
+    }
+    fileViewerContent = result.content;
+    fileViewerLines = cardputer::wrapUtf8Text(fileViewerContent, 38);
     if (fileViewerLines.empty()) {
         fileViewerLines.push_back("");
     }
-    fileViewerChunkOffset = response["offset"].as<std::uint32_t>();
-    fileViewerNextOffset = response["next_offset"].as<std::uint32_t>();
-    fileViewerTotalBytes = response["total_bytes"].as<std::uint32_t>();
-    fileViewerEof = response["eof"].as<bool>();
+    fileViewerChunkOffset = result.offset;
+    fileViewerNextOffset = result.nextOffset;
+    fileViewerTotalBytes = result.totalBytes;
+    fileViewerEof = result.eof;
     fileViewerFirstLine = 0;
     return {true, ""};
 }
 
 void openSelectedWorkspaceFile()
 {
-    if (workspaceFileIndex >= workspaceFiles.size()) {
+    if (workspaceFileIndex == 0 || workspaceFileIndex > workspaceFiles.size()) {
         menuStatus = "File selection is out of range";
         renderWorkspaceFileList();
         return;
     }
-    fileViewerName = workspaceFiles[workspaceFileIndex].name;
+    fileViewerName = workspaceFiles[workspaceFileIndex - 1].name;
     fileViewerPreviousOffsets.clear();
     const cardputer::OperationResult result = loadFileViewerChunk(0);
     if (!result.success) {
@@ -1489,8 +1636,81 @@ void openSelectedWorkspaceFile()
         return;
     }
     menuStatus = "";
-    currentScreen = Screen::FileViewer;
-    renderFileViewer();
+    fileActionsIndex = 0;
+    currentScreen = Screen::FileActions;
+    renderFileActions();
+}
+
+void beginFileEditor()
+{
+    fileEditorInput = fileViewerContent;
+    fileEditorOffset = fileViewerChunkOffset;
+    fileEditorOriginalBytes = fileViewerNextOffset - fileViewerChunkOffset;
+    fileEditorStatus = "";
+    currentScreen = Screen::FileEditor;
+    renderFileEditor();
+}
+
+void beginFileNameEntry(FileNameAction action, const String& sourceName)
+{
+    fileNameAction = action;
+    fileNameSource = sourceName;
+    fileNameInput = action == FileNameAction::Rename ? std::string(sourceName.c_str()) : std::string();
+    fileNameStatus = "";
+    currentScreen = Screen::FileNameEntry;
+    renderFileNameEntry();
+}
+
+void completeFileNameEntry()
+{
+    if (!cardputer::isValidWorkspaceFilename(fileNameInput)) {
+        fileNameStatus = "Use a valid text filename and extension";
+        renderFileNameEntry();
+        return;
+    }
+    const String destination = fileNameInput.c_str();
+    cardputer::OperationResult result = {false, "File action was not selected"};
+    if (fileNameAction == FileNameAction::Create) {
+        result = cardputer::createWorkspaceFile(destination);
+    } else if (fileNameAction == FileNameAction::Copy) {
+        result = cardputer::copyWorkspaceFile(fileNameSource, destination);
+    } else {
+        if (destination == fileNameSource) {
+            fileNameStatus = "Choose a different filename";
+            renderFileNameEntry();
+            return;
+        }
+        result = cardputer::renameWorkspaceFile(fileNameSource, destination);
+    }
+    if (!result.success) {
+        fileNameStatus = result.error;
+        renderFileNameEntry();
+        return;
+    }
+    fileViewerName = destination;
+    fileViewerPreviousOffsets.clear();
+    result = selectWorkspaceFileByName(destination);
+    if (result.success) {
+        result = loadFileViewerChunk(0);
+    }
+    if (!result.success) {
+        currentScreen = Screen::WorkspaceFileList;
+        menuStatus = result.error;
+        renderWorkspaceFileList();
+        return;
+    }
+    fileNameInput.clear();
+    fileNameSource = "";
+    fileNameStatus = "";
+    if (fileNameAction == FileNameAction::Create) {
+        beginFileEditor();
+        return;
+    }
+    fileActionsIndex = 0;
+    menuStatus = fileNameAction == FileNameAction::Copy ? String("File copy created")
+                                                         : String("File renamed");
+    currentScreen = Screen::FileActions;
+    renderFileActions();
 }
 
 void openWifiPicker(Screen returnScreen)
@@ -2088,28 +2308,70 @@ void handleKeyboard()
     }
 
     if (currentScreen == Screen::WorkspaceFileList) {
-        const std::size_t itemCount = workspaceFiles.size();
+        const std::size_t itemCount = workspaceFiles.size() + 1;
         if (cancelPressed) {
             currentScreen = Screen::FilesMenu;
             menuStatus = "";
             renderFilesMenu();
-        } else if (upPressed && itemCount > 0) {
+        } else if (upPressed) {
             workspaceFileIndex = workspaceFileIndex > 0 ? workspaceFileIndex - 1 : 0;
             renderWorkspaceFileList();
-        } else if (downPressed && itemCount > 0) {
+        } else if (downPressed) {
             workspaceFileIndex = std::min(workspaceFileIndex + 1, itemCount - 1);
             renderWorkspaceFileList();
-        } else if (enterPressed && itemCount > 0) {
-            openSelectedWorkspaceFile();
+        } else if (enterPressed) {
+            if (workspaceFileIndex == 0) {
+                beginFileNameEntry(FileNameAction::Create, "");
+            } else {
+                openSelectedWorkspaceFile();
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::FileActions) {
+        const std::size_t itemCount = fileActionItems().size();
+        if (cancelPressed) {
+            currentScreen = Screen::WorkspaceFileList;
+            menuStatus = "";
+            renderWorkspaceFileList();
+        } else if (upPressed) {
+            fileActionsIndex = fileActionsIndex > 0 ? fileActionsIndex - 1 : 0;
+            menuStatus = "";
+            renderFileActions();
+        } else if (downPressed) {
+            fileActionsIndex = std::min(fileActionsIndex + 1, itemCount - 1);
+            menuStatus = "";
+            renderFileActions();
+        } else if (enterPressed) {
+            if (fileActionsIndex == 0) {
+                currentScreen = Screen::FileViewer;
+                renderFileViewer();
+            } else if (fileActionsIndex == 1) {
+                beginFileEditor();
+            } else if (fileActionsIndex == 2) {
+                beginFileNameEntry(FileNameAction::Copy, fileViewerName);
+            } else if (fileActionsIndex == 3) {
+                beginFileNameEntry(FileNameAction::Rename, fileViewerName);
+            } else if (fileActionsIndex == 4) {
+                deleteFileName = fileViewerName;
+                currentScreen = Screen::DeleteFileConfirm;
+                cardputer::showConfirmation("DELETE FILE", deleteFileName,
+                                            "ENTER delete  ESC cancel");
+            } else {
+                currentScreen = Screen::WorkspaceFileList;
+                menuStatus = "";
+                renderWorkspaceFileList();
+            }
         }
         return;
     }
 
     if (currentScreen == Screen::FileViewer) {
         if (cancelPressed) {
-            currentScreen = Screen::WorkspaceFileList;
+            currentScreen = Screen::FileActions;
             menuStatus = "";
-            renderWorkspaceFileList();
+            renderFileActions();
         } else if (upPressed) {
             if (fileViewerFirstLine > 0) {
                 fileViewerFirstLine = fileViewerFirstLine > kFileViewerPageLines - 1
@@ -2149,6 +2411,133 @@ void handleKeyboard()
                     renderFileViewer();
                 }
             }
+        } else if (enterPressed) {
+            beginFileEditor();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::FileEditor) {
+        if (cancelPressed) {
+            fileEditorInput.clear();
+            fileEditorStatus = "";
+            currentScreen = Screen::FileViewer;
+            renderFileViewer();
+        } else if (keys.fn && keys.f3) {
+            keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
+                ? cardputer::KeyboardLayout::Russian
+                : cardputer::KeyboardLayout::English;
+            fileEditorStatus = keyboardLayout == cardputer::KeyboardLayout::English
+                ? String("English layout")
+                : String("Russian layout");
+            renderFileEditor();
+        } else if (clearDraftPressed) {
+            fileEditorInput.clear();
+            fileEditorStatus = "Chunk cleared; ENTER to save";
+            renderFileEditor();
+        } else if (backspacePressed) {
+            if (!fileEditorInput.empty()) {
+                fileEditorInput = cardputer::removeLastUtf8CodePoint(fileEditorInput);
+            }
+            fileEditorStatus = "";
+            renderFileEditor();
+        } else if (keys.fn && enterPressed) {
+            if (fileEditorInput.size() >= kFileEditorMaximumBytes) {
+                fileEditorStatus = "Editor limit: 4096 bytes";
+            } else {
+                fileEditorInput += '\n';
+                fileEditorStatus = "";
+            }
+            renderFileEditor();
+        } else if (enterPressed) {
+            cardputer::markOperation("file_edit");
+            const cardputer::OperationResult result = cardputer::replaceWorkspaceFileRange(
+                fileViewerName, fileEditorOffset, fileEditorOriginalBytes, fileEditorInput);
+            cardputer::markOperation("idle");
+            if (!result.success) {
+                fileEditorStatus = result.error;
+                renderFileEditor();
+                return;
+            }
+            const std::uint32_t savedOffset = fileEditorOffset;
+            fileEditorInput.clear();
+            fileEditorStatus = "";
+            const cardputer::OperationResult loaded = loadFileViewerChunk(savedOffset);
+            if (!loaded.success) {
+                currentScreen = Screen::WorkspaceFileList;
+                menuStatus = loaded.error;
+                renderWorkspaceFileList();
+                return;
+            }
+            currentScreen = Screen::FileViewer;
+            menuStatus = "Chunk saved atomically";
+            renderFileViewer();
+        } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
+            for (const char character : printableNewKeys(newPresses)) {
+                const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
+                    ? cardputer::mapKeyToRussian(character)
+                    : std::string(1, character);
+                if (fileEditorInput.size() + text.size() > kFileEditorMaximumBytes) {
+                    fileEditorStatus = "Editor limit: 4096 bytes";
+                    break;
+                }
+                fileEditorInput += text;
+                fileEditorStatus = "";
+            }
+            renderFileEditor();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::FileNameEntry) {
+        if (cancelPressed) {
+            fileNameInput.clear();
+            fileNameStatus = "";
+            currentScreen = fileNameAction == FileNameAction::Create
+                ? Screen::WorkspaceFileList
+                : Screen::FileActions;
+            render();
+        } else if (backspacePressed) {
+            if (!fileNameInput.empty()) {
+                fileNameInput = cardputer::removeLastUtf8CodePoint(fileNameInput);
+            }
+            fileNameStatus = "";
+            renderFileNameEntry();
+        } else if (enterPressed) {
+            completeFileNameEntry();
+        } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
+            for (const char character : printableNewKeys(newPresses)) {
+                if (fileNameInput.size() >= 48) {
+                    fileNameStatus = "Filename limit: 48 bytes";
+                    break;
+                }
+                fileNameInput += character;
+                fileNameStatus = "";
+            }
+            renderFileNameEntry();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::DeleteFileConfirm) {
+        if (cancelPressed) {
+            deleteFileName = "";
+            currentScreen = Screen::FileActions;
+            renderFileActions();
+        } else if (enterPressed) {
+            cardputer::markOperation("file_delete");
+            const cardputer::OperationResult result = cardputer::deleteWorkspaceFile(deleteFileName);
+            cardputer::markOperation("idle");
+            deleteFileName = "";
+            if (!result.success) {
+                currentScreen = Screen::FileActions;
+                menuStatus = result.error;
+                renderFileActions();
+                return;
+            }
+            openWorkspaceFileList();
+            menuStatus = "File deleted";
+            renderWorkspaceFileList();
         }
         return;
     }

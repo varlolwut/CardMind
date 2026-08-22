@@ -75,6 +75,15 @@ void showTextEditor(const String& title,
                     KeyboardLayout layout,
                     std::size_t maximumBytes,
                     const String& status);
+void showFileEditor(const String& title,
+                    const std::string& input,
+                    KeyboardLayout layout,
+                    std::size_t maximumBytes,
+                    const String& position,
+                    const String& status);
+void showFilenameEntry(const String& title,
+                       const std::string& input,
+                       const String& status);
 void showPasswordEntry(const String& ssid, std::size_t passwordLength, const String& status);
 void showBusyScreen(const String& title, const String& message);
 void showConfirmation(const String& title, const String& message, const String& footer);
