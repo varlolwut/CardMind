@@ -79,6 +79,14 @@ Cardputer ADV.
 NaiveProxy is not planned as an on-device component. Its Chromium network-stack
 dependency and browser-fingerprint goal do not fit the ESP32-S3 platform. CardMind
 can use a router, travel router, OpenWrt device, or other gateway that runs
-NaiveProxy for the whole Wi-Fi network. Any future embedded tunnel or proxy client
-will be evaluated separately and will not be described as NaiveProxy-compatible
-without a real interoperable implementation.
+NaiveProxy for the whole Wi-Fi network.
+
+- Prototype standard WireGuard first because maintained ESP32/lwIP implementations
+  exist; measure heap, throughput, reconnect behavior, DNS, and TLS over the tunnel.
+- Evaluate AmneziaWG only as a separate protocol-port project after standard
+  WireGuard is stable. Do not claim AmneziaWG compatibility by merely changing
+  WireGuard configuration fields.
+- Do not embed sing-box or Xray-core: their Go runtime, protocol matrix, and uTLS or
+  REALITY fingerprinting requirements do not fit the current firmware architecture.
+- Prefer an external gateway for NaiveProxy, sing-box, AmneziaWG, or VLESS/REALITY
+  when reliable censorship-resistant transport is required.
