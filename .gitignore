@@ -1,0 +1,12 @@
+build/
+vendor/
+toolchain/data/
+toolchain/downloads/
+toolchain/user/
+*.obj
+*.exe
+*.bin
+*.elf
+*.map
+*.hex
+*.uf2

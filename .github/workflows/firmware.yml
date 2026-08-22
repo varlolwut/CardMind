@@ -1,0 +1,100 @@
+name: Firmware
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-main
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run host tests
+        run: |
+          mkdir -p build
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tests/host_tests.cpp \
+            firmware/CardputerAssistant/src/text_utils.cpp \
+            firmware/CardputerAssistant/src/audio_utils.cpp \
+            -o build/host-tests
+          ./build/host-tests
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install M5Stack ESP32 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+          arduino-cli core update-index
+          arduino-cli core install m5stack:esp32@3.2.1
+
+      - name: Fetch pinned libraries
+        run: |
+          mkdir -p .ci-libs
+          git clone --filter=blob:none https://github.com/m5stack/M5Cardputer.git .ci-libs/M5Cardputer
+          git -C .ci-libs/M5Cardputer checkout f1392858b9994c3547120e602a57d3553d16ab01
+          git clone --filter=blob:none https://github.com/m5stack/M5Unified.git .ci-libs/M5Unified
+          git -C .ci-libs/M5Unified checkout 774d920cd6851a5231748b56ece1b073645f313f
+          git clone --filter=blob:none https://github.com/m5stack/M5GFX.git .ci-libs/M5GFX
+          git -C .ci-libs/M5GFX checkout 93b480bb349749202c8a2a953065c8ae95f58320
+          git clone --branch v7.2.1 --depth 1 https://github.com/bblanchon/ArduinoJson.git .ci-libs/ArduinoJson
+
+      - name: Compile Cardputer ADV firmware
+        run: |
+          mkdir -p dist
+          arduino-cli compile \
+            --fqbn "m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=default_8MB" \
+            --libraries .ci-libs \
+            --output-dir dist \
+            firmware/CardputerAssistant
+          cp dist/CardputerAssistant.ino.bin dist/CardMind-cardputer-adv.bin
+          cp dist/CardputerAssistant.ino.merged.bin dist/CardMind-cardputer-adv-merged.bin
+          cd dist
+          sha256sum CardMind-cardputer-adv.bin CardMind-cardputer-adv-merged.bin > SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardMind-cardputer-adv
+          path: |
+            dist/CardMind-cardputer-adv.bin
+            dist/CardMind-cardputer-adv-merged.bin
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(sed -n 's/.*kFirmwareVersion = "\([^"]*\)".*/\1/p' firmware/CardputerAssistant/CardputerAssistant.ino)"
+          test -n "$VERSION"
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist/CardMind-cardputer-adv.bin \
+              dist/CardMind-cardputer-adv-merged.bin \
+              dist/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$TAG" \
+              dist/CardMind-cardputer-adv.bin \
+              dist/CardMind-cardputer-adv-merged.bin \
+              dist/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" \
+              --title "CardMind $TAG" \
+              --generate-notes
+          fi
