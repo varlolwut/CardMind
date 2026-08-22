@@ -11,6 +11,7 @@
 
 #include <ArduinoJson.h>
 #include <M5Cardputer.h>
+#include <SD.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -30,6 +31,7 @@ constexpr std::uint32_t kLoginLockMs = 30U * 1000U;
 constexpr std::size_t kMaximumLoginFailures = 5;
 constexpr std::size_t kMaximumPromptBytes = 1200;
 constexpr std::size_t kMaximumStateHistoryBytes = 12000;
+constexpr std::size_t kMaximumWebFileChunkBytes = 12288;
 
 WebServer server(80);
 Settings consoleSettings;
@@ -46,6 +48,26 @@ std::uint32_t loginLockedUntil = 0;
 std::size_t loginFailures = 0;
 bool exitRequested = false;
 bool routesConfigured = false;
+
+bool parseUnsignedArgument(const String& value, std::uint32_t& result)
+{
+    if (value.isEmpty()) {
+        return false;
+    }
+    std::uint64_t parsed = 0;
+    for (std::size_t index = 0; index < value.length(); ++index) {
+        const char character = value[index];
+        if (character < '0' || character > '9') {
+            return false;
+        }
+        parsed = parsed * 10U + static_cast<std::uint64_t>(character - '0');
+        if (parsed > UINT32_MAX) {
+            return false;
+        }
+    }
+    result = static_cast<std::uint32_t>(parsed);
+    return true;
+}
 
 void clearConsoleSecrets()
 {
@@ -234,25 +256,45 @@ header strong{flex:1;color:#67e8f9}.layout{max-width:900px;margin:auto;padding:1
 .user{background:#123b4a}.assistant{background:#25284a}.stream{color:#fde68a}
 textarea,input,select,button{box-sizing:border-box;background:#081524;color:#fff;border:1px solid #405b7d;border-radius:8px;padding:10px}
 textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;background:#5eead4;color:#06201c;border:0;font-weight:800}
+.danger{background:#fb7185;color:#300}.file-editor{min-height:260px;font:14px ui-monospace,monospace}
 .row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}small{color:#9fb3ca}#status{color:#fde68a}</style></head><body>
 <header><strong>CardMind</strong><span id="device"></span><button id="logout">Logout</button></header>
 <main class="layout"><section class="card"><div class="row"><select id="chats"></select><button id="newChat">New chat</button></div>
+<div class="row"><button id="renameChat">Rename</button><button class="danger" id="deleteChat">Delete</button></div>
 <p id="status"></p><div id="messages"></div></section><section class="card"><textarea id="prompt" maxlength="1200" placeholder="Message CardMind..."></textarea>
 <div class="row"><button id="send">Send</button><button id="refresh">Refresh</button></div></section>
-<section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section></main>
+<section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section>
+<section class="card"><h2>Connection</h2><label>OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180">
+<label>Model</label><input id="model" maxlength="120"><button id="saveSettings">Save non-secret settings</button><small>API keys remain write-only and are never sent to this page.</small></section>
+<section class="card"><h2>microSD files</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button id="downloadFile">Download</button></div>
+<textarea class="file-editor" id="fileContent" maxlength="12288" placeholder="Select a workspace file"></textarea><p id="filePosition"></p>
+<div class="row"><button id="previousFilePage">Previous</button><button id="nextFilePage">Next</button><button id="saveFile">Save chunk</button></div>
+<div class="row"><button id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></section></main>
 <script>)HTML";
     page += "const csrf='" + csrfToken + "';\n";
     page += R"HTML(
-const q=s=>document.querySelector(s);let state=null;
-async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}return r}
+const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[];
+async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}if(!r.ok){let message=`HTTP ${r.status}`;try{message=(await r.json()).error||message}catch{}throw new Error(message)}return r}
 function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;q('#status').textContent=s.status||'';
 q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=c.title;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
 q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}
-q('#instructions').value=s.instructions||'';q('#messages').scrollTop=q('#messages').scrollHeight}
+q('#instructions').value=s.instructions||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
+const selected=q('#files').value;q('#files').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#files').append(o)}q('#messages').scrollTop=q('#messages').scrollHeight}
 async function refresh(){const r=await request('/api/state');render(await r.json())}
+async function post(path,values){return request(path,{method:'POST',body:new URLSearchParams(values)})}
+async function openFile(offset,pushBack){const selected=q('#files').value;if(!selected)return;if(pushBack&&fileName===selected)fileBack.push(fileOffset);else if(fileName!==selected)fileBack=[];const r=await request(`/api/file?name=${encodeURIComponent(selected)}&offset=${offset}`);const f=await r.json();fileName=selected;fileOffset=f.offset;fileNextOffset=f.next_offset;fileOriginalBytes=f.next_offset-f.offset;fileEof=f.eof;q('#fileContent').value=f.content;q('#filePosition').textContent=`${fileOffset}-${fileNextOffset} / ${f.total_bytes} bytes`}
 q('#refresh').onclick=refresh;q('#chats').onchange=async()=>{await request('/api/chat/select',{method:'POST',body:new URLSearchParams({id:q('#chats').value})});await refresh()};
 q('#newChat').onclick=async()=>{await request('/api/chat/new',{method:'POST'});await refresh()};
+q('#renameChat').onclick=async()=>{const title=prompt('Chat title',state.active_chat_title);if(title){await post('/api/chat/rename',{title});await refresh()}};
+q('#deleteChat').onclick=async()=>{if(confirm(`Delete chat "${state.active_chat_title}"?`)){await post('/api/chat/delete',{});await refresh()}};
 q('#saveInstructions').onclick=async()=>{await request('/api/chat/instructions',{method:'POST',body:new URLSearchParams({instructions:q('#instructions').value})});await refresh()};
+q('#saveSettings').onclick=async()=>{await post('/api/settings',{api_base_url:q('#apiBaseUrl').value,model:q('#model').value});await refresh()};
+q('#openFile').onclick=()=>openFile(0,false);q('#nextFilePage').onclick=()=>{if(!fileEof)openFile(fileNextOffset,true)};
+q('#previousFilePage').onclick=()=>{if(fileBack.length)openFile(fileBack.pop(),false)};
+q('#saveFile').onclick=async()=>{if(!fileName)return;await post('/api/file/save',{name:fileName,offset:String(fileOffset),original_bytes:String(fileOriginalBytes),content:q('#fileContent').value});await refresh();await openFile(fileOffset,false)};
+q('#downloadFile').onclick=()=>{const name=q('#files').value;if(name)location=`/api/file/download?name=${encodeURIComponent(name)}`};
+q('#renameFile').onclick=async()=>{const name=q('#files').value,newName=prompt('New filename',name);if(newName&&newName!==name){await post('/api/file/rename',{name,new_name:newName});fileName='';await refresh()}};
+q('#deleteFile').onclick=async()=>{const name=q('#files').value;if(name&&confirm(`Delete ${name}?`)){await post('/api/file/delete',{name});fileName='';q('#fileContent').value='';q('#filePosition').textContent='';await refresh()}};
 q('#send').onclick=async()=>{const prompt=q('#prompt').value.trim();if(!prompt)return;q('#send').disabled=true;q('#status').textContent='Streaming...';
 const d=document.createElement('div');d.className='message assistant stream';d.textContent='AI: ';q('#messages').append(d);
 try{const r=await request('/api/prompt',{method:'POST',body:new URLSearchParams({prompt})});const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';
@@ -336,6 +378,8 @@ void handleState()
     document["active_chat_title"] = activeChat.summary.title;
     document["instructions"] = activeChat.instructions;
     document["status"] = consoleStatus;
+    document["model"] = consoleSettings.model;
+    document["api_base_url"] = consoleSettings.apiBaseUrl;
     JsonArray chats = document["chats"].to<JsonArray>();
     for (const auto& chat : consoleChats) {
         JsonObject item = chats.add<JsonObject>();
@@ -357,6 +401,17 @@ void handleState()
         JsonObject item = messages.add<JsonObject>();
         item["role"] = activeChat.messages[index].role;
         item["content"] = activeChat.messages[index].content;
+    }
+    const WorkspaceFilesResult workspace = listWorkspaceFiles();
+    if (!workspace.success) {
+        sendJsonError(500, workspace.error);
+        return;
+    }
+    JsonArray files = document["files"].to<JsonArray>();
+    for (const auto& file : workspace.files) {
+        JsonObject item = files.add<JsonObject>();
+        item["name"] = file.name;
+        item["size"] = file.size;
     }
     sendJson(200, document);
 }
@@ -535,6 +590,203 @@ void handleInstructions()
     sendJson(200, document);
 }
 
+void handleRenameChat()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const std::string requestedTitle = server.arg("title").c_str();
+    if (requestedTitle.empty() || requestedTitle.size() > 256 || !isValidUtf8(requestedTitle)) {
+        sendJsonError(400, "Chat title must be valid UTF-8 between 1 and 256 bytes");
+        return;
+    }
+    activeChat.summary.title = makeChatTitle(requestedTitle, kMaximumChatTitleCells).c_str();
+    activeChat.summary.updatedAt = currentTimestamp();
+    OperationResult result = saveChat(activeChat);
+    if (result.success) {
+        result = refreshChats();
+    }
+    if (!result.success) {
+        sendJsonError(500, result.error);
+        return;
+    }
+    consoleStatus = "Chat renamed";
+    renderConsoleChat();
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleDeleteChat()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    OperationResult result = deleteChat(activeChat.summary.id);
+    if (result.success) {
+        result = refreshChats();
+    }
+    if (!result.success) {
+        sendJsonError(500, result.error);
+        return;
+    }
+    if (consoleChats.empty()) {
+        const ChatDocumentResult created = createChat("New chat");
+        if (!created.success) {
+            sendJsonError(500, created.error);
+            return;
+        }
+        activeChat = created.chat;
+        result = refreshChats();
+    } else {
+        result = loadActiveChat(consoleChats.front().id);
+    }
+    if (!result.success) {
+        sendJsonError(500, result.error);
+        return;
+    }
+    consoleStatus = "Chat deleted";
+    renderConsoleChat();
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleSettings()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    Settings updated = consoleSettings;
+    updated.apiBaseUrl = server.arg("api_base_url");
+    updated.model = server.arg("model");
+    const OperationResult result = saveSettings(updated);
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    consoleSettings = updated;
+    consoleStatus = "Connection settings saved";
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleFileRead()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    std::uint32_t offset = 0;
+    if (!parseUnsignedArgument(server.arg("offset"), offset)) {
+        sendJsonError(400, "File offset must be an unsigned integer");
+        return;
+    }
+    const WorkspaceChunkResult result = readWorkspaceFileChunk(
+        server.arg("name"), offset, kMaximumWebFileChunkBytes);
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["content"] = result.content;
+    document["offset"] = result.offset;
+    document["next_offset"] = result.nextOffset;
+    document["total_bytes"] = result.totalBytes;
+    document["eof"] = result.eof;
+    sendJson(200, document);
+}
+
+void handleFileSave()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    std::uint32_t offset = 0;
+    std::uint32_t originalBytes = 0;
+    if (!parseUnsignedArgument(server.arg("offset"), offset) ||
+        !parseUnsignedArgument(server.arg("original_bytes"), originalBytes)) {
+        sendJsonError(400, "File offsets must be unsigned integers");
+        return;
+    }
+    const std::string content = server.arg("content").c_str();
+    if (content.size() > kMaximumWebFileChunkBytes || !isValidUtf8(content)) {
+        sendJsonError(400, "File chunk must be valid UTF-8 up to 12288 bytes");
+        return;
+    }
+    const OperationResult result = replaceWorkspaceFileRange(
+        server.arg("name"), offset, originalBytes, content);
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    consoleStatus = "File chunk saved";
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleFileRename()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const OperationResult result = renameWorkspaceFile(server.arg("name"), server.arg("new_name"));
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    consoleStatus = "File renamed";
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleFileDelete()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const OperationResult result = deleteWorkspaceFile(server.arg("name"));
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    consoleStatus = "File deleted";
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleFileDownload()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const String name = server.arg("name");
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        sendJsonError(400, "Invalid workspace filename");
+        return;
+    }
+    File file = SD.open(workspaceFilePath(name), FILE_READ);
+    if (!file) {
+        sendJsonError(404, "Workspace file does not exist: " + name);
+        return;
+    }
+    server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+    server.streamFile(file, "text/plain; charset=utf-8");
+    file.close();
+}
+
 void updateConsoleSerial()
 {
     while (Serial.available() > 0) {
@@ -613,6 +865,14 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/chat/select", HTTP_POST, handleSelectChat);
         server.on("/api/chat/new", HTTP_POST, handleNewChat);
         server.on("/api/chat/instructions", HTTP_POST, handleInstructions);
+        server.on("/api/chat/rename", HTTP_POST, handleRenameChat);
+        server.on("/api/chat/delete", HTTP_POST, handleDeleteChat);
+        server.on("/api/settings", HTTP_POST, handleSettings);
+        server.on("/api/file", HTTP_GET, handleFileRead);
+        server.on("/api/file/save", HTTP_POST, handleFileSave);
+        server.on("/api/file/rename", HTTP_POST, handleFileRename);
+        server.on("/api/file/delete", HTTP_POST, handleFileDelete);
+        server.on("/api/file/download", HTTP_GET, handleFileDownload);
         server.onNotFound([]() { sendJsonError(404, "Not found"); });
         routesConfigured = true;
     }

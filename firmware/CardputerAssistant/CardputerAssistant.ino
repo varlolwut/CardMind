@@ -1524,9 +1524,12 @@ void openWebConsole()
     if (!result.success) {
         menuStatus = result.error;
     } else {
+        const cardputer::OperationResult settingsResult = cardputer::loadSettings(settings);
         const cardputer::OperationResult activeResult = activateChat(result.activeChatId);
         const cardputer::OperationResult listResult = refreshChatList();
-        if (!activeResult.success) {
+        if (!settingsResult.success) {
+            menuStatus = settingsResult.error;
+        } else if (!activeResult.success) {
             menuStatus = activeResult.error;
         } else if (!listResult.success) {
             menuStatus = listResult.error;
