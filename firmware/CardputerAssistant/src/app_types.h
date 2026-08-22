@@ -77,6 +77,16 @@ struct WorkspaceFilesResult {
     String error;
 };
 
+struct WorkspaceChunkResult {
+    bool success;
+    std::string content;
+    std::uint32_t offset;
+    std::uint32_t nextOffset;
+    std::uint32_t totalBytes;
+    bool eof;
+    String error;
+};
+
 struct VoiceRecordingResult {
     bool success;
     std::uint32_t sampleCount;
