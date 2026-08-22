@@ -120,10 +120,9 @@ void drawBatteryStatus(int x, int y, int batteryLevel, bool batteryCharging)
     }
 }
 
-void drawCarouselIcon(const CarouselCard& card, int x, int y)
+void drawCarouselIcon(CarouselIcon icon, int x, int y, std::uint16_t color)
 {
-    const std::uint16_t color = card.accentColor;
-    switch (card.icon) {
+    switch (icon) {
         case CarouselIcon::Chats:
             canvas->drawRoundRect(x, y, 31, 22, 5, color);
             canvas->drawLine(x + 7, y + 22, x + 3, y + 28, color);
@@ -193,30 +192,45 @@ void drawCarouselHeader(bool wifiConnected,
 void drawCarouselCard(const CarouselCard& card, int x)
 {
     constexpr int y = 24;
-    constexpr int width = 204;
+    constexpr int width = 168;
     constexpr int height = 79;
-    constexpr std::uint16_t cardBackground = 0x18C3;
-    canvas->fillRoundRect(x + 3, y + 3, width, height, 8, TFT_BLACK);
+    constexpr std::uint16_t cardBackground = 0x08C4;
+    constexpr std::uint16_t frameColor = 0x2F1C;
+    constexpr std::uint16_t accentColor = 0xB7E6;
+    canvas->fillRoundRect(x + 2, y + 3, width, height, 9, TFT_BLACK);
     canvas->fillRoundRect(x, y, width, height, 8, cardBackground);
-    canvas->drawRoundRect(x, y, width, height, 8, card.accentColor);
-    canvas->fillRoundRect(x, y + 11, 4, height - 22, 2, card.accentColor);
-    canvas->fillRoundRect(x + 9, y + 11, 46, 46, 9, 0x0861);
-    drawCarouselIcon(card, x + 16, y + 18);
+    canvas->drawRoundRect(x, y, width, height, 8, frameColor);
+    canvas->fillRoundRect(x + 7, y + 16, 43, 43, 8, 0x1107);
+    drawCarouselIcon(card.icon, x + 13, y + 22, accentColor);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(frameColor, cardBackground);
+    canvas->setCursor(x + 57, y + 7);
+    canvas->print(clippedLine(card.kicker, 17));
     canvas->setFont(&fonts::efontCN_14);
     canvas->setTextColor(TFT_WHITE, cardBackground);
-    canvas->setCursor(x + 64, y + 8);
-    canvas->print(clippedLine(card.title, 17));
-    canvas->setFont(&fonts::efontCN_12);
+    canvas->setCursor(x + 57, y + 20);
+    canvas->print(clippedLine(card.title, 13));
+    canvas->setFont(&fonts::efontCN_10);
     canvas->setTextColor(TFT_LIGHTGREY, cardBackground);
-    const auto lines = wrapUtf8Text(card.subtitle.c_str(), 22);
+    const auto lines = wrapUtf8Text(card.subtitle.c_str(), 17);
     for (std::size_t index = 0; index < std::min<std::size_t>(lines.size(), 2); ++index) {
-        canvas->setCursor(x + 64, y + 29 + static_cast<int>(index * 13));
+        canvas->setCursor(x + 57, y + 38 + static_cast<int>(index * 11));
         canvas->print(lines[index].c_str());
     }
-    canvas->setFont(&fonts::efontCN_10);
-    canvas->setTextColor(card.accentColor, cardBackground);
-    canvas->setCursor(x + 64, y + 62);
-    canvas->print("ENTER OPEN");
+    canvas->setTextColor(accentColor, cardBackground);
+    canvas->setCursor(x + 111, y + 65);
+    canvas->print("ENTER >");
+}
+
+void drawCarouselSideCard(const CarouselCard& card, int x)
+{
+    constexpr int y = 39;
+    constexpr int width = 29;
+    constexpr int height = 48;
+    constexpr std::uint16_t sideBackground = 0x1107;
+    constexpr std::uint16_t iconColor = 0x9D55;
+    canvas->fillRoundRect(x, y, width, height, 7, sideBackground);
+    drawCarouselIcon(card.icon, x - 1, y + 9, iconColor);
 }
 
 void drawCarouselFrame(const std::vector<CarouselCard>& cards,
@@ -235,23 +249,25 @@ void drawCarouselFrame(const std::vector<CarouselCard>& cards,
     if (previousIndex == selectedIndex && !cards.empty()) {
         const std::size_t leftIndex = selectedIndex == 0 ? cards.size() - 1 : selectedIndex - 1;
         const std::size_t rightIndex = (selectedIndex + 1) % cards.size();
-        drawCarouselCard(cards[leftIndex], -196);
-        drawCarouselCard(cards[rightIndex], 232);
+        drawCarouselSideCard(cards[leftIndex], -7);
+        drawCarouselSideCard(cards[rightIndex], 218);
     }
-    if (previousIndex < cards.size() && previousX > -205 && previousX < 240) {
+    if (previousIndex < cards.size() && previousX > -169 && previousX < 240) {
         drawCarouselCard(cards[previousIndex], previousX);
     }
-    if (selectedIndex < cards.size() && selectedX > -205 && selectedX < 240) {
+    if (selectedIndex < cards.size() && selectedX > -169 && selectedX < 240) {
         drawCarouselCard(cards[selectedIndex], selectedX);
     }
     if (!cards.empty()) {
-        const int dotsWidth = static_cast<int>(cards.size() * 8U - 3U);
+        const int dotsWidth = static_cast<int>(cards.size() * 9U + 3U);
         const int firstDotX = (240 - dotsWidth) / 2;
         for (std::size_t index = 0; index < cards.size(); ++index) {
-            const std::uint16_t color = index == selectedIndex
-                ? cards[selectedIndex].accentColor
-                : TFT_DARKGREY;
-            canvas->fillCircle(firstDotX + static_cast<int>(index * 8U), 109, 2, color);
+            const int dotX = firstDotX + static_cast<int>(index * 9U);
+            if (index == selectedIndex) {
+                canvas->fillRoundRect(dotX - 3, 107, 10, 4, 2, 0xB7E6);
+            } else {
+                canvas->fillCircle(dotX, 109, 2, TFT_DARKGREY);
+            }
         }
     }
     canvas->fillRect(0, 115, 240, 20, TFT_DARKGREY);
@@ -452,7 +468,7 @@ void showCarousel(const std::vector<CarouselCard>& cards,
         showFatalError("Carousel has no valid selected card");
         return;
     }
-    drawCarouselFrame(cards, selectedIndex, selectedIndex, -240, 18,
+    drawCarouselFrame(cards, selectedIndex, selectedIndex, -240, 36,
                       wifiConnected, sdReady, batteryLevel, batteryCharging, status);
 }
 
@@ -470,8 +486,8 @@ void animateCarousel(const std::vector<CarouselCard>& cards,
         showFatalError("Carousel transition indexes are invalid");
         return;
     }
-    constexpr int cardX = 18;
-    constexpr int travel = 222;
+    constexpr int cardX = 36;
+    constexpr int travel = 204;
     constexpr int frames = 6;
     const int directionSign = direction == CarouselDirection::Next ? 1 : -1;
     for (int frame = 1; frame <= frames; ++frame) {

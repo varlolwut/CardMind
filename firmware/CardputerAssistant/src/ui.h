@@ -22,9 +22,9 @@ enum class CarouselDirection {
 };
 
 struct CarouselCard {
+    String kicker;
     String title;
     String subtitle;
-    std::uint16_t accentColor;
     CarouselIcon icon;
 };
 

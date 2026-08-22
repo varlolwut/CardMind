@@ -9,6 +9,7 @@
 #include "src/app_types.h"
 #include "src/audio_utils.h"
 #include "src/chat_storage.h"
+#include "src/crash_journal.h"
 #include "src/file_workspace.h"
 #include "src/file_portal.h"
 #include "src/provisioning.h"
@@ -120,6 +121,8 @@ bool batteryCharging = false;
 std::uint32_t lastBatteryRefreshAt = 0;
 bool startupInProgress = true;
 wl_status_t lastWifiStatus = WL_IDLE_STATUS;
+bool crashJournalReady = false;
+String crashJournalError;
 
 void ensureNetworkReady();
 void render();
@@ -457,7 +460,7 @@ bool runPureSelfTest()
 
 void printStatus()
 {
-    Serial.printf("STATUS board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s wifi=%s tls_time=%s battery=%d charging=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u reset_reason=%d\n",
+    Serial.printf("STATUS board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s crash_journal=%s previous_operation=%s wifi=%s tls_time=%s battery=%d charging=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u reset_reason=%d\n",
                   M5.getBoard() == m5::board_t::board_M5CardputerADV ? "yes" : "no",
                   cardputer::settingsAreComplete(settings) ? "yes" : "no",
                   cardputer::voiceSettingsAreComplete(settings) ? "yes" : "no",
@@ -468,6 +471,8 @@ void printStatus()
                   chatStorageReady ? "ready" : "unavailable",
                   static_cast<unsigned int>(chats.size()),
                   fileWorkspaceReady ? "ready" : "unavailable",
+                  crashJournalReady ? "ready" : "unavailable",
+                  cardputer::previousOperation().c_str(),
                   WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
                   std::time(nullptr) >= 1700000000 ? "valid" : "invalid",
                   batteryLevel,
@@ -756,7 +761,9 @@ void refreshModels()
 {
     statusMessage = "Loading models...";
     cardputer::showBusyScreen("MODELS", statusMessage);
+    cardputer::markOperation("model_refresh");
     const cardputer::ModelsResult result = cardputer::fetchModels(settings);
+    cardputer::markOperation("idle");
     if (!result.success) {
         availableModels.clear();
         statusMessage = result.error;
@@ -780,7 +787,9 @@ void ensureNetworkReady()
     if (WiFi.status() != WL_CONNECTED) {
         statusMessage = "Connecting Wi-Fi...";
         cardputer::showBusyScreen("NETWORK", statusMessage);
+        cardputer::markOperation("wifi_connect");
         const cardputer::OperationResult wifiResult = cardputer::connectToWifi(settings);
+        cardputer::markOperation("idle");
         if (!wifiResult.success) {
             statusMessage = wifiResult.error;
             Serial.println("ERROR event=wifi_connect result=failed");
@@ -790,7 +799,9 @@ void ensureNetworkReady()
     if (std::time(nullptr) < 1700000000) {
         statusMessage = "Synchronizing TLS clock...";
         cardputer::showBusyScreen("NETWORK", statusMessage);
+        cardputer::markOperation("tls_clock");
         const cardputer::OperationResult clockResult = cardputer::synchronizeTlsClock();
+        cardputer::markOperation("idle");
         if (!clockResult.success) {
             statusMessage = clockResult.error;
             return;
@@ -886,6 +897,7 @@ void submitPrompt()
                   useWorkspaceTools ? "enabled" : "disabled",
                   webSearchAvailable ? "yes" : "no",
                   useWebSearch ? "enabled" : "disabled");
+    cardputer::markOperation(useTools ? "chat_tools" : "chat_stream");
     const cardputer::ChatResult result = useTools
         ? cardputer::streamChatCompletionWithTools(
               settings, history, activeChatInstructions, onText, [](const cardputer::ToolCall& call) {
@@ -894,6 +906,7 @@ void submitPrompt()
                   return executeAvailableTool(call);
               })
         : cardputer::streamChatCompletion(settings, history, activeChatInstructions, onText);
+    cardputer::markOperation("idle");
     if (!result.success) {
         activeResponse = result.response;
         statusMessage = result.error;
@@ -924,8 +937,10 @@ void submitPrompt()
     Serial.println("INFO event=chat_completion result=ok");
     if (settings.ttsAutoPlay) {
         cardputer::showBusyScreen("SPEAKING", "Generating multilingual audio...");
+        cardputer::markOperation("tts_auto");
         const cardputer::OperationResult speech = cardputer::synthesizeAndPlaySpeech(
             settings, result.response);
+        cardputer::markOperation("idle");
         if (!speech.success) {
             statusMessage = speech.error;
             Serial.println("ERROR event=tts_playback result=failed source=auto");
@@ -1026,11 +1041,13 @@ void handleVoiceInput()
         render();
         return;
     }
+    cardputer::markOperation("voice_recording");
     const cardputer::VoiceRecordingResult recording = cardputer::recordVoiceWhileButtonHeld(
         [](std::uint32_t elapsedMs, std::uint16_t level) {
             cardputer::showVoiceRecording(
                 elapsedMs, cardputer::maximumVoiceRecordingMs(), level);
         });
+    cardputer::markOperation("idle");
     if (!recording.success) {
         statusMessage = recording.error;
         render();
@@ -1057,8 +1074,10 @@ void handleVoiceInput()
     }
 
     cardputer::showBusyScreen("TRANSCRIBING", "Verified STT request...");
+    cardputer::markOperation("stt_request");
     const cardputer::TranscriptionResult transcription =
         cardputer::transcribeVoiceRecording(settings);
+    cardputer::markOperation("idle");
     if (!transcription.success) {
         const cardputer::OperationResult cleanup = cardputer::removeVoiceRecording();
         statusMessage = cleanup.success ? transcription.error
@@ -1122,7 +1141,9 @@ void speakLastAssistantResponse()
         return;
     }
     cardputer::showBusyScreen("SPEAKING", "Generating multilingual audio...");
+    cardputer::markOperation("tts_request");
     const cardputer::OperationResult result = cardputer::synthesizeAndPlaySpeech(settings, message->content);
+    cardputer::markOperation("idle");
     if (result.success) {
         setTransientStatus("Spoken", 1500);
         Serial.println("INFO event=tts_playback result=ok source=manual");
@@ -1173,6 +1194,8 @@ std::vector<String> diagnosticsItems()
         "microSD: " + String(fileWorkspaceReady ? "ready" : "unavailable"),
         "Chats: " + String(chats.size()),
         "Free heap: " + String(ESP.getFreeHeap()) + " B",
+        "Crash journal: " + String(crashJournalReady ? "ready" : "unavailable"),
+        "Previous op: " + cardputer::previousOperation(),
         "Reset reason: " + String(static_cast<int>(esp_reset_reason())),
     };
 }
@@ -1196,13 +1219,13 @@ std::vector<cardputer::CarouselCard> carouselCards()
         networkSubtitle = String("Connecting: ") + settings.wifiSsid;
     }
     return {
-        {"Chats", "Separate conversations", TFT_CYAN, cardputer::CarouselIcon::Chats},
-        {"AI", settings.model, TFT_PURPLE, cardputer::CarouselIcon::Ai},
-        {"Voice", "STT, TTS and volume", TFT_ORANGE, cardputer::CarouselIcon::Voice},
-        {"Network", networkSubtitle, TFT_GREENYELLOW, cardputer::CarouselIcon::Network},
-        {"Files", "SD workspace and portal", TFT_SKYBLUE, cardputer::CarouselIcon::Files},
-        {"Device", "Setup and diagnostics", TFT_YELLOW, cardputer::CarouselIcon::Device},
-        {"Help", "Controls and quick guide", TFT_MAGENTA, cardputer::CarouselIcon::Help},
+        {"CONVERSATIONS", "CHATS", "Open · New · Manage", cardputer::CarouselIcon::Chats},
+        {"MODELS & TOOLS", "AI", settings.model, cardputer::CarouselIcon::Ai},
+        {"SPEECH", "VOICE", "STT · TTS · Volume", cardputer::CarouselIcon::Voice},
+        {"CONNECTIVITY", "NETWORK", networkSubtitle, cardputer::CarouselIcon::Network},
+        {"WORKSPACE", "FILES", "Edit · Read · Export", cardputer::CarouselIcon::Files},
+        {"SYSTEM", "DEVICE", "Battery · SD · Diagnostics", cardputer::CarouselIcon::Device},
+        {"REFERENCE", "HELP", "Controls · About · Support", cardputer::CarouselIcon::Help},
     };
 }
 
@@ -1474,7 +1497,9 @@ void openWifiPicker(Screen returnScreen)
 {
     wifiReturnScreen = returnScreen;
     cardputer::showBusyScreen("WI-FI", "Scanning 2.4 GHz...");
+    cardputer::markOperation("wifi_scan");
     const cardputer::WifiScanResult scanResult = cardputer::scanWifiNetworks();
+    cardputer::markOperation("idle");
     if (!scanResult.success) {
         menuStatus = scanResult.error;
         currentScreen = wifiReturnScreen;
@@ -1579,7 +1604,9 @@ void connectSelectedWifi(const String& enteredPassword)
     candidate.wifiSsid = network.ssid;
     candidate.wifiPassword = network.secured ? password : String("");
     cardputer::showBusyScreen("WI-FI", "Connecting...");
+    cardputer::markOperation("wifi_connect");
     const cardputer::OperationResult connectResult = cardputer::connectToWifi(candidate);
+    cardputer::markOperation("idle");
     if (!connectResult.success) {
         menuStatus = connectResult.error;
         currentScreen = network.secured ? Screen::WifiPassword : Screen::WifiPicker;
@@ -1991,7 +2018,9 @@ void handleKeyboard()
                 }
                 renderVoiceMenu();
             } else if (voiceMenuIndex == 2) {
+                cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
+                cardputer::markOperation("idle");
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
@@ -2015,7 +2044,9 @@ void handleKeyboard()
             renderDeviceMenu();
         } else if (enterPressed) {
             if (deviceMenuIndex == 0) {
+                cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
+                cardputer::markOperation("idle");
             } else if (deviceMenuIndex == 1) {
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
@@ -2045,6 +2076,7 @@ void handleKeyboard()
             if (filesMenuIndex == 0) {
                 openWorkspaceFileList();
             } else if (filesMenuIndex == 1) {
+                cardputer::markOperation("file_portal");
                 cardputer::runFilePortal();
             } else {
                 currentScreen = Screen::MainCarousel;
@@ -2324,7 +2356,9 @@ void setup()
     }
     Serial.printf("CONFIG configured=%s\n", cardputer::settingsAreComplete(settings) ? "yes" : "no");
     if (!cardputer::settingsAreComplete(settings)) {
+        cardputer::markOperation("provisioning");
         cardputer::runProvisioningPortal(settings);
+        cardputer::markOperation("idle");
     }
 
     const cardputer::OperationResult voiceStorageResult = cardputer::initializeVoiceStorage();
@@ -2348,8 +2382,17 @@ void setup()
     fileWorkspaceError = workspaceResult.success ? String() : workspaceResult.error;
     Serial.printf("FILE_WORKSPACE result=%s\n", fileWorkspaceReady ? "ready" : "failed");
 
+    const cardputer::OperationResult journalResult = voiceStorageReady
+        ? cardputer::appendBootJournal(kFirmwareVersion)
+        : cardputer::OperationResult{false, voiceStorageError};
+    crashJournalReady = journalResult.success;
+    crashJournalError = journalResult.success ? String() : journalResult.error;
+    Serial.printf("CRASH_JOURNAL result=%s\n", crashJournalReady ? "ready" : "failed");
+
     carouselIndex = 0;
-    menuStatus = fileWorkspaceReady ? String() : fileWorkspaceError;
+    menuStatus = !fileWorkspaceReady
+        ? fileWorkspaceError
+        : (crashJournalReady ? String() : crashJournalError);
     statusMessage = "";
     startupInProgress = false;
     currentScreen = Screen::MainCarousel;
