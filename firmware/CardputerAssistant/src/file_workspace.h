@@ -13,6 +13,12 @@ WorkspaceFilesResult listWorkspaceFiles();
 WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
                                             std::uint32_t offset,
                                             std::size_t maximumBytes);
+WorkspaceFindResult findWorkspaceText(const String& name,
+                                      const std::string& query,
+                                      std::uint32_t startOffset);
+WorkspaceBookmarkResult loadWorkspaceBookmark(const String& name);
+OperationResult saveWorkspaceBookmark(const String& name, std::uint32_t offset);
+OperationResult clearWorkspaceBookmark(const String& name);
 OperationResult createWorkspaceFile(const String& name);
 OperationResult replaceWorkspaceFileRange(const String& name,
                                           std::uint32_t offset,

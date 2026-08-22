@@ -51,6 +51,7 @@ enum class Screen {
     FileActions,
     FileViewer,
     FileEditor,
+    FileFind,
     FileNameEntry,
     DeleteFileConfirm,
     Diagnostics,
@@ -125,6 +126,10 @@ std::size_t fileEditorCursor = 0;
 std::uint32_t fileEditorOffset = 0;
 std::uint32_t fileEditorOriginalBytes = 0;
 String fileEditorStatus;
+std::string fileFindInput;
+std::string lastFileFindQuery;
+std::uint32_t lastFileFindOffset = 0;
+String fileFindStatus;
 FileNameAction fileNameAction = FileNameAction::Create;
 std::string fileNameInput;
 String fileNameSource;
@@ -158,6 +163,7 @@ void renderDeviceMenu();
 void renderDiagnostics();
 void renderFileActions();
 void renderFileEditor();
+void renderFileFind();
 void renderFileNameEntry();
 void renderFileViewer();
 void renderFilesMenu();
@@ -360,7 +366,9 @@ void openChatActions(const cardputer::ChatSummary& chat)
 void renderChatInstructions()
 {
     cardputer::showTextEditor("CHAT INSTRUCTIONS", instructionsInput, keyboardLayout,
-                             cardputer::kMaximumChatInstructionsBytes, instructionsStatus);
+                             cardputer::kMaximumChatInstructionsBytes, instructionsStatus,
+                             "(No instructions)",
+                             "ENTER save  ESC cancel  Fn+3 lang");
 }
 
 void openChatList(Screen returnScreen)
@@ -419,6 +427,9 @@ void render()
         return;
     case Screen::FileEditor:
         renderFileEditor();
+        return;
+    case Screen::FileFind:
+        renderFileFind();
         return;
     case Screen::FileNameEntry:
         renderFileNameEntry();
@@ -726,11 +737,34 @@ void runFileWorkspaceEditTest()
                            read.totalBytes != cardputer::kMaximumWorkspaceFileBytes)) {
         result = {false, "Workspace editor content verification failed"};
     }
+    const cardputer::WorkspaceFindResult found = result.success
+        ? cardputer::findWorkspaceText(sourceName, replacement, 0)
+        : cardputer::WorkspaceFindResult{false, false, 0, result.error};
+    if (result.success && (!found.success || !found.found || found.offset != editOffset)) {
+        result = {false, "Workspace search verification failed"};
+    }
+    if (result.success) {
+        result = cardputer::saveWorkspaceBookmark(sourceName, editOffset);
+    }
+    const cardputer::WorkspaceBookmarkResult sourceBookmark = result.success
+        ? cardputer::loadWorkspaceBookmark(sourceName)
+        : cardputer::WorkspaceBookmarkResult{false, false, 0, result.error};
+    if (result.success && (!sourceBookmark.success || !sourceBookmark.found ||
+                           sourceBookmark.offset != editOffset)) {
+        result = {false, "Workspace bookmark verification failed"};
+    }
     if (result.success) {
         result = cardputer::copyWorkspaceFile(sourceName, copyName);
     }
     if (result.success) {
         result = cardputer::renameWorkspaceFile(copyName, renamedName);
+    }
+    const cardputer::WorkspaceBookmarkResult renamedBookmark = result.success
+        ? cardputer::loadWorkspaceBookmark(renamedName)
+        : cardputer::WorkspaceBookmarkResult{false, false, 0, result.error};
+    if (result.success && (!renamedBookmark.success || !renamedBookmark.found ||
+                           renamedBookmark.offset != editOffset)) {
+        result = {false, "Copied and renamed bookmark verification failed"};
     }
     if (result.success) {
         result = cardputer::deleteWorkspaceFile(sourceName);
@@ -1340,6 +1374,10 @@ std::vector<String> fileActionItems()
     return {
         "View file",
         "Edit current chunk",
+        "Find text...",
+        "Find next",
+        "Save bookmark here",
+        "Open bookmark",
         "Save copy as...",
         "Rename...",
         "Delete file",
@@ -1497,6 +1535,13 @@ void renderFileEditor()
                              kFileEditorMaximumBytes, position, fileEditorStatus);
 }
 
+void renderFileFind()
+{
+    cardputer::showTextEditor("FIND IN FILE", fileFindInput, keyboardLayout, 128,
+                             fileFindStatus, "Type search text",
+                             "ENTER find  ESC cancel  Fn+3 lang");
+}
+
 void renderFileNameEntry()
 {
     const String title = fileNameAction == FileNameAction::Create
@@ -1636,6 +1681,8 @@ void openSelectedWorkspaceFile()
         return;
     }
     fileViewerName = workspaceFiles[workspaceFileIndex - 1].name;
+    lastFileFindQuery.clear();
+    lastFileFindOffset = 0;
     fileViewerPreviousOffsets.clear();
     const cardputer::OperationResult result = loadFileViewerChunk(0);
     if (!result.success) {
@@ -1658,6 +1705,46 @@ void beginFileEditor()
     fileEditorStatus = "";
     currentScreen = Screen::FileEditor;
     renderFileEditor();
+}
+
+void beginFileFind()
+{
+    fileFindInput = lastFileFindQuery;
+    fileFindStatus = "";
+    currentScreen = Screen::FileFind;
+    renderFileFind();
+}
+
+void findFileText(const std::string& query, std::uint32_t startOffset)
+{
+    cardputer::markOperation("file_find");
+    const cardputer::WorkspaceFindResult found = cardputer::findWorkspaceText(
+        fileViewerName, query, startOffset);
+    cardputer::markOperation("idle");
+    if (!found.success) {
+        menuStatus = found.error;
+        currentScreen = Screen::FileActions;
+        renderFileActions();
+        return;
+    }
+    if (!found.found) {
+        menuStatus = "Text not found after byte " + String(startOffset);
+        currentScreen = Screen::FileActions;
+        renderFileActions();
+        return;
+    }
+    lastFileFindQuery = query;
+    lastFileFindOffset = found.offset;
+    fileViewerPreviousOffsets.clear();
+    const cardputer::OperationResult loaded = loadFileViewerChunk(found.offset);
+    if (!loaded.success) {
+        menuStatus = loaded.error;
+        currentScreen = Screen::FileActions;
+        renderFileActions();
+        return;
+    }
+    currentScreen = Screen::FileViewer;
+    renderFileViewer();
 }
 
 void beginFileNameEntry(FileNameAction action, const String& sourceName)
@@ -2359,10 +2446,46 @@ void handleKeyboard()
             } else if (fileActionsIndex == 1) {
                 beginFileEditor();
             } else if (fileActionsIndex == 2) {
-                beginFileNameEntry(FileNameAction::Copy, fileViewerName);
+                beginFileFind();
             } else if (fileActionsIndex == 3) {
-                beginFileNameEntry(FileNameAction::Rename, fileViewerName);
+                if (lastFileFindQuery.empty()) {
+                    menuStatus = "Run Find text first";
+                    renderFileActions();
+                } else {
+                    const std::uint32_t nextOffset = lastFileFindOffset +
+                        static_cast<std::uint32_t>(lastFileFindQuery.size());
+                    findFileText(lastFileFindQuery, nextOffset);
+                }
             } else if (fileActionsIndex == 4) {
+                const cardputer::OperationResult result = cardputer::saveWorkspaceBookmark(
+                    fileViewerName, fileViewerChunkOffset);
+                menuStatus = result.success
+                    ? String("Bookmark saved at byte ") + String(fileViewerChunkOffset)
+                    : result.error;
+                renderFileActions();
+            } else if (fileActionsIndex == 5) {
+                const cardputer::WorkspaceBookmarkResult bookmark =
+                    cardputer::loadWorkspaceBookmark(fileViewerName);
+                if (!bookmark.success || !bookmark.found) {
+                    menuStatus = bookmark.success ? String("No bookmark for this file")
+                                                  : bookmark.error;
+                    renderFileActions();
+                } else {
+                    fileViewerPreviousOffsets.clear();
+                    const cardputer::OperationResult loaded = loadFileViewerChunk(bookmark.offset);
+                    if (!loaded.success) {
+                        menuStatus = loaded.error;
+                        renderFileActions();
+                    } else {
+                        currentScreen = Screen::FileViewer;
+                        renderFileViewer();
+                    }
+                }
+            } else if (fileActionsIndex == 6) {
+                beginFileNameEntry(FileNameAction::Copy, fileViewerName);
+            } else if (fileActionsIndex == 7) {
+                beginFileNameEntry(FileNameAction::Rename, fileViewerName);
+            } else if (fileActionsIndex == 8) {
                 deleteFileName = fileViewerName;
                 currentScreen = Screen::DeleteFileConfirm;
                 cardputer::showConfirmation("DELETE FILE", deleteFileName,
@@ -2545,6 +2668,55 @@ void handleKeyboard()
                 fileNameStatus = "";
             }
             renderFileNameEntry();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::FileFind) {
+        if (cancelPressed) {
+            fileFindStatus = "";
+            currentScreen = Screen::FileActions;
+            renderFileActions();
+        } else if (keys.fn && keys.f3) {
+            keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
+                ? cardputer::KeyboardLayout::Russian
+                : cardputer::KeyboardLayout::English;
+            fileFindStatus = keyboardLayout == cardputer::KeyboardLayout::English
+                ? String("English layout")
+                : String("Russian layout");
+            renderFileFind();
+        } else if (clearDraftPressed) {
+            fileFindInput.clear();
+            fileFindStatus = "";
+            renderFileFind();
+        } else if (backspacePressed) {
+            if (!fileFindInput.empty()) {
+                fileFindInput = cardputer::removeLastUtf8CodePoint(fileFindInput);
+            }
+            fileFindStatus = "";
+            renderFileFind();
+        } else if (enterPressed) {
+            if (fileFindInput.empty()) {
+                fileFindStatus = "Search text is required";
+                renderFileFind();
+            } else {
+                const std::string query = fileFindInput;
+                fileFindStatus = "";
+                findFileText(query, 0);
+            }
+        } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
+            for (const char character : printableNewKeys(newPresses)) {
+                const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
+                    ? cardputer::mapKeyToRussian(character)
+                    : std::string(1, character);
+                if (fileFindInput.size() + text.size() > 128) {
+                    fileFindStatus = "Search limit: 128 bytes";
+                    break;
+                }
+                fileFindInput += text;
+                fileFindStatus = "";
+            }
+            renderFileFind();
         }
         return;
     }
