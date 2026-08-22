@@ -1219,13 +1219,13 @@ std::vector<cardputer::CarouselCard> carouselCards()
         networkSubtitle = String("Connecting: ") + settings.wifiSsid;
     }
     return {
-        {"CONVERSATIONS", "CHATS", "Open · New · Manage", cardputer::CarouselIcon::Chats},
-        {"MODELS & TOOLS", "AI", settings.model, cardputer::CarouselIcon::Ai},
-        {"SPEECH", "VOICE", "STT · TTS · Volume", cardputer::CarouselIcon::Voice},
-        {"CONNECTIVITY", "NETWORK", networkSubtitle, cardputer::CarouselIcon::Network},
-        {"WORKSPACE", "FILES", "Edit · Read · Export", cardputer::CarouselIcon::Files},
-        {"SYSTEM", "DEVICE", "Battery · SD · Diagnostics", cardputer::CarouselIcon::Device},
-        {"REFERENCE", "HELP", "Controls · About · Support", cardputer::CarouselIcon::Help},
+        {"CONVERSATIONS", "CHATS", "Open · New · Manage", 0x2F1C, cardputer::CarouselIcon::Chats},
+        {"MODELS & TOOLS", "AI", settings.model, 0xA23F, cardputer::CarouselIcon::Ai},
+        {"SPEECH", "VOICE", "STT · TTS · Volume", 0xFD20, cardputer::CarouselIcon::Voice},
+        {"CONNECTIVITY", "NETWORK", networkSubtitle, 0xB7E6, cardputer::CarouselIcon::Network},
+        {"WORKSPACE", "FILES", "Edit · Read · Export", 0x4DFF, cardputer::CarouselIcon::Files},
+        {"SYSTEM", "DEVICE", "Battery · SD · Diagnostics", 0xFFE0, cardputer::CarouselIcon::Device},
+        {"REFERENCE", "HELP", "Controls · About · Support", 0xF81F, cardputer::CarouselIcon::Help},
     };
 }
 

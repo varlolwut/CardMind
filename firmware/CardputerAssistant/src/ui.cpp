@@ -130,10 +130,14 @@ void drawCarouselIcon(CarouselIcon icon, int x, int y, std::uint16_t color)
             canvas->drawFastHLine(x + 7, y + 13, 14, color);
             break;
         case CarouselIcon::Ai:
-            canvas->drawCircle(x + 15, y + 14, 13, color);
-            canvas->drawCircle(x + 11, y + 12, 2, color);
-            canvas->drawCircle(x + 20, y + 12, 2, color);
-            canvas->drawFastHLine(x + 10, y + 20, 11, color);
+            canvas->drawRoundRect(x, y + 5, 25, 19, 4, color);
+            canvas->drawLine(x + 7, y + 24, x + 3, y + 29, color);
+            canvas->drawFastHLine(x + 6, y + 12, 11, color);
+            canvas->drawFastHLine(x + 6, y + 17, 8, color);
+            canvas->drawFastVLine(x + 26, y, 9, color);
+            canvas->drawFastHLine(x + 22, y + 4, 9, color);
+            canvas->drawLine(x + 23, y + 1, x + 29, y + 7, color);
+            canvas->drawLine(x + 29, y + 1, x + 23, y + 7, color);
             break;
         case CarouselIcon::Voice:
             canvas->drawRoundRect(x + 9, y, 13, 20, 6, color);
@@ -195,15 +199,14 @@ void drawCarouselCard(const CarouselCard& card, int x)
     constexpr int width = 168;
     constexpr int height = 79;
     constexpr std::uint16_t cardBackground = 0x08C4;
-    constexpr std::uint16_t frameColor = 0x2F1C;
-    constexpr std::uint16_t accentColor = 0xB7E6;
+    const std::uint16_t accentColor = card.accentColor;
     canvas->fillRoundRect(x + 2, y + 3, width, height, 9, TFT_BLACK);
     canvas->fillRoundRect(x, y, width, height, 8, cardBackground);
-    canvas->drawRoundRect(x, y, width, height, 8, frameColor);
+    canvas->drawRoundRect(x, y, width, height, 8, accentColor);
     canvas->fillRoundRect(x + 7, y + 16, 43, 43, 8, 0x1107);
     drawCarouselIcon(card.icon, x + 13, y + 22, accentColor);
     canvas->setFont(&fonts::efontCN_10);
-    canvas->setTextColor(frameColor, cardBackground);
+    canvas->setTextColor(accentColor, cardBackground);
     canvas->setCursor(x + 57, y + 7);
     canvas->print(clippedLine(card.kicker, 17));
     canvas->setFont(&fonts::efontCN_14);
@@ -228,9 +231,8 @@ void drawCarouselSideCard(const CarouselCard& card, int x)
     constexpr int width = 29;
     constexpr int height = 48;
     constexpr std::uint16_t sideBackground = 0x1107;
-    constexpr std::uint16_t iconColor = 0x9D55;
     canvas->fillRoundRect(x, y, width, height, 7, sideBackground);
-    drawCarouselIcon(card.icon, x - 1, y + 9, iconColor);
+    drawCarouselIcon(card.icon, x - 1, y + 9, card.accentColor);
 }
 
 void drawCarouselFrame(const std::vector<CarouselCard>& cards,
@@ -246,7 +248,7 @@ void drawCarouselFrame(const std::vector<CarouselCard>& cards,
 {
     canvas->fillScreen(0x0022);
     drawCarouselHeader(wifiConnected, sdReady, batteryLevel, batteryCharging);
-    if (previousIndex == selectedIndex && !cards.empty()) {
+    if (!cards.empty()) {
         const std::size_t leftIndex = selectedIndex == 0 ? cards.size() - 1 : selectedIndex - 1;
         const std::size_t rightIndex = (selectedIndex + 1) % cards.size();
         drawCarouselSideCard(cards[leftIndex], -7);
@@ -264,7 +266,8 @@ void drawCarouselFrame(const std::vector<CarouselCard>& cards,
         for (std::size_t index = 0; index < cards.size(); ++index) {
             const int dotX = firstDotX + static_cast<int>(index * 9U);
             if (index == selectedIndex) {
-                canvas->fillRoundRect(dotX - 3, 107, 10, 4, 2, 0xB7E6);
+                canvas->fillRoundRect(dotX - 3, 107, 10, 4, 2,
+                                      cards[selectedIndex].accentColor);
             } else {
                 canvas->fillCircle(dotX, 109, 2, TFT_DARKGREY);
             }
@@ -498,6 +501,8 @@ void animateCarousel(const std::vector<CarouselCard>& cards,
                           wifiConnected, sdReady, batteryLevel, batteryCharging, status);
         delay(13);
     }
+    drawCarouselFrame(cards, selectedIndex, selectedIndex, -240, cardX,
+                      wifiConnected, sdReady, batteryLevel, batteryCharging, status);
 }
 
 std::size_t maximumChatScrollOffset(const std::vector<Message>& history,
