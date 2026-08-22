@@ -33,6 +33,7 @@ OperationResult beginUi();
 void showFatalError(const String& error);
 void showProvisioning(const String& accessPointName, const String& accessPointPassword);
 void showFilesPortal(const String& accessPointName, const String& accessPointPassword);
+void showWebConsoleAccess(const String& address, const String& accessPassword);
 void showChat(const std::vector<Message>& history,
               const std::string& activeResponse,
               const std::string& input,

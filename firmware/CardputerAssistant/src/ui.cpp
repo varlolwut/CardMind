@@ -371,6 +371,35 @@ void showFilesPortal(const String& accessPointName, const String& accessPointPas
     canvas->pushSprite(0, 0);
 }
 
+void showWebConsoleAccess(const String& address, const String& accessPassword)
+{
+    canvas->fillScreen(TFT_BLACK);
+    canvas->setFont(&fonts::efontCN_14);
+    canvas->fillRect(0, 0, 240, 18, TFT_NAVY);
+    canvas->drawBitmap(5, 5, kWifiIcon, 8, 8, TFT_CYAN);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(18, 1);
+    canvas->print("WEB CONSOLE");
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->setCursor(6, 27);
+    canvas->print("Open in browser:");
+    canvas->setTextColor(TFT_CYAN, TFT_BLACK);
+    canvas->setCursor(6, 45);
+    canvas->print(clippedLine(address, 29));
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->setCursor(6, 68);
+    canvas->print("Installation password:");
+    canvas->setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas->setCursor(6, 86);
+    canvas->print(clippedLine(accessPassword, 29));
+    canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(4, 120);
+    canvas->print("ESC close console");
+    canvas->pushSprite(0, 0);
+}
+
 void showChat(const std::vector<Message>& history,
               const std::string& activeResponse,
               const std::string& input,

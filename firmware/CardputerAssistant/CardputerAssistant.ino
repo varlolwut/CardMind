@@ -20,6 +20,7 @@
 #include "src/ui.h"
 #include "src/voice_input.h"
 #include "src/web_search_client.h"
+#include "src/web_console.h"
 #include "src/wifi_networks.h"
 
 #include <algorithm>
@@ -172,6 +173,7 @@ void renderVoiceMenu();
 void renderWifiPassword();
 void renderWifiPicker();
 void renderWorkspaceFileList();
+void openWebConsole();
 void submitPrompt();
 void runUiSearchEndToEndTest();
 
@@ -858,6 +860,10 @@ void handleSerialCommand(const String& command)
         runUiSearchEndToEndTest();
         return;
     }
+    if (command == "CONSOLE") {
+        openWebConsole();
+        return;
+    }
     if (command == "STTTLS") {
         ensureNetworkReady();
         const cardputer::OperationResult result = cardputer::probeDefaultSttTls();
@@ -1329,6 +1335,7 @@ std::vector<String> deviceMenuItems()
 {
     return {
         "API and services setup",
+        "Web console",
         "Diagnostics",
         "Back to carousel",
     };
@@ -1500,6 +1507,35 @@ void renderDeviceMenu()
 {
     cardputer::showSelectionList("DEVICE", deviceMenuItems(), deviceMenuIndex,
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+void openWebConsole()
+{
+    ensureNetworkReady();
+    if (WiFi.status() != WL_CONNECTED || std::time(nullptr) < 1700000000) {
+        menuStatus = statusMessage;
+        currentScreen = Screen::DeviceMenu;
+        renderDeviceMenu();
+        return;
+    }
+    cardputer::markOperation("web_console");
+    const cardputer::WebConsoleResult result = cardputer::runWebConsole(settings, activeChatId);
+    cardputer::markOperation("idle");
+    if (!result.success) {
+        menuStatus = result.error;
+    } else {
+        const cardputer::OperationResult activeResult = activateChat(result.activeChatId);
+        const cardputer::OperationResult listResult = refreshChatList();
+        if (!activeResult.success) {
+            menuStatus = activeResult.error;
+        } else if (!listResult.success) {
+            menuStatus = listResult.error;
+        } else {
+            menuStatus = "Web console closed";
+        }
+    }
+    currentScreen = Screen::DeviceMenu;
+    renderDeviceMenu();
 }
 
 void renderFilesMenu()
@@ -2364,6 +2400,8 @@ void handleKeyboard()
                 cardputer::runProvisioningPortal(settings);
                 cardputer::markOperation("idle");
             } else if (deviceMenuIndex == 1) {
+                openWebConsole();
+            } else if (deviceMenuIndex == 2) {
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
                 renderDiagnostics();
