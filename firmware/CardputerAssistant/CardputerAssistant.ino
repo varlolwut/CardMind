@@ -119,9 +119,24 @@ int batteryLevel = -1;
 bool batteryCharging = false;
 std::uint32_t lastBatteryRefreshAt = 0;
 bool startupInProgress = true;
+wl_status_t lastWifiStatus = WL_IDLE_STATUS;
 
 void ensureNetworkReady();
 void render();
+void renderCarousel();
+void renderChatActions();
+void renderChatInstructions();
+void renderChatList();
+void renderControlsHelp();
+void renderDeviceMenu();
+void renderDiagnostics();
+void renderFileViewer();
+void renderFilesMenu();
+void renderModelPicker();
+void renderVoiceMenu();
+void renderWifiPassword();
+void renderWifiPicker();
+void renderWorkspaceFileList();
 void submitPrompt();
 void runUiSearchEndToEndTest();
 
@@ -346,9 +361,60 @@ void render()
                                                                        : statusMessage);
         return;
     }
-    cardputer::showChat(history, activeResponse, inputBuffer, keyboardLayout,
-                        activeChatTitle, statusMessage, scrollOffset, WiFi.status() == WL_CONNECTED,
-                        batteryLevel, batteryCharging);
+    switch (currentScreen) {
+    case Screen::Chat:
+        cardputer::showChat(history, activeResponse, inputBuffer, keyboardLayout,
+                            activeChatTitle, statusMessage, scrollOffset,
+                            WiFi.status() == WL_CONNECTED, batteryLevel, batteryCharging);
+        return;
+    case Screen::MainCarousel:
+        renderCarousel();
+        return;
+    case Screen::VoiceMenu:
+        renderVoiceMenu();
+        return;
+    case Screen::DeviceMenu:
+        renderDeviceMenu();
+        return;
+    case Screen::FilesMenu:
+        renderFilesMenu();
+        return;
+    case Screen::WorkspaceFileList:
+        renderWorkspaceFileList();
+        return;
+    case Screen::FileViewer:
+        renderFileViewer();
+        return;
+    case Screen::Diagnostics:
+        renderDiagnostics();
+        return;
+    case Screen::ControlsHelp:
+        renderControlsHelp();
+        return;
+    case Screen::ModelPicker:
+        renderModelPicker();
+        return;
+    case Screen::ChatList:
+        renderChatList();
+        return;
+    case Screen::ChatActions:
+        renderChatActions();
+        return;
+    case Screen::ChatInstructions:
+        renderChatInstructions();
+        return;
+    case Screen::DeleteChatConfirm:
+        cardputer::showConfirmation("DELETE CHAT", deleteChatTitle,
+                                    "ENTER delete  ESC cancel");
+        return;
+    case Screen::WifiPicker:
+        renderWifiPicker();
+        return;
+    case Screen::WifiPassword:
+        renderWifiPassword();
+        return;
+    }
+    cardputer::showFatalError("Current screen is invalid");
 }
 
 void setTransientStatus(const String& message, std::uint32_t durationMs)
@@ -689,7 +755,7 @@ void updateSerial()
 void refreshModels()
 {
     statusMessage = "Loading models...";
-    render();
+    cardputer::showBusyScreen("MODELS", statusMessage);
     const cardputer::ModelsResult result = cardputer::fetchModels(settings);
     if (!result.success) {
         availableModels.clear();
@@ -713,7 +779,7 @@ void ensureNetworkReady()
 {
     if (WiFi.status() != WL_CONNECTED) {
         statusMessage = "Connecting Wi-Fi...";
-        render();
+        cardputer::showBusyScreen("NETWORK", statusMessage);
         const cardputer::OperationResult wifiResult = cardputer::connectToWifi(settings);
         if (!wifiResult.success) {
             statusMessage = wifiResult.error;
@@ -723,12 +789,29 @@ void ensureNetworkReady()
     }
     if (std::time(nullptr) < 1700000000) {
         statusMessage = "Synchronizing TLS clock...";
-        render();
+        cardputer::showBusyScreen("NETWORK", statusMessage);
         const cardputer::OperationResult clockResult = cardputer::synchronizeTlsClock();
         if (!clockResult.success) {
             statusMessage = clockResult.error;
+            return;
         }
     }
+    statusMessage = "";
+}
+
+void beginConfiguredNetwork()
+{
+    if (settings.wifiSsid.isEmpty()) {
+        lastWifiStatus = WiFi.status();
+        Serial.println("NETWORK startup=skipped reason=ssid_not_configured");
+        return;
+    }
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(settings.wifiSsid.c_str(), settings.wifiPassword.c_str());
+    configTime(0, 0, "time.cloudflare.com", "pool.ntp.org");
+    lastWifiStatus = WiFi.status();
+    Serial.println("NETWORK startup=background");
 }
 
 void submitPrompt()
@@ -1106,9 +1189,12 @@ std::vector<String> workspaceFileItems()
 
 std::vector<cardputer::CarouselCard> carouselCards()
 {
-    const String networkSubtitle = WiFi.status() == WL_CONNECTED
-        ? String("Connected: ") + settings.wifiSsid
-        : String("Choose 2.4 GHz Wi-Fi");
+    String networkSubtitle = "Choose 2.4 GHz Wi-Fi";
+    if (WiFi.status() == WL_CONNECTED) {
+        networkSubtitle = String("Connected: ") + settings.wifiSsid;
+    } else if (!settings.wifiSsid.isEmpty()) {
+        networkSubtitle = String("Connecting: ") + settings.wifiSsid;
+    }
     return {
         {"Chats", "Separate conversations", TFT_CYAN, cardputer::CarouselIcon::Chats},
         {"AI", settings.model, TFT_PURPLE, cardputer::CarouselIcon::Ai},
@@ -1265,9 +1351,14 @@ void renderWifiPicker()
 
 void openModelPicker(Screen returnScreen)
 {
+    modelReturnScreen = returnScreen;
     if (availableModels.empty()) {
         refreshModels();
         if (availableModels.empty()) {
+            if (returnScreen == Screen::MainCarousel) {
+                menuStatus = statusMessage;
+            }
+            currentScreen = returnScreen;
             render();
             return;
         }
@@ -1276,7 +1367,6 @@ void openModelPicker(Screen returnScreen)
     modelPickerIndex = selected == availableModels.end()
         ? 0
         : static_cast<std::size_t>(std::distance(availableModels.begin(), selected));
-    modelReturnScreen = returnScreen;
     currentScreen = Screen::ModelPicker;
     renderModelPicker();
 }
@@ -2258,26 +2348,27 @@ void setup()
     fileWorkspaceError = workspaceResult.success ? String() : workspaceResult.error;
     Serial.printf("FILE_WORKSPACE result=%s\n", fileWorkspaceReady ? "ready" : "failed");
 
-    statusMessage = fileWorkspaceReady ? String("Starting...") : fileWorkspaceError;
-    render();
-    ensureNetworkReady();
-    if (WiFi.status() == WL_CONNECTED && std::time(nullptr) >= 1700000000) {
-        Serial.println("NETWORK wifi=connected tls_time=valid");
-        refreshModels();
-    } else {
-        Serial.println("ERROR event=network_start result=failed");
-    }
     carouselIndex = 0;
-    menuStatus = "";
+    menuStatus = fileWorkspaceReady ? String() : fileWorkspaceError;
+    statusMessage = "";
     startupInProgress = false;
     currentScreen = Screen::MainCarousel;
     renderCarousel();
+    beginConfiguredNetwork();
     Serial.println("READY");
 }
 
 void loop()
 {
     M5Cardputer.update();
+    const wl_status_t wifiStatus = WiFi.status();
+    if (wifiStatus != lastWifiStatus) {
+        lastWifiStatus = wifiStatus;
+        Serial.printf("NETWORK status=%d\n", static_cast<int>(wifiStatus));
+        if (currentScreen == Screen::MainCarousel) {
+            renderCarousel();
+        }
+    }
     if (millis() - lastBatteryRefreshAt >= kBatteryRefreshIntervalMs) {
         const int previousBatteryLevel = batteryLevel;
         const bool previousBatteryCharging = batteryCharging;

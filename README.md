@@ -104,7 +104,7 @@ The HTTPS clients validate the configured chat endpoint against ISRG Root X1 and
 
 The complete controls reference is available on-device under **Fn+4 → Help**. The carousel contains Chats, AI, Voice, Network, Files, Device, and Help cards. Browse it with the printed Left/Right arrow keys (plain `,` and `/`), press Enter to open a card, and press plain `` ` `` (the Esc-marked key) to go back. Inside lists, the plain arrow-marked `;` and `.` keys move the selection and Enter confirms it. In the chat manager, Fn+Delete opens a confirmation screen before deleting the selected chat. Wi-Fi, microSD, and battery status remain visible in the carousel header; battery level is also shown in the chat header.
 
-On every normal restart CardMind shows one startup screen while storage, Wi-Fi, TLS time, and the model list are initialized, then opens the main carousel. The previously active chat remains selected but is not shown during initialization.
+On every normal restart CardMind initializes local storage, opens the main carousel, and connects Wi-Fi and starts NTP synchronization in the background. The model list is fetched only when the model picker is opened. The previously active chat remains selected but is not shown during startup.
 
 The chat request uses `POST /v1/chat/completions`, Bearer authorization, and SSE `choices[0].delta.content` streaming. Voice input records 16 kHz mono PCM WAV to `/voice.wav` on microSD, uploads it as multipart form data to the separately configured `/v1/audio/transcriptions` endpoint, then deletes the temporary file. Speech language is detected automatically and is independent of the active keyboard layout. The default STT configuration is Groq `whisper-large-v3-turbo`; its API key is separate from the chat API key.
 
@@ -124,7 +124,18 @@ Current-information prompts and explicit `/search` or `/web` commands attach a `
 
 ## Build
 
-Use the project-local Arduino CLI configuration in `toolchain/arduino-cli.yaml`, FQBN `m5stack:esp32:m5stack_cardputer`, ArduinoJson 7.2.1, and the pinned libraries in `vendor/`.
+Use FQBN `m5stack:esp32:m5stack_cardputer`, ArduinoJson 7.2.1, and the pinned libraries in `vendor/`. The local Arduino CLI configuration is generated per checkout and ignored by Git because Arduino CLI stores absolute paths in it.
+
+Create the isolated configuration from the repository root. Replace `arduino-cli` with the full executable path when it is not available in `PATH`:
+
+```powershell
+$ProjectRoot = (Resolve-Path .).Path
+arduino-cli config init --overwrite --dest-file toolchain/arduino-cli.yaml
+arduino-cli config set directories.data "$ProjectRoot/toolchain/data" --config-file toolchain/arduino-cli.yaml
+arduino-cli config set directories.downloads "$ProjectRoot/toolchain/downloads" --config-file toolchain/arduino-cli.yaml
+arduino-cli config set directories.user "$ProjectRoot/toolchain/user" --config-file toolchain/arduino-cli.yaml
+arduino-cli config set board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json --config-file toolchain/arduino-cli.yaml
+```
 
 Cardputer ADV voice input must currently be built with M5Stack ESP32 core 3.2.1, whose pinned package uses ESP-IDF 5.4.1. ESP-IDF 5.5.x has a confirmed legacy-I2S regression for the ADV ES8311 microphone that returns a constant sample value instead of audio. The isolated core can be installed without changing the Arduino IDE's global core:
 
@@ -160,3 +171,7 @@ The source contains serial-safe diagnostics at 115200 baud: `STATUS`, `SELFTEST`
 Cardputer ADV supports 2.4 GHz Wi-Fi. If connection fails, open **Fn+4 → Network**, select a visible 2.4 GHz network, and enter its password.
 
 The on-device Wi-Fi flow scans nearby networks, shows signal strength and security state, accepts a masked password, verifies the connection, and only then commits the new credentials to NVS. The web setup remains available for API key and base URL changes.
+
+## License
+
+CardMind is open-source software distributed under the [MIT License](LICENSE). Third-party board packages and libraries retain their own licenses.
