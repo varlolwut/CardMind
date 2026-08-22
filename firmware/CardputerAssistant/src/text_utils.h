@@ -7,6 +7,12 @@
 namespace cardputer {
 
 std::string removeLastUtf8CodePoint(const std::string& value);
+std::size_t previousUtf8Boundary(const std::string& value, std::size_t index);
+std::size_t nextUtf8Boundary(const std::string& value, std::size_t index);
+std::string insertUtf8At(const std::string& value,
+                         std::size_t index,
+                         const std::string& insertion);
+std::string eraseUtf8Before(const std::string& value, std::size_t index);
 std::string mapKeyToRussian(char key);
 std::vector<std::string> wrapUtf8Text(const std::string& value, std::size_t maxCells);
 bool extractSseData(const std::string& line, std::string& data);

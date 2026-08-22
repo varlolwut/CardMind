@@ -21,6 +21,15 @@ void testUtf8Backspace()
     require(cardputer::removeLastUtf8CodePoint("hello") == "hell", "ASCII backspace failed");
     require(cardputer::removeLastUtf8CodePoint("test я") == "test ", "Cyrillic backspace failed");
     require(cardputer::removeLastUtf8CodePoint("") == "", "Empty backspace failed");
+    const std::string value = "AяB";
+    require(cardputer::previousUtf8Boundary(value, 3) == 1,
+            "UTF-8 previous cursor boundary failed");
+    require(cardputer::nextUtf8Boundary(value, 1) == 3,
+            "UTF-8 next cursor boundary failed");
+    require(cardputer::insertUtf8At(value, 3, "!") == "Aя!B",
+            "UTF-8 cursor insertion failed");
+    require(cardputer::eraseUtf8Before(value, 3) == "AB",
+            "UTF-8 cursor erasure failed");
 }
 
 void testRussianLayout()

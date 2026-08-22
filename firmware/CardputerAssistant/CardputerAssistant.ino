@@ -121,6 +121,7 @@ std::uint32_t fileViewerNextOffset = 0;
 std::uint32_t fileViewerTotalBytes = 0;
 bool fileViewerEof = true;
 std::string fileEditorInput;
+std::size_t fileEditorCursor = 0;
 std::uint32_t fileEditorOffset = 0;
 std::uint32_t fileEditorOriginalBytes = 0;
 String fileEditorStatus;
@@ -492,7 +493,12 @@ bool runPureSelfTest()
                      wavHeader[41] == 0x7D;
     const bool chatText = cardputer::makeChatTitle("  Привет  мир ", 20) == "Привет мир" &&
                           cardputer::isValidChatId("0123456789abcdef");
-    return utf8Backspace && russianLayout && sse && wav && chatText &&
+    const std::string cursorText = "AяB";
+    const bool utf8Cursor = cardputer::previousUtf8Boundary(cursorText, 3) == 1 &&
+        cardputer::nextUtf8Boundary(cursorText, 1) == 3 &&
+        cardputer::insertUtf8At(cursorText, 3, "!") == "Aя!B" &&
+        cardputer::eraseUtf8Before(cursorText, 3) == "AB";
+    return utf8Backspace && russianLayout && sse && wav && chatText && utf8Cursor &&
            cardputer::fontSupportsCyrillic();
 }
 
@@ -868,8 +874,10 @@ void updateSerial()
                 handleSerialCommand(serialInput);
             }
             serialInput = "";
-        } else if (character != '\r' && serialInput.length() < 32) {
+        } else if (character >= 'A' && character <= 'Z' && serialInput.length() < 32) {
             serialInput += character;
+        } else if (character != '\r') {
+            serialInput = "";
         }
     }
 }
@@ -1485,7 +1493,7 @@ void renderFileViewer()
 void renderFileEditor()
 {
     const String position = String(fileEditorOffset) + "/" + String(fileViewerTotalBytes) + " B";
-    cardputer::showFileEditor(fileViewerName, fileEditorInput, keyboardLayout,
+    cardputer::showFileEditor(fileViewerName, fileEditorInput, fileEditorCursor, keyboardLayout,
                              kFileEditorMaximumBytes, position, fileEditorStatus);
 }
 
@@ -1644,6 +1652,7 @@ void openSelectedWorkspaceFile()
 void beginFileEditor()
 {
     fileEditorInput = fileViewerContent;
+    fileEditorCursor = fileEditorInput.size();
     fileEditorOffset = fileViewerChunkOffset;
     fileEditorOriginalBytes = fileViewerNextOffset - fileViewerChunkOffset;
     fileEditorStatus = "";
@@ -2420,6 +2429,7 @@ void handleKeyboard()
     if (currentScreen == Screen::FileEditor) {
         if (cancelPressed) {
             fileEditorInput.clear();
+            fileEditorCursor = 0;
             fileEditorStatus = "";
             currentScreen = Screen::FileViewer;
             renderFileViewer();
@@ -2431,13 +2441,28 @@ void handleKeyboard()
                 ? String("English layout")
                 : String("Russian layout");
             renderFileEditor();
+        } else if (keys.opt && leftPressed) {
+            fileEditorCursor = cardputer::previousUtf8Boundary(
+                fileEditorInput, fileEditorCursor);
+            fileEditorStatus = "";
+            renderFileEditor();
+        } else if (keys.opt && rightPressed) {
+            fileEditorCursor = cardputer::nextUtf8Boundary(
+                fileEditorInput, fileEditorCursor);
+            fileEditorStatus = "";
+            renderFileEditor();
         } else if (clearDraftPressed) {
             fileEditorInput.clear();
+            fileEditorCursor = 0;
             fileEditorStatus = "Chunk cleared; ENTER to save";
             renderFileEditor();
         } else if (backspacePressed) {
-            if (!fileEditorInput.empty()) {
-                fileEditorInput = cardputer::removeLastUtf8CodePoint(fileEditorInput);
+            if (fileEditorCursor > 0) {
+                const std::size_t previous = cardputer::previousUtf8Boundary(
+                    fileEditorInput, fileEditorCursor);
+                fileEditorInput = cardputer::eraseUtf8Before(
+                    fileEditorInput, fileEditorCursor);
+                fileEditorCursor = previous;
             }
             fileEditorStatus = "";
             renderFileEditor();
@@ -2445,7 +2470,9 @@ void handleKeyboard()
             if (fileEditorInput.size() >= kFileEditorMaximumBytes) {
                 fileEditorStatus = "Editor limit: 4096 bytes";
             } else {
-                fileEditorInput += '\n';
+                fileEditorInput = cardputer::insertUtf8At(
+                    fileEditorInput, fileEditorCursor, "\n");
+                ++fileEditorCursor;
                 fileEditorStatus = "";
             }
             renderFileEditor();
@@ -2461,6 +2488,7 @@ void handleKeyboard()
             }
             const std::uint32_t savedOffset = fileEditorOffset;
             fileEditorInput.clear();
+            fileEditorCursor = 0;
             fileEditorStatus = "";
             const cardputer::OperationResult loaded = loadFileViewerChunk(savedOffset);
             if (!loaded.success) {
@@ -2481,7 +2509,9 @@ void handleKeyboard()
                     fileEditorStatus = "Editor limit: 4096 bytes";
                     break;
                 }
-                fileEditorInput += text;
+                fileEditorInput = cardputer::insertUtf8At(
+                    fileEditorInput, fileEditorCursor, text);
+                fileEditorCursor += text.size();
                 fileEditorStatus = "";
             }
             renderFileEditor();

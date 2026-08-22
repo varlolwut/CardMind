@@ -77,6 +77,7 @@ void showTextEditor(const String& title,
                     const String& status);
 void showFileEditor(const String& title,
                     const std::string& input,
+                    std::size_t cursor,
                     KeyboardLayout layout,
                     std::size_t maximumBytes,
                     const String& position,
