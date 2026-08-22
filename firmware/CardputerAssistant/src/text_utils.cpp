@@ -198,6 +198,56 @@ std::string removeLastUtf8CodePoint(const std::string& value)
     return prefix;
 }
 
+std::size_t previousUtf8Boundary(const std::string& value, std::size_t index)
+{
+    if (index > value.size()) {
+        throw std::out_of_range("UTF-8 cursor is outside the string");
+    }
+    decodeUtf8(value.substr(0, index));
+    if (index == 0) {
+        return 0;
+    }
+    std::size_t previous = index - 1;
+    while (previous > 0 &&
+           (static_cast<std::uint8_t>(value[previous]) & 0xC0U) == 0x80U) {
+        --previous;
+    }
+    decodeUtf8(value.substr(previous, index - previous));
+    return previous;
+}
+
+std::size_t nextUtf8Boundary(const std::string& value, std::size_t index)
+{
+    if (index > value.size()) {
+        throw std::out_of_range("UTF-8 cursor is outside the string");
+    }
+    decodeUtf8(value.substr(0, index));
+    if (index == value.size()) {
+        return index;
+    }
+    const DecodedCodePoint point = decodeUtf8At(value, index);
+    return index + point.bytes.size();
+}
+
+std::string insertUtf8At(const std::string& value,
+                         std::size_t index,
+                         const std::string& insertion)
+{
+    if (index > value.size()) {
+        throw std::out_of_range("UTF-8 insertion index is outside the string");
+    }
+    decodeUtf8(value.substr(0, index));
+    decodeUtf8(value.substr(index));
+    decodeUtf8(insertion);
+    return value.substr(0, index) + insertion + value.substr(index);
+}
+
+std::string eraseUtf8Before(const std::string& value, std::size_t index)
+{
+    const std::size_t previous = previousUtf8Boundary(value, index);
+    return value.substr(0, previous) + value.substr(index);
+}
+
 std::string mapKeyToRussian(char key)
 {
     const bool uppercase = key >= 'A' && key <= 'Z';

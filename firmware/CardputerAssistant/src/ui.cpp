@@ -648,12 +648,13 @@ void showTextEditor(const String& title,
 
 void showFileEditor(const String& title,
                     const std::string& input,
+                    std::size_t cursor,
                     KeyboardLayout layout,
                     std::size_t maximumBytes,
                     const String& position,
                     const String& status)
 {
-    constexpr std::size_t maximumVisibleLines = 7;
+    constexpr std::size_t maximumVisibleLines = 6;
     canvas->fillScreen(TFT_BLACK);
     canvas->fillRect(0, 0, 240, 17, TFT_NAVY);
     canvas->drawBitmap(4, 4, kChatsIcon, 8, 8, TFT_SKYBLUE);
@@ -666,11 +667,19 @@ void showFileEditor(const String& title,
     canvas->setCursor(213, 2);
     canvas->print(layout == KeyboardLayout::Russian ? "RU" : "EN");
 
-    const std::string visibleInput = input + "_";
+    const std::size_t boundedCursor = std::min(cursor, input.size());
+    const std::string visibleInput = input.substr(0, boundedCursor) + "|" +
+        input.substr(boundedCursor);
     const auto wrapped = wrapUtf8Text(visibleInput, 38);
-    const std::size_t firstLine = wrapped.size() > maximumVisibleLines
+    const auto cursorWrapped = wrapUtf8Text(input.substr(0, boundedCursor) + "|", 38);
+    const std::size_t cursorLine = cursorWrapped.empty() ? 0 : cursorWrapped.size() - 1;
+    const std::size_t preferredFirstLine = cursorLine > maximumVisibleLines / 2
+        ? cursorLine - maximumVisibleLines / 2
+        : 0;
+    const std::size_t maximumFirstLine = wrapped.size() > maximumVisibleLines
         ? wrapped.size() - maximumVisibleLines
         : 0;
+    const std::size_t firstLine = std::min(preferredFirstLine, maximumFirstLine);
     canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     for (std::size_t row = 0; row < maximumVisibleLines && firstLine + row < wrapped.size(); ++row) {
         canvas->setCursor(3, 19 + static_cast<int>(row * 13));
@@ -679,15 +688,17 @@ void showFileEditor(const String& title,
 
     canvas->setFont(&fonts::efontCN_10);
     canvas->setTextColor(status.isEmpty() ? TFT_CYAN : TFT_YELLOW, TFT_BLACK);
-    canvas->setCursor(4, 105);
+    canvas->setCursor(4, 99);
     const String detail = status.isEmpty()
         ? position + "  " + String(input.size()) + "/" + String(maximumBytes) + " B"
         : status;
     canvas->print(clippedLine(detail, 42));
-    canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
+    canvas->fillRect(0, 113, 240, 22, TFT_DARKGREY);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
-    canvas->setCursor(4, 120);
-    canvas->print("ENTER save  Fn+ENTER line  ESC back");
+    canvas->setCursor(4, 113);
+    canvas->print("ENTER save  ESC cancel");
+    canvas->setCursor(4, 123);
+    canvas->print("Opt+< > cursor  Fn+ENTER newline");
     canvas->pushSprite(0, 0);
 }
 
