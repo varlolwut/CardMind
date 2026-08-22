@@ -12,6 +12,74 @@ Every successful build of `main` publishes a GitHub Release named after the firm
 
 The same files are retained as a workflow artifact for every successful `main` build.
 
+## Install a release
+
+CardMind is dedicated firmware for **M5Stack Cardputer ADV**. Installing it replaces the application currently running on the device; it does not run alongside Bruce or another firmware.
+
+### Clean installation
+
+1. Open the latest [GitHub Release](https://github.com/varlolwut/CardMind/releases/latest) and download `CardMind-cardputer-adv-merged.bin` and `SHA256SUMS.txt` into the same directory.
+2. Verify the download before flashing:
+
+   ```powershell
+   Get-FileHash .\CardMind-cardputer-adv-merged.bin -Algorithm SHA256
+   Get-Content .\SHA256SUMS.txt
+   ```
+
+   The two SHA-256 values for the merged image must match.
+3. Install Espressif's `esptool` in a local Python environment if it is not already available:
+
+   ```powershell
+   py -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install --upgrade esptool
+   ```
+
+4. Connect the Cardputer ADV with a data-capable USB cable and find its COM port in Windows Device Manager. The commands below use `COM8` as an example; replace it when necessary.
+5. Perform the clean flash. **The erase command deletes the previous firmware, NVS credentials, and setup password. Files and chats on microSD are not erased.**
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM8 erase_flash
+   .\.venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM8 --baud 921600 write_flash 0x0 .\CardMind-cardputer-adv-merged.bin
+   ```
+
+The ESP32-S3 normally enters its bootloader automatically. If connection repeatedly fails, hold G0, press and release Reset, retry the command, and release G0 after `Connecting...` appears.
+
+### Update an existing CardMind installation
+
+Use the application-only image to keep NVS credentials and the installation-specific setup password. This method is valid only when the existing installation already uses CardMind's 8 MB `default_8MB` partition layout.
+
+```powershell
+.\.venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM8 --baud 921600 write_flash 0x10000 .\CardMind-cardputer-adv.bin
+```
+
+Do not run `erase_flash` for an ordinary update. Chats and workspace files live on microSD and remain independent of either update method.
+
+## First-run configuration
+
+1. Insert a FAT32-formatted microSD card and start CardMind.
+2. A clean installation creates a protected Wi-Fi network and shows its unique SSID and password on the display. The password is generated once and remains stable until NVS is erased.
+3. Connect a phone or computer to that network. On iOS, choose to keep using the network without Internet. CardMind intentionally does not force the captive-login window.
+4. Open `http://192.168.4.1` manually in Safari, Chrome, or another full browser.
+5. Select a visible **2.4 GHz** Wi-Fi network, enter its password, and configure the chat service:
+   - **API base URL:** HTTPS origin or versioned base, for example `https://api.example.com` or `https://api.example.com/v1`.
+   - **API key:** Bearer token issued by that service.
+   - **Model:** a model id accepted by the service. CardMind later refreshes the list with `GET /v1/models`.
+6. Save the form and wait for CardMind to verify and store the values. The device switches from its setup access point to the selected home network only after the complete form has been received.
+
+The required chat service must implement OpenAI-compatible `POST /v1/chat/completions`, Bearer authorization, and SSE streaming with `choices[0].delta.content`. The base URL is fully configurable and is not tied to a particular provider.
+
+All credentials are stored only in ESP32 NVS and are never compiled into release images or printed to serial. To change them later, open **Fn+4 → Device → Web setup**. Wi-Fi can be changed through **Fn+4 → Network**, which scans nearby 2.4 GHz networks and saves new credentials only after a successful connection.
+
+### Optional voice, search, and speech services
+
+The same web form configures optional services independently from the chat API:
+
+- **Speech to text:** an OpenAI-compatible `/v1/audio/transcriptions` service. The included defaults target Groq and `whisper-large-v3-turbo`, but both URL and model are configurable.
+- **Web search:** an Exa Search/Contents API key. Search is invoked only for current-information requests or explicit `/search` and `/web` commands.
+- **Text to speech:** ElevenLabs streaming TTS key, model, and voice. Auto playback is off by default; manual playback uses Fn+8.
+
+Missing optional credentials disable only their associated feature and produce an explicit setup error. They do not prevent normal text chat.
+
 ## Security and first setup
 
 The firmware contains no Wi-Fi or API credentials. On a clean device it creates a WPA2-protected access point with a unique password shown only on the Cardputer screen. The password is generated once per installation and remains the same across restarts; a full flash erase generates a new one. Connect to that network, choose to use it without Internet, and manually open `http://192.168.4.1` in a full browser. The form scans nearby 2.4 GHz networks, while still allowing a hidden SSID to be entered manually, and accepts the Wi-Fi password, API key, HTTPS API base URL, and model id. Automatic captive redirection is intentionally disabled so iOS password managers remain available. Settings are saved in ESP32 NVS. Credentials are never printed to serial.
@@ -26,28 +94,33 @@ The HTTPS clients validate the configured chat endpoint against ISRG Root X1 and
 - Fn+1: open the separate-chat manager
 - Fn+2: open the on-device model picker populated by `GET /v1/models`
 - Fn+3: switch English/Russian keyboard layout
-- Fn+4: open the main menu with controls help, Wi-Fi, file download, and web setup
+- Fn+4: open the animated main carousel
+- Left/Right (`,` and `/`, the printed arrow keys): browse carousel cards without Fn
 - Fn+5 or Fn+Up (`;` key): scroll toward older messages
 - Fn+6 or Fn+Down (`.` key): scroll toward newer messages
 - Fn+7: create and switch to a new chat immediately
 - Fn+8: speak the latest assistant response through the built-in speaker
 - Ctrl+Backspace: clear the current draft
 
-The complete controls reference is available on-device under **Fn+4 > Controls help**. In menus, use Fn+5/Fn+6 to move, Enter to select, and Fn+` to cancel. In the chat manager, Fn+Delete opens a confirmation screen before deleting the selected chat.
+The complete controls reference is available on-device under **Fn+4 → Help**. The carousel contains Chats, AI, Voice, Network, Files, Device, and Help cards. Browse it with the printed Left/Right arrow keys (plain `,` and `/`), press Enter to open a card, and press plain `` ` `` (the Esc-marked key) to go back. Inside lists, the plain arrow-marked `;` and `.` keys move the selection and Enter confirms it. In the chat manager, Fn+Delete opens a confirmation screen before deleting the selected chat. Wi-Fi, microSD, and battery status remain visible in the carousel header; battery level is also shown in the chat header.
+
+On every normal restart CardMind shows one startup screen while storage, Wi-Fi, TLS time, and the model list are initialized, then opens the main carousel. The previously active chat remains selected but is not shown during initialization.
 
 The chat request uses `POST /v1/chat/completions`, Bearer authorization, and SSE `choices[0].delta.content` streaming. Voice input records 16 kHz mono PCM WAV to `/voice.wav` on microSD, uploads it as multipart form data to the separately configured `/v1/audio/transcriptions` endpoint, then deletes the temporary file. Speech language is detected automatically and is independent of the active keyboard layout. The default STT configuration is Groq `whisper-large-v3-turbo`; its API key is separate from the chat API key.
 
-Speech output uses ElevenLabs `POST /v1/text-to-speech/{voice_id}/stream` with `pcm_16000`, verified against GTS Root R1. The default model is `eleven_multilingual_v2`, which supports Russian and English, and the default voice is George (`JBFqnCBsd6RMkjVDRZzb`). Audio is streamed to temporary `/tts.pcm` on microSD and played in bounded chunks, so a complete recording is never buffered in ESP32 RAM. Playback volume defaults to 75% and cycles through 25%, 50%, 75%, and 100% under **Fn+4 > TTS volume**; the selected level survives restarts. Configure a separate ElevenLabs key under **Fn+4 > Web setup**, use **Fn+8** for manual playback, or toggle **Auto TTS** in the main menu. Auto playback defaults to off to avoid consuming credits unexpectedly. Responses over 5,000 UTF-8 bytes fail with an explicit request for a shorter answer.
+Speech output uses ElevenLabs `POST /v1/text-to-speech/{voice_id}/stream` with `pcm_16000`, verified against GTS Root R1. The default model is `eleven_multilingual_v2`, which supports Russian and English, and the default voice is George (`JBFqnCBsd6RMkjVDRZzb`). Audio is streamed to temporary `/tts.pcm` on microSD and played in bounded chunks, so a complete recording is never buffered in ESP32 RAM. Playback volume defaults to 75% and cycles through 25%, 50%, 75%, and 100% under **Fn+4 → Voice → TTS volume**; the selected level survives restarts. Configure a separate ElevenLabs key under **Fn+4 → Device → Web setup**, use **Fn+8** for manual playback, or toggle **Auto TTS** under Voice. Auto playback defaults to off to avoid consuming credits unexpectedly. Responses over 5,000 UTF-8 bytes fail with an explicit request for a shorter answer.
 
 ## Chats and files
 
 Each conversation has an independent context and a separate versioned JSON file under `/assistant/chats`. The active chat survives restarts. The firmware keeps at most 20 chats, 64 messages and 32,768 UTF-8 bytes of active context per chat; the oldest complete user/assistant pairs are trimmed when needed.
 
-The model receives four standard OpenAI function tools: `list_files`, chunked `read_file`, `write_file`, and atomic `append_file`. They are restricted to `/assistant/files`, validate filenames and UTF-8, reject traversal, and allow only `.txt`, `.md`, `.json`, `.csv`, `.html`, and `.svg` files. A single file is limited to 491,520 bytes (20 times the original limit); each model call reads or writes at most 12,288 bytes so large files never have to fit in ESP32 RAM. To download files, open Fn+4, select **Files download portal**, connect to the protected access point shown on screen, and open `http://192.168.4.1`. The portal is read-only and uses the installation-specific setup password.
+Each chat can also store up to 2,048 UTF-8 bytes of private instructions. Open **Chats → select a chat → Chat instructions**, type a prompt such as `Answer as briefly as possible`, and press Enter to save it. An empty value disables the feature. The instruction is sent as a system message only for that chat and is not displayed or mixed into its visible message history. Existing version-1 chat files are loaded automatically and acquire the new field the next time they are saved.
+
+The model receives four standard OpenAI function tools: `list_files`, chunked `read_file`, `write_file`, and atomic `append_file`. They are restricted to `/assistant/files`, validate filenames and UTF-8, reject traversal, and allow only `.txt`, `.md`, `.json`, `.csv`, `.html`, and `.svg` files. A single file is limited to 491,520 bytes (20 times the original limit); each model call reads or writes at most 12,288 bytes so large files never have to fit in ESP32 RAM. Open **Fn+4 → Files → Browse SD workspace** to read a saved file directly on the Cardputer with Up/Down scrolling; the viewer loads 2,048-byte chunks to keep RAM usage bounded. To download files, choose **Download portal (restart)**, connect to the protected access point shown on screen, and open `http://192.168.4.1`. The portal is read-only, uses the installation-specific setup password, and intentionally remains active until the device is restarted.
 
 Workspace tools are attached only when the current prompt explicitly mentions a file, microSD, a supported filename extension, or starts with `/file`. This prevents ordinary questions from accidentally entering repeated tool-calling rounds. Mention the filename again in a later follow-up when further file access is required.
 
-Current-information prompts and explicit `/search` or `/web` commands attach a `web_search` tool. The OpenAI-compatible chat API relays tool calls, while the Cardputer executes the search itself through the separately configured Exa endpoint and returns bounded source snippets and URLs to the model. Search setup is optional: create an Exa key at `https://dashboard.exa.ai`, then enter it under Fn+4 > **Web setup (API/key)**. Exa's starter tier currently requires no payment method. If search is not configured, current-information prompts fail once with an actionable setup message instead of entering repeated tool rounds.
+Current-information prompts and explicit `/search` or `/web` commands attach a `web_search` tool. The OpenAI-compatible chat API relays tool calls, while the Cardputer executes the search itself through the separately configured Exa endpoint and returns bounded source snippets and URLs to the model. Search setup is optional: create an Exa key at `https://dashboard.exa.ai`, then enter it under **Fn+4 → Device → Web setup**. If search is not configured, current-information prompts fail once with an actionable setup message instead of entering repeated tool rounds.
 
 ## Build
 
@@ -57,11 +130,33 @@ Cardputer ADV voice input must currently be built with M5Stack ESP32 core 3.2.1,
 
 ```powershell
 arduino-cli core install m5stack:esp32@3.2.1 --config-file toolchain/arduino-cli.yaml
+arduino-cli lib install ArduinoJson@7.2.1 --config-file toolchain/arduino-cli.yaml
+```
+
+Compile the exact release layout from the repository root:
+
+```powershell
+arduino-cli compile `
+  --config-file toolchain/arduino-cli.yaml `
+  --fqbn "m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=default_8MB" `
+  --libraries vendor `
+  --build-path firmware/CardputerAssistant/build/m5stack.esp32.m5stack_cardputer `
+  firmware/CardputerAssistant
+```
+
+Upload without erasing NVS:
+
+```powershell
+arduino-cli upload `
+  --config-file toolchain/arduino-cli.yaml `
+  --fqbn "m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=default_8MB" `
+  --port COM8 `
+  --input-dir firmware/CardputerAssistant/build/m5stack.esp32.m5stack_cardputer `
+  firmware/CardputerAssistant
 ```
 
 The source contains serial-safe diagnostics at 115200 baud: `STATUS`, `SELFTEST`, `STORAGETEST`, `APITEST`, `TOOLTEST`, `WEBTEST`, `FETCHTEST`, `SEARCHTEST`, `E2ETEST`, `STTTLS`, `STTAUTH`, `TTSHW`, `TTSTLS`, `TTSAUTH`, and `TTSTEST`. `STATUS` reports chat/file/search/TTS readiness without names or contents. `STORAGETEST` performs temporary chat and file round trips on microSD and removes both test records. `APITEST` sends a fixed prompt using credentials already stored in NVS. `TOOLTEST` verifies proxy tool-calling with a temporary file and removes it. `WEBTEST` runs a fixed search using the stored search configuration. `FETCHTEST` extracts a fixed public HTTPS page through Exa Contents. `SEARCHTEST` verifies the complete model-to-search-to-model round trip. `E2ETEST` creates a temporary chat, submits `/search cardputer zero` through the same streaming, rendering, tool, and persistence path as keyboard input, restores the original chat, and removes the temporary chat. `TTSHW` plays a local PCM test without a network or key. `TTSTLS` verifies the default ElevenLabs endpoint without a key and expects its authenticated HTTP rejection. `TTSAUTH` validates stored TTS credentials without generating billable audio. `TTSTEST` generates and plays one fixed English phrase. API tests print only pass/fail metadata and never print a key or response content. None of these commands returns credentials, the Wi-Fi SSID, audio, file contents, or model response text.
 
-Cardputer ADV supports 2.4 GHz Wi-Fi. If connection fails, press Fn+4 and choose the Wi-Fi menu to select a visible 2.4 GHz network and enter its password.
+Cardputer ADV supports 2.4 GHz Wi-Fi. If connection fails, open **Fn+4 → Network**, select a visible 2.4 GHz network, and enter its password.
 
 The on-device Wi-Fi flow scans nearby networks, shows signal strength and security state, accepts a masked password, verifies the connection, and only then commits the new credentials to NVS. The web setup remains available for API key and base URL changes.
-

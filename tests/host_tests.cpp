@@ -59,11 +59,11 @@ void testSse()
     require(cardputer::extractSseData("data: {\"ok\":true}\r", data), "SSE data line not detected");
     require(data == "{\"ok\":true}", "SSE payload extraction failed");
     require(!cardputer::extractSseData("event: message", data), "Non-data SSE line detected");
-    require(cardputer::buildVersionedApiUrl("https://aiprimetech.io", "/v1/models") ==
-                "https://aiprimetech.io/v1/models",
+    require(cardputer::buildVersionedApiUrl("https://api.example.com", "/v1/models") ==
+                "https://api.example.com/v1/models",
             "Unversioned API base URL was joined incorrectly");
-    require(cardputer::buildVersionedApiUrl("https://aiprimetech.io/v1", "/v1/chat/completions") ==
-                "https://aiprimetech.io/v1/chat/completions",
+    require(cardputer::buildVersionedApiUrl("https://api.example.com/v1", "/v1/chat/completions") ==
+                "https://api.example.com/v1/chat/completions",
             "Versioned API base URL duplicated /v1");
 }
 

@@ -101,6 +101,168 @@ void drawToolbarItem(int x, const std::uint8_t* icon, const char* label)
     canvas->print(label);
 }
 
+void drawBatteryStatus(int x, int y, int batteryLevel, bool batteryCharging)
+{
+    const std::uint16_t color = batteryLevel >= 0 && batteryLevel <= 15
+        ? TFT_RED
+        : (batteryCharging ? TFT_GREENYELLOW : TFT_WHITE);
+    canvas->drawRoundRect(x, y, 17, 9, 2, color);
+    canvas->fillRect(x + 17, y + 3, 2, 3, color);
+    if (batteryLevel >= 0) {
+        const int fillWidth = std::max(1, std::min(13, batteryLevel * 13 / 100));
+        canvas->fillRect(x + 2, y + 2, fillWidth, 5, color);
+    }
+    if (batteryCharging) {
+        canvas->setFont(&fonts::efontCN_10);
+        canvas->setTextColor(TFT_BLACK, color);
+        canvas->setCursor(x + 6, y - 1);
+        canvas->print("+");
+    }
+}
+
+void drawCarouselIcon(const CarouselCard& card, int x, int y)
+{
+    const std::uint16_t color = card.accentColor;
+    switch (card.icon) {
+        case CarouselIcon::Chats:
+            canvas->drawRoundRect(x, y, 31, 22, 5, color);
+            canvas->drawLine(x + 7, y + 22, x + 3, y + 28, color);
+            canvas->drawFastHLine(x + 7, y + 7, 18, color);
+            canvas->drawFastHLine(x + 7, y + 13, 14, color);
+            break;
+        case CarouselIcon::Ai:
+            canvas->drawCircle(x + 15, y + 14, 13, color);
+            canvas->drawCircle(x + 11, y + 12, 2, color);
+            canvas->drawCircle(x + 20, y + 12, 2, color);
+            canvas->drawFastHLine(x + 10, y + 20, 11, color);
+            break;
+        case CarouselIcon::Voice:
+            canvas->drawRoundRect(x + 9, y, 13, 20, 6, color);
+            canvas->drawRoundRect(x + 4, y + 8, 23, 19, 10, color);
+            canvas->drawFastVLine(x + 15, y + 27, 4, color);
+            canvas->drawFastHLine(x + 9, y + 30, 13, color);
+            break;
+        case CarouselIcon::Network:
+            canvas->drawCircle(x + 15, y + 25, 2, color);
+            canvas->drawArc(x + 15, y + 25, 9, 8, 215, 325, color);
+            canvas->drawArc(x + 15, y + 25, 16, 15, 215, 325, color);
+            break;
+        case CarouselIcon::Files:
+            canvas->drawRoundRect(x, y + 5, 31, 23, 3, color);
+            canvas->drawRect(x + 3, y + 1, 12, 7, color);
+            canvas->drawFastHLine(x + 6, y + 14, 19, color);
+            canvas->drawFastHLine(x + 6, y + 20, 15, color);
+            break;
+        case CarouselIcon::Device:
+            canvas->drawRoundRect(x + 2, y + 3, 27, 25, 4, color);
+            canvas->drawCircle(x + 15, y + 15, 6, color);
+            canvas->fillCircle(x + 15, y + 15, 2, color);
+            break;
+        case CarouselIcon::Help:
+            canvas->drawCircle(x + 15, y + 15, 14, color);
+            canvas->setFont(&fonts::efontCN_14);
+            canvas->setTextColor(color);
+            canvas->setCursor(x + 11, y + 4);
+            canvas->print("?");
+            break;
+    }
+}
+
+void drawCarouselHeader(bool wifiConnected,
+                        bool sdReady,
+                        int batteryLevel,
+                        bool batteryCharging)
+{
+    canvas->fillRect(0, 0, 240, 17, TFT_NAVY);
+    canvas->setFont(&fonts::efontCN_12);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(5, 2);
+    canvas->print("CARDMIND");
+    canvas->drawBitmap(126, 4, kWifiIcon, 8, 8,
+                       wifiConnected ? TFT_GREENYELLOW : TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(sdReady ? TFT_CYAN : TFT_DARKGREY, TFT_NAVY);
+    canvas->setCursor(143, 3);
+    canvas->print("SD");
+    drawBatteryStatus(171, 4, batteryLevel, batteryCharging);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(194, 3);
+    canvas->print(batteryLevel >= 0 ? String(batteryLevel) + "%" : String("--%"));
+}
+
+void drawCarouselCard(const CarouselCard& card, int x)
+{
+    constexpr int y = 24;
+    constexpr int width = 204;
+    constexpr int height = 79;
+    constexpr std::uint16_t cardBackground = 0x18C3;
+    canvas->fillRoundRect(x + 3, y + 3, width, height, 8, TFT_BLACK);
+    canvas->fillRoundRect(x, y, width, height, 8, cardBackground);
+    canvas->drawRoundRect(x, y, width, height, 8, card.accentColor);
+    canvas->fillRoundRect(x, y + 11, 4, height - 22, 2, card.accentColor);
+    canvas->fillRoundRect(x + 9, y + 11, 46, 46, 9, 0x0861);
+    drawCarouselIcon(card, x + 16, y + 18);
+    canvas->setFont(&fonts::efontCN_14);
+    canvas->setTextColor(TFT_WHITE, cardBackground);
+    canvas->setCursor(x + 64, y + 8);
+    canvas->print(clippedLine(card.title, 17));
+    canvas->setFont(&fonts::efontCN_12);
+    canvas->setTextColor(TFT_LIGHTGREY, cardBackground);
+    const auto lines = wrapUtf8Text(card.subtitle.c_str(), 22);
+    for (std::size_t index = 0; index < std::min<std::size_t>(lines.size(), 2); ++index) {
+        canvas->setCursor(x + 64, y + 29 + static_cast<int>(index * 13));
+        canvas->print(lines[index].c_str());
+    }
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(card.accentColor, cardBackground);
+    canvas->setCursor(x + 64, y + 62);
+    canvas->print("ENTER OPEN");
+}
+
+void drawCarouselFrame(const std::vector<CarouselCard>& cards,
+                       std::size_t previousIndex,
+                       std::size_t selectedIndex,
+                       int previousX,
+                       int selectedX,
+                       bool wifiConnected,
+                       bool sdReady,
+                       int batteryLevel,
+                       bool batteryCharging,
+                       const String& status)
+{
+    canvas->fillScreen(0x0022);
+    drawCarouselHeader(wifiConnected, sdReady, batteryLevel, batteryCharging);
+    if (previousIndex == selectedIndex && !cards.empty()) {
+        const std::size_t leftIndex = selectedIndex == 0 ? cards.size() - 1 : selectedIndex - 1;
+        const std::size_t rightIndex = (selectedIndex + 1) % cards.size();
+        drawCarouselCard(cards[leftIndex], -196);
+        drawCarouselCard(cards[rightIndex], 232);
+    }
+    if (previousIndex < cards.size() && previousX > -205 && previousX < 240) {
+        drawCarouselCard(cards[previousIndex], previousX);
+    }
+    if (selectedIndex < cards.size() && selectedX > -205 && selectedX < 240) {
+        drawCarouselCard(cards[selectedIndex], selectedX);
+    }
+    if (!cards.empty()) {
+        const int dotsWidth = static_cast<int>(cards.size() * 8U - 3U);
+        const int firstDotX = (240 - dotsWidth) / 2;
+        for (std::size_t index = 0; index < cards.size(); ++index) {
+            const std::uint16_t color = index == selectedIndex
+                ? cards[selectedIndex].accentColor
+                : TFT_DARKGREY;
+            canvas->fillCircle(firstDotX + static_cast<int>(index * 8U), 109, 2, color);
+        }
+    }
+    canvas->fillRect(0, 115, 240, 20, TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(5, 119);
+    canvas->print(status.isEmpty() ? "LEFT/RIGHT   ENTER open   ESC back"
+                                   : clippedLine(status, 43));
+    canvas->pushSprite(0, 0);
+}
+
 }  // namespace
 
 OperationResult beginUi()
@@ -197,7 +359,9 @@ void showChat(const std::vector<Message>& history,
               const String& chatTitle,
               const String& status,
               std::size_t scrollOffset,
-              bool wifiConnected)
+              bool wifiConnected,
+              int batteryLevel,
+              bool batteryCharging)
 {
     canvas->fillScreen(TFT_BLACK);
     canvas->setFont(&fonts::efontCN_12);
@@ -205,8 +369,14 @@ void showChat(const std::vector<Message>& history,
     canvas->drawBitmap(3, 3, kChatsIcon, 8, 8, TFT_CYAN);
     canvas->setTextColor(TFT_WHITE, TFT_NAVY);
     canvas->setCursor(14, 2);
-    canvas->print(clippedLine(chatTitle, 23));
-    canvas->drawBitmap(188, 3, kWifiIcon, 8, 8, wifiConnected ? TFT_GREENYELLOW : TFT_DARKGREY);
+    canvas->print(clippedLine(chatTitle, 17));
+    drawBatteryStatus(143, 3, batteryLevel, batteryCharging);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(164, 2);
+    canvas->print(batteryLevel >= 0 ? String(batteryLevel) + "%" : String("--%"));
+    canvas->drawBitmap(190, 3, kWifiIcon, 8, 8, wifiConnected ? TFT_GREENYELLOW : TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_12);
     canvas->fillRoundRect(203, 1, 34, 12, 3, layout == KeyboardLayout::English ? TFT_BLUE : TFT_MAROON);
     canvas->setTextColor(TFT_WHITE, layout == KeyboardLayout::English ? TFT_BLUE : TFT_MAROON);
     canvas->setCursor(206, 2);
@@ -270,6 +440,50 @@ void showChat(const std::vector<Message>& history,
     canvas->pushSprite(0, 0);
 }
 
+void showCarousel(const std::vector<CarouselCard>& cards,
+                  std::size_t selectedIndex,
+                  bool wifiConnected,
+                  bool sdReady,
+                  int batteryLevel,
+                  bool batteryCharging,
+                  const String& status)
+{
+    if (cards.empty() || selectedIndex >= cards.size()) {
+        showFatalError("Carousel has no valid selected card");
+        return;
+    }
+    drawCarouselFrame(cards, selectedIndex, selectedIndex, -240, 18,
+                      wifiConnected, sdReady, batteryLevel, batteryCharging, status);
+}
+
+void animateCarousel(const std::vector<CarouselCard>& cards,
+                     std::size_t previousIndex,
+                     std::size_t selectedIndex,
+                     CarouselDirection direction,
+                     bool wifiConnected,
+                     bool sdReady,
+                     int batteryLevel,
+                     bool batteryCharging,
+                     const String& status)
+{
+    if (cards.empty() || previousIndex >= cards.size() || selectedIndex >= cards.size()) {
+        showFatalError("Carousel transition indexes are invalid");
+        return;
+    }
+    constexpr int cardX = 18;
+    constexpr int travel = 222;
+    constexpr int frames = 6;
+    const int directionSign = direction == CarouselDirection::Next ? 1 : -1;
+    for (int frame = 1; frame <= frames; ++frame) {
+        const int distance = travel * frame / frames;
+        const int previousX = cardX - directionSign * distance;
+        const int selectedX = cardX + directionSign * (travel - distance);
+        drawCarouselFrame(cards, previousIndex, selectedIndex, previousX, selectedX,
+                          wifiConnected, sdReady, batteryLevel, batteryCharging, status);
+        delay(13);
+    }
+}
+
 std::size_t maximumChatScrollOffset(const std::vector<Message>& history,
                                     const std::string& activeResponse,
                                     const String& status)
@@ -327,6 +541,90 @@ void showSelectionList(const String& title,
     canvas->pushSprite(0, 0);
 }
 
+void showTextViewer(const String& title,
+                    const std::vector<std::string>& lines,
+                    std::size_t firstLine,
+                    const String& position)
+{
+    constexpr std::size_t maximumVisibleLines = 8;
+    canvas->fillScreen(TFT_BLACK);
+    canvas->fillRect(0, 0, 240, 17, TFT_NAVY);
+    canvas->drawBitmap(4, 4, kChatsIcon, 8, 8, TFT_SKYBLUE);
+    canvas->setFont(&fonts::efontCN_12);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(16, 2);
+    canvas->print(clippedLine(title, 27));
+
+    const std::size_t boundedFirstLine = lines.empty()
+        ? 0
+        : std::min(firstLine, lines.size() - 1);
+    for (std::size_t row = 0;
+         row < maximumVisibleLines && boundedFirstLine + row < lines.size();
+         ++row) {
+        canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+        canvas->setCursor(3, 19 + static_cast<int>(row * 12));
+        canvas->print(lines[boundedFirstLine + row].c_str());
+    }
+    if (lines.empty()) {
+        canvas->setTextColor(TFT_DARKGREY, TFT_BLACK);
+        canvas->setCursor(7, 53);
+        canvas->print("Empty file");
+    }
+
+    canvas->fillRect(0, 116, 240, 19, TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_CYAN, TFT_DARKGREY);
+    canvas->setCursor(4, 118);
+    canvas->print(clippedLine(position, 18));
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(102, 118);
+    canvas->print("UP/DOWN   ESC back");
+    canvas->pushSprite(0, 0);
+}
+
+void showTextEditor(const String& title,
+                    const std::string& input,
+                    KeyboardLayout layout,
+                    std::size_t maximumBytes,
+                    const String& status)
+{
+    constexpr std::size_t maximumVisibleLines = 7;
+    canvas->fillScreen(TFT_BLACK);
+    canvas->fillRect(0, 0, 240, 17, TFT_NAVY);
+    canvas->drawBitmap(4, 4, kChatsIcon, 8, 8, TFT_SKYBLUE);
+    canvas->setFont(&fonts::efontCN_12);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(16, 2);
+    canvas->print(clippedLine(title, 24));
+    canvas->fillRoundRect(207, 1, 31, 15, 3, layout == KeyboardLayout::Russian ? TFT_MAROON : TFT_DARKCYAN);
+    canvas->setCursor(213, 2);
+    canvas->print(layout == KeyboardLayout::Russian ? "RU" : "EN");
+
+    const std::string visibleInput = input.empty() ? std::string("(No instructions)_") : input + "_";
+    const auto wrapped = wrapUtf8Text(visibleInput, 38);
+    const std::size_t firstLine = wrapped.size() > maximumVisibleLines
+        ? wrapped.size() - maximumVisibleLines
+        : 0;
+    canvas->setTextColor(input.empty() ? TFT_DARKGREY : TFT_LIGHTGREY, TFT_BLACK);
+    for (std::size_t row = 0; row < maximumVisibleLines && firstLine + row < wrapped.size(); ++row) {
+        canvas->setCursor(3, 19 + static_cast<int>(row * 13));
+        canvas->print(wrapped[firstLine + row].c_str());
+    }
+
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(status.isEmpty() ? TFT_CYAN : TFT_YELLOW, TFT_BLACK);
+    canvas->setCursor(4, 105);
+    const String detail = status.isEmpty()
+        ? String(input.size()) + "/" + String(maximumBytes) + " bytes"
+        : status;
+    canvas->print(clippedLine(detail, 42));
+    canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(4, 120);
+    canvas->print("ENTER save  ESC cancel  Fn+3 lang");
+    canvas->pushSprite(0, 0);
+}
+
 void showPasswordEntry(const String& ssid, std::size_t passwordLength, const String& status)
 {
     canvas->fillScreen(TFT_BLACK);
@@ -361,7 +659,7 @@ void showPasswordEntry(const String& ssid, std::size_t passwordLength, const Str
     canvas->setFont(&fonts::efontCN_10);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
-    canvas->print("ENTER connect   FN+` cancel");
+    canvas->print("ENTER connect   ESC cancel");
     canvas->pushSprite(0, 0);
 }
 

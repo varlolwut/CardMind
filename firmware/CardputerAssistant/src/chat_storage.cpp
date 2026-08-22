@@ -16,7 +16,8 @@ namespace {
 
 constexpr const char* kAssistantDirectory = "/assistant";
 constexpr const char* kChatsDirectory = "/assistant/chats";
-constexpr std::uint32_t kFormatVersion = 1;
+constexpr std::uint32_t kFormatVersion = 2;
+constexpr std::uint32_t kOldestSupportedFormatVersion = 1;
 
 String chatPath(const String& id, const char* extension)
 {
@@ -64,6 +65,12 @@ OperationResult validateDocument(const ChatDocument& chat)
     if (historyBytes > kMaximumStoredHistoryBytes) {
         return {false, "Stored chat history exceeds the 32768-byte context limit"};
     }
+    if (chat.instructions.size() > kMaximumChatInstructionsBytes) {
+        return {false, "Chat instructions exceed the 2048-byte limit"};
+    }
+    if (!isValidUtf8(chat.instructions)) {
+        return {false, "Chat instructions must be valid UTF-8"};
+    }
     return {true, ""};
 }
 
@@ -75,16 +82,23 @@ ChatDocumentResult parseChatFile(File& file)
         return {false, {}, String("Failed to parse chat JSON: ") + jsonError.c_str()};
     }
     if (!document["version"].is<std::uint32_t>() ||
-        document["version"].as<std::uint32_t>() != kFormatVersion ||
         !document["id"].is<const char*>() || !document["title"].is<const char*>() ||
         !document["updated_at"].is<std::uint64_t>() || !document["messages"].is<JsonArray>()) {
         return {false, {}, "Chat JSON is missing required typed fields"};
+    }
+    const std::uint32_t version = document["version"].as<std::uint32_t>();
+    if (version < kOldestSupportedFormatVersion || version > kFormatVersion) {
+        return {false, {}, "Chat JSON version is not supported"};
+    }
+    if (version >= 2 && !document["instructions"].is<const char*>()) {
+        return {false, {}, "Chat JSON is missing typed instructions"};
     }
 
     ChatDocument result;
     result.summary.id = document["id"].as<const char*>();
     result.summary.title = document["title"].as<const char*>();
     result.summary.updatedAt = document["updated_at"].as<std::uint64_t>();
+    result.instructions = version >= 2 ? document["instructions"].as<const char*>() : "";
     const JsonArrayConst messages = document["messages"].as<JsonArrayConst>();
     if (messages.size() > kMaximumStoredMessages) {
         return {false, {}, "Chat JSON contains too many messages"};
@@ -125,6 +139,7 @@ OperationResult writeChatFile(const ChatDocument& chat, const String& path)
     document["id"] = chat.summary.id;
     document["title"] = chat.summary.title;
     document["updated_at"] = chat.summary.updatedAt;
+    document["instructions"] = chat.instructions;
     JsonArray messages = document["messages"].to<JsonArray>();
     for (const auto& message : chat.messages) {
         JsonObject item = messages.add<JsonObject>();
@@ -228,7 +243,7 @@ ChatDocumentResult createChat(const String& title)
     if (id.isEmpty()) {
         return {false, {}, "Failed to generate a unique chat id after 8 attempts"};
     }
-    ChatDocument chat = {{id, title, currentTimestamp(), 0}, {}};
+    ChatDocument chat = {{id, title, currentTimestamp(), 0}, {}, ""};
     const OperationResult saved = saveChat(chat);
     return saved.success ? ChatDocumentResult{true, chat, ""}
                          : ChatDocumentResult{false, {}, saved.error};

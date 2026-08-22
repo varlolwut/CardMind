@@ -126,13 +126,20 @@ String parseApiError(int status, const String& body)
     return "API HTTP " + String(status) + ": " + message;
 }
 
-String buildChatRequest(const Settings& settings, const std::vector<Message>& history)
+String buildChatRequest(const Settings& settings,
+                        const std::vector<Message>& history,
+                        const std::string& instructions)
 {
     JsonDocument document;
     document["model"] = settings.model;
     document["stream"] = true;
     document["max_tokens"] = 1024;
     JsonArray messages = document["messages"].to<JsonArray>();
+    if (!instructions.empty()) {
+        JsonObject system = messages.add<JsonObject>();
+        system["role"] = "system";
+        system["content"] = instructions;
+    }
     for (const auto& message : history) {
         JsonObject item = messages.add<JsonObject>();
         item["role"] = message.role;
@@ -236,6 +243,7 @@ void addWebSearchTool(JsonDocument& document)
 
 String buildToolChatRequest(const Settings& settings,
                             const std::vector<Message>& history,
+                            const std::string& instructions,
                             const std::vector<ToolRound>& rounds)
 {
     JsonDocument document;
@@ -271,6 +279,10 @@ String buildToolChatRequest(const Settings& settings,
             "in the answer when web_search is used.";
     } else {
         systemPrompt += "No web-search tool is available.";
+    }
+    if (!instructions.empty()) {
+        systemPrompt += "\n\nChat-specific instructions supplied by the user:\n";
+        systemPrompt += instructions.c_str();
     }
     system["content"] = systemPrompt;
     for (const auto& message : history) {
@@ -657,6 +669,7 @@ CompletionTurnResult streamCompletionTurn(const Settings& settings,
 
 ChatResult streamChatCompletion(const Settings& settings,
                                 const std::vector<Message>& history,
+                                const std::string& instructions,
                                 const ChatTextCallback& onText)
 {
     if (history.empty() || history.back().role != "user") {
@@ -665,7 +678,7 @@ ChatResult streamChatCompletion(const Settings& settings,
     if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
         return {false, "", "Not enough free heap to start chat request safely"};
     }
-    const String payload = buildChatRequest(settings, history);
+    const String payload = buildChatRequest(settings, history, instructions);
     if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
         return {false, "", "Chat payload left less than 70000 bytes of free heap; start a new chat"};
     }
@@ -683,6 +696,7 @@ ChatResult streamChatCompletion(const Settings& settings,
 
 ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const std::vector<Message>& history,
+                                         const std::string& instructions,
                                          const ChatTextCallback& onText,
                                          const ToolExecutor& executeTool)
 {
@@ -696,7 +710,7 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
         if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
             return {false, completeResponse, "Not enough free heap to continue tool request safely"};
         }
-        const String payload = buildToolChatRequest(settings, history, rounds);
+        const String payload = buildToolChatRequest(settings, history, instructions, rounds);
         if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
             return {false, completeResponse,
                     "Tool payload left less than 70000 bytes of free heap; start a new chat"};

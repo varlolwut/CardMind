@@ -10,6 +10,7 @@ constexpr std::size_t kMaximumStoredChats = 20;
 constexpr std::size_t kMaximumStoredMessages = 64;
 constexpr std::size_t kMaximumStoredHistoryBytes = 32768;
 constexpr std::size_t kMaximumChatTitleCells = 28;
+constexpr std::size_t kMaximumChatInstructionsBytes = 2048;
 
 OperationResult initializeChatStorage();
 ChatsResult listChats();

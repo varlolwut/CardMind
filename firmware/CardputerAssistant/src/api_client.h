@@ -14,9 +14,11 @@ OperationResult synchronizeTlsClock();
 ModelsResult fetchModels(const Settings& settings);
 ChatResult streamChatCompletion(const Settings& settings,
                                 const std::vector<Message>& history,
+                                const std::string& instructions,
                                 const ChatTextCallback& onText);
 ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const std::vector<Message>& history,
+                                         const std::string& instructions,
                                          const ChatTextCallback& onText,
                                          const ToolExecutor& executeTool);
 

@@ -14,7 +14,7 @@ namespace cardputer {
 namespace {
 
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
-constexpr const char* kDefaultApiBaseUrl = "https://aiprimetech.io";
+constexpr const char* kDefaultApiBaseUrl = "https://api.example.com";
 constexpr const char* kDefaultSttBaseUrl = "https://api.groq.com/openai/v1";
 constexpr const char* kDefaultSttModel = "whisper-large-v3-turbo";
 constexpr const char* kDefaultWebSearchBaseUrl = "https://api.exa.ai";

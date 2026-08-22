@@ -1,4 +1,5 @@
 #include <M5Cardputer.h>
+#include <ArduinoJson.h>
 #include <SD.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -30,17 +31,28 @@ SET_LOOP_TASK_STACK_SIZE(16384);
 
 namespace {
 
-constexpr const char* kFirmwareVersion = "1.6.1";
+constexpr const char* kFirmwareVersion = "1.8.0";
 constexpr std::size_t kMaximumInputBytes = 1200;
 constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
+constexpr std::uint32_t kBatteryRefreshIntervalMs = 30000;
+constexpr std::size_t kFileViewerChunkBytes = 2048;
+constexpr std::size_t kFileViewerPageLines = 8;
 
 enum class Screen {
     Chat,
-    SettingsMenu,
+    MainCarousel,
+    VoiceMenu,
+    DeviceMenu,
+    FilesMenu,
+    WorkspaceFileList,
+    FileViewer,
+    Diagnostics,
     ControlsHelp,
     ModelPicker,
     ChatList,
+    ChatActions,
+    ChatInstructions,
     DeleteChatConfirm,
     WifiPicker,
     WifiPassword,
@@ -59,31 +71,69 @@ std::uint32_t transientStatusUntil = 0;
 std::size_t scrollOffset = 0;
 String serialInput;
 std::vector<Point2D_t> pressedKeys;
-Screen currentScreen = Screen::Chat;
+Screen currentScreen = Screen::MainCarousel;
 String activeChatId;
 String activeChatTitle = "New chat";
+std::string activeChatInstructions;
 bool chatStorageReady = false;
 String chatStorageError;
 bool fileWorkspaceReady = false;
 String fileWorkspaceError;
 std::size_t chatListIndex = 0;
+std::size_t chatActionsIndex = 0;
+String selectedChatId;
+String selectedChatTitle;
+std::string instructionsInput;
+String instructionsStatus;
 String deleteChatId;
 String deleteChatTitle;
-std::size_t settingsMenuIndex = 0;
+Screen deleteChatReturnScreen = Screen::ChatList;
+std::size_t voiceMenuIndex = 0;
+std::size_t deviceMenuIndex = 0;
+std::size_t filesMenuIndex = 0;
+std::size_t workspaceFileIndex = 0;
+std::size_t diagnosticsIndex = 0;
 std::size_t controlsHelpIndex = 0;
 std::size_t modelPickerIndex = 0;
 std::size_t wifiPickerIndex = 0;
 std::vector<cardputer::WifiNetwork> scannedWifiNetworks;
+std::vector<cardputer::WorkspaceFile> workspaceFiles;
+String fileViewerName;
+std::vector<std::string> fileViewerLines;
+std::vector<std::uint32_t> fileViewerPreviousOffsets;
+std::size_t fileViewerFirstLine = 0;
+std::uint32_t fileViewerChunkOffset = 0;
+std::uint32_t fileViewerNextOffset = 0;
+std::uint32_t fileViewerTotalBytes = 0;
+bool fileViewerEof = true;
 std::string wifiPasswordInput;
 String menuStatus;
 bool voiceStorageReady = false;
 String voiceStorageError;
 bool sttCredentialsValidated = false;
+std::size_t carouselIndex = 0;
+Screen modelReturnScreen = Screen::Chat;
+Screen wifiReturnScreen = Screen::Chat;
+Screen chatListReturnScreen = Screen::Chat;
+int batteryLevel = -1;
+bool batteryCharging = false;
+std::uint32_t lastBatteryRefreshAt = 0;
+bool startupInProgress = true;
 
 void ensureNetworkReady();
 void render();
 void submitPrompt();
 void runUiSearchEndToEndTest();
+
+void refreshBatteryStatus()
+{
+    const std::int32_t measuredLevel = M5Cardputer.Power.getBatteryLevel();
+    batteryLevel = measuredLevel < 0
+        ? -1
+        : std::min(100, static_cast<int>(measuredLevel));
+    batteryCharging = M5Cardputer.Power.isCharging() == m5::Power_Class::is_charging;
+    lastBatteryRefreshAt = millis();
+}
 
 std::size_t historyBytes(const std::vector<cardputer::Message>& messages)
 {
@@ -142,6 +192,7 @@ cardputer::OperationResult saveCurrentChat()
     const cardputer::ChatDocument document = {
         {activeChatId, activeChatTitle, updatedAt, static_cast<std::uint32_t>(history.size())},
         history,
+        activeChatInstructions,
     };
     return cardputer::saveChat(document);
 }
@@ -159,6 +210,7 @@ cardputer::OperationResult activateChat(const String& id)
     activeChatId = loaded.chat.summary.id;
     activeChatTitle = loaded.chat.summary.title;
     history = loaded.chat.messages;
+    activeChatInstructions = loaded.chat.instructions;
     activeResponse.clear();
     inputBuffer.clear();
     scrollOffset = 0;
@@ -177,6 +229,7 @@ cardputer::OperationResult createAndActivateChat()
     }
     activeChatId = created.chat.summary.id;
     activeChatTitle = created.chat.summary.title;
+    activeChatInstructions.clear();
     history.clear();
     activeResponse.clear();
     inputBuffer.clear();
@@ -228,11 +281,45 @@ void renderChatList()
 {
     cardputer::showSelectionList("CHATS", chatListItems(), chatListIndex,
                                  menuStatus.isEmpty()
-                                     ? String("ENTER open/new  FN+DEL delete")
+                                     ? String("UP/DOWN  ENTER options  FN+DEL")
                                      : menuStatus);
 }
 
-void openChatList()
+std::vector<String> chatActionItems()
+{
+    return {
+        "Open chat",
+        "Chat instructions",
+        "Delete chat",
+        "Back",
+    };
+}
+
+void renderChatActions()
+{
+    cardputer::showSelectionList(selectedChatTitle, chatActionItems(), chatActionsIndex,
+                                 menuStatus.isEmpty()
+                                     ? String("UP/DOWN  ENTER  ESC back")
+                                     : menuStatus);
+}
+
+void openChatActions(const cardputer::ChatSummary& chat)
+{
+    selectedChatId = chat.id;
+    selectedChatTitle = chat.title;
+    chatActionsIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::ChatActions;
+    renderChatActions();
+}
+
+void renderChatInstructions()
+{
+    cardputer::showTextEditor("CHAT INSTRUCTIONS", instructionsInput, keyboardLayout,
+                             cardputer::kMaximumChatInstructionsBytes, instructionsStatus);
+}
+
+void openChatList(Screen returnScreen)
 {
     const cardputer::OperationResult result = refreshChatList();
     if (!result.success) {
@@ -240,6 +327,7 @@ void openChatList()
         render();
         return;
     }
+    chatListReturnScreen = returnScreen;
     chatListIndex = 0;
     for (std::size_t index = 0; index < chats.size(); ++index) {
         if (chats[index].id == activeChatId) {
@@ -253,8 +341,14 @@ void openChatList()
 
 void render()
 {
+    if (startupInProgress) {
+        cardputer::showBusyScreen("CARDMIND", statusMessage.isEmpty() ? String("Starting...")
+                                                                       : statusMessage);
+        return;
+    }
     cardputer::showChat(history, activeResponse, inputBuffer, keyboardLayout,
-                        activeChatTitle, statusMessage, scrollOffset, WiFi.status() == WL_CONNECTED);
+                        activeChatTitle, statusMessage, scrollOffset, WiFi.status() == WL_CONNECTED,
+                        batteryLevel, batteryCharging);
 }
 
 void setTransientStatus(const String& message, std::uint32_t durationMs)
@@ -297,7 +391,7 @@ bool runPureSelfTest()
 
 void printStatus()
 {
-    Serial.printf("STATUS board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s wifi=%s tls_time=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u reset_reason=%d\n",
+    Serial.printf("STATUS board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s wifi=%s tls_time=%s battery=%d charging=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u reset_reason=%d\n",
                   M5.getBoard() == m5::board_t::board_M5CardputerADV ? "yes" : "no",
                   cardputer::settingsAreComplete(settings) ? "yes" : "no",
                   cardputer::voiceSettingsAreComplete(settings) ? "yes" : "no",
@@ -310,6 +404,8 @@ void printStatus()
                   fileWorkspaceReady ? "ready" : "unavailable",
                   WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
                   std::time(nullptr) >= 1700000000 ? "valid" : "invalid",
+                  batteryLevel,
+                  batteryCharging ? "yes" : "no",
                   static_cast<unsigned int>(history.size()),
                   static_cast<unsigned int>(ESP.getFreeHeap()),
                   static_cast<unsigned int>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
@@ -385,7 +481,7 @@ void runWebSearchRoundTripTest()
         {"user", "/search cardputer zero"},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
-        settings, testHistory, [](const std::string&) {},
+        settings, testHistory, "", [](const std::string&) {},
         [&searchCalled](const cardputer::ToolCall& call) {
             if (cardputer::isWebSearchToolName(call.name)) {
                 searchCalled = true;
@@ -410,7 +506,7 @@ void runApiTest()
         {"user", "Reply with exactly OK."},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletion(
-        settings, testHistory, [](const std::string&) {});
+        settings, testHistory, "", [](const std::string&) {});
     if (!result.success) {
         String safeError = result.error;
         safeError.replace("\r", " ");
@@ -434,12 +530,14 @@ void runStorageTest()
     }
     cardputer::ChatDocument document = created.chat;
     document.messages = {{"user", "test"}, {"assistant", "OK"}};
+    document.instructions = "Reply briefly.";
     const cardputer::OperationResult saved = cardputer::saveChat(document);
     const cardputer::ChatDocumentResult loaded = saved.success
         ? cardputer::loadChat(document.summary.id)
         : cardputer::ChatDocumentResult{false, {}, saved.error};
     const bool chatVerified = loaded.success && loaded.chat.messages.size() == 2 &&
-        loaded.chat.messages[1].content == "OK";
+        loaded.chat.messages[1].content == "OK" &&
+        loaded.chat.instructions == "Reply briefly.";
     const cardputer::OperationResult chatCleanup = cardputer::deleteChat(document.summary.id);
     if (!chatVerified || !chatCleanup.success) {
         Serial.println("STORAGETEST result=failed stage=chat_roundtrip");
@@ -475,7 +573,7 @@ void runToolApiTest()
         {"user", "Use write_file to save exactly OK in firmware_tool_test.txt, then confirm briefly."},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
-        settings, testHistory, [](const std::string&) {},
+        settings, testHistory, "", [](const std::string&) {},
         [&writeSucceeded](const cardputer::ToolCall& call) {
             const cardputer::ToolExecutionResult execution = cardputer::executeWorkspaceTool(call);
             if (call.name == "write_file" && execution.success) {
@@ -675,6 +773,7 @@ void submitPrompt()
         {activeChatId, pendingTitle, currentChatTimestamp(),
          static_cast<std::uint32_t>(pendingHistory.size())},
         std::move(pendingHistory),
+        activeChatInstructions,
     };
     const cardputer::OperationResult pendingSave = cardputer::saveChat(pendingDocument);
     if (!pendingSave.success) {
@@ -706,12 +805,12 @@ void submitPrompt()
                   useWebSearch ? "enabled" : "disabled");
     const cardputer::ChatResult result = useTools
         ? cardputer::streamChatCompletionWithTools(
-              settings, history, onText, [](const cardputer::ToolCall& call) {
+              settings, history, activeChatInstructions, onText, [](const cardputer::ToolCall& call) {
                   statusMessage = "Tool: " + String(call.name.c_str());
                   render();
                   return executeAvailableTool(call);
               })
-        : cardputer::streamChatCompletion(settings, history, onText);
+        : cardputer::streamChatCompletion(settings, history, activeChatInstructions, onText);
     if (!result.success) {
         activeResponse = result.response;
         statusMessage = result.error;
@@ -951,19 +1050,108 @@ void speakLastAssistantResponse()
     render();
 }
 
-std::vector<String> settingsMenuItems()
+std::vector<String> voiceMenuItems()
 {
     const unsigned int volumePercent =
         (static_cast<unsigned int>(settings.ttsVolume) * 100U + 127U) / 255U;
     return {
-        "Controls help",
-        "Wi-Fi network",
-        "Files download portal",
-        "Web setup (API/key)",
         settings.ttsAutoPlay ? "Auto TTS: ON" : "Auto TTS: OFF",
         "TTS volume: " + String(volumePercent) + "%",
-        "Back to chat",
+        "Configure voice APIs",
+        "Back to carousel",
     };
+}
+
+std::vector<String> deviceMenuItems()
+{
+    return {
+        "API and services setup",
+        "Diagnostics",
+        "Back to carousel",
+    };
+}
+
+std::vector<String> filesMenuItems()
+{
+    return {
+        "Browse SD workspace",
+        "Download portal (restart)",
+        "Back to carousel",
+    };
+}
+
+std::vector<String> diagnosticsItems()
+{
+    return {
+        "Firmware: " + String(kFirmwareVersion),
+        "Board: Cardputer ADV",
+        "Battery: " + (batteryLevel >= 0 ? String(batteryLevel) + "%" : String("unavailable")),
+        "Wi-Fi: " + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected"),
+        "microSD: " + String(fileWorkspaceReady ? "ready" : "unavailable"),
+        "Chats: " + String(chats.size()),
+        "Free heap: " + String(ESP.getFreeHeap()) + " B",
+        "Reset reason: " + String(static_cast<int>(esp_reset_reason())),
+    };
+}
+
+std::vector<String> workspaceFileItems()
+{
+    std::vector<String> items;
+    items.reserve(workspaceFiles.size());
+    for (const auto& file : workspaceFiles) {
+        items.push_back(file.name + "  " + String(file.size) + " B");
+    }
+    return items;
+}
+
+std::vector<cardputer::CarouselCard> carouselCards()
+{
+    const String networkSubtitle = WiFi.status() == WL_CONNECTED
+        ? String("Connected: ") + settings.wifiSsid
+        : String("Choose 2.4 GHz Wi-Fi");
+    return {
+        {"Chats", "Separate conversations", TFT_CYAN, cardputer::CarouselIcon::Chats},
+        {"AI", settings.model, TFT_PURPLE, cardputer::CarouselIcon::Ai},
+        {"Voice", "STT, TTS and volume", TFT_ORANGE, cardputer::CarouselIcon::Voice},
+        {"Network", networkSubtitle, TFT_GREENYELLOW, cardputer::CarouselIcon::Network},
+        {"Files", "SD workspace and portal", TFT_SKYBLUE, cardputer::CarouselIcon::Files},
+        {"Device", "Setup and diagnostics", TFT_YELLOW, cardputer::CarouselIcon::Device},
+        {"Help", "Controls and quick guide", TFT_MAGENTA, cardputer::CarouselIcon::Help},
+    };
+}
+
+void renderCarousel()
+{
+    cardputer::showCarousel(carouselCards(), carouselIndex,
+                            WiFi.status() == WL_CONNECTED, fileWorkspaceReady,
+                            batteryLevel, batteryCharging, menuStatus);
+}
+
+void openCarousel()
+{
+    carouselIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::MainCarousel;
+    renderCarousel();
+}
+
+void moveCarousel(cardputer::CarouselDirection direction)
+{
+    const auto cards = carouselCards();
+    if (cards.empty()) {
+        cardputer::showFatalError("Main carousel has no cards");
+        return;
+    }
+    const std::size_t previousIndex = carouselIndex;
+    if (direction == cardputer::CarouselDirection::Next) {
+        carouselIndex = (carouselIndex + 1) % cards.size();
+    } else {
+        carouselIndex = carouselIndex == 0 ? cards.size() - 1 : carouselIndex - 1;
+    }
+    menuStatus = "";
+    cardputer::animateCarousel(cards, previousIndex, carouselIndex, direction,
+                               WiFi.status() == WL_CONNECTED, fileWorkspaceReady,
+                               batteryLevel, batteryCharging, menuStatus);
 }
 
 std::uint8_t nextTtsVolume(std::uint8_t currentVolume)
@@ -994,12 +1182,15 @@ std::vector<String> controlsHelpItems()
         "FN+2  Select model",
         "FN+3  English / Russian",
         "FN+4  Main menu",
+        "Menu: plain arrow keys",
         "FN+5  Older messages / up",
         "FN+6  Newer messages / down",
         "FN+7  New chat",
         "FN+8  Speak last answer",
-        "Menu: ENTER  Select",
-        "Menu: FN+`  Back",
+        "Menu: ENTER  Open/select",
+        "Menu: ESC-marked key  Back",
+        "Chats: ENTER  Actions",
+        "Chat instructions: ENTER save",
         "Chats: FN+DEL  Delete",
     };
 }
@@ -1015,32 +1206,64 @@ std::vector<String> wifiPickerItems(const std::vector<cardputer::WifiNetwork>& n
     return items;
 }
 
-void renderSettingsMenu()
+void renderVoiceMenu()
 {
-    cardputer::showSelectionList("MAIN MENU", settingsMenuItems(), settingsMenuIndex,
-                                 menuStatus.isEmpty() ? "UP/DN  ENTER  FN+` back" : menuStatus);
+    cardputer::showSelectionList("VOICE", voiceMenuItems(), voiceMenuIndex,
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+void renderDeviceMenu()
+{
+    cardputer::showSelectionList("DEVICE", deviceMenuItems(), deviceMenuIndex,
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+void renderFilesMenu()
+{
+    cardputer::showSelectionList("FILES", filesMenuItems(), filesMenuIndex,
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+void renderWorkspaceFileList()
+{
+    cardputer::showSelectionList("SD WORKSPACE", workspaceFileItems(), workspaceFileIndex,
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+void renderFileViewer()
+{
+    const String position = String(fileViewerChunkOffset) + "/" +
+        String(fileViewerTotalBytes) + " B";
+    cardputer::showTextViewer(fileViewerName, fileViewerLines,
+                              fileViewerFirstLine, position);
+}
+
+void renderDiagnostics()
+{
+    cardputer::showSelectionList("DIAGNOSTICS", diagnosticsItems(), diagnosticsIndex,
+                                 "UP/DOWN scroll  ESC back");
 }
 
 void renderControlsHelp()
 {
     cardputer::showSelectionList("CONTROLS HELP", controlsHelpItems(), controlsHelpIndex,
-                                 "FN+5/6 scroll   FN+` back");
+                                 "UP/DOWN scroll  ESC back");
 }
 
 void renderModelPicker()
 {
     cardputer::showSelectionList("SELECT MODEL", availableModels, modelPickerIndex,
-                                 menuStatus.isEmpty() ? "UP/DN  ENTER  FN+` cancel" : menuStatus);
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
 }
 
 void renderWifiPicker()
 {
     cardputer::showSelectionList("SELECT WI-FI", wifiPickerItems(scannedWifiNetworks),
                                  wifiPickerIndex,
-                                 menuStatus.isEmpty() ? "UP/DN  ENTER  FN+` back" : menuStatus);
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
 }
 
-void openModelPicker()
+void openModelPicker(Screen returnScreen)
 {
     if (availableModels.empty()) {
         refreshModels();
@@ -1053,33 +1276,134 @@ void openModelPicker()
     modelPickerIndex = selected == availableModels.end()
         ? 0
         : static_cast<std::size_t>(std::distance(availableModels.begin(), selected));
+    modelReturnScreen = returnScreen;
     currentScreen = Screen::ModelPicker;
     renderModelPicker();
 }
 
-void openSettingsMenu()
+void openVoiceMenu()
 {
-    settingsMenuIndex = 0;
+    voiceMenuIndex = 0;
     menuStatus = "";
-    currentScreen = Screen::SettingsMenu;
-    renderSettingsMenu();
+    currentScreen = Screen::VoiceMenu;
+    renderVoiceMenu();
 }
 
-void openWifiPicker()
+void openDeviceMenu()
 {
+    deviceMenuIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::DeviceMenu;
+    renderDeviceMenu();
+}
+
+void openFilesMenu()
+{
+    filesMenuIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::FilesMenu;
+    renderFilesMenu();
+}
+
+void openWorkspaceFileList()
+{
+    const cardputer::WorkspaceFilesResult result = cardputer::listWorkspaceFiles();
+    if (!result.success) {
+        menuStatus = result.error;
+        renderFilesMenu();
+        return;
+    }
+    workspaceFiles = result.files;
+    workspaceFileIndex = 0;
+    menuStatus = workspaceFiles.empty() ? String("Workspace is empty") : String();
+    currentScreen = Screen::WorkspaceFileList;
+    renderWorkspaceFileList();
+}
+
+cardputer::OperationResult loadFileViewerChunk(std::uint32_t offset)
+{
+    JsonDocument request;
+    request["name"] = fileViewerName;
+    request["offset"] = offset;
+    request["max_bytes"] = kFileViewerChunkBytes;
+    String arguments;
+    serializeJson(request, arguments);
+    const cardputer::ToolExecutionResult result = cardputer::executeWorkspaceTool(
+        {"viewer-read", "read_file", arguments.c_str()});
+    if (!result.success) {
+        return {false, result.error};
+    }
+
+    JsonDocument response;
+    const DeserializationError parseError = deserializeJson(response, result.output);
+    if (parseError) {
+        return {false, "File viewer could not parse read_file output: " + String(parseError.c_str())};
+    }
+    if (!response["content"].is<const char*>() ||
+        !response["offset"].is<std::uint32_t>() ||
+        !response["next_offset"].is<std::uint32_t>() ||
+        !response["total_bytes"].is<std::uint32_t>() ||
+        !response["eof"].is<bool>()) {
+        return {false, "File viewer read_file output is missing required fields"};
+    }
+
+    const std::string content = response["content"].as<const char*>();
+    fileViewerLines = cardputer::wrapUtf8Text(content, 38);
+    if (fileViewerLines.empty()) {
+        fileViewerLines.push_back("");
+    }
+    fileViewerChunkOffset = response["offset"].as<std::uint32_t>();
+    fileViewerNextOffset = response["next_offset"].as<std::uint32_t>();
+    fileViewerTotalBytes = response["total_bytes"].as<std::uint32_t>();
+    fileViewerEof = response["eof"].as<bool>();
+    fileViewerFirstLine = 0;
+    return {true, ""};
+}
+
+void openSelectedWorkspaceFile()
+{
+    if (workspaceFileIndex >= workspaceFiles.size()) {
+        menuStatus = "File selection is out of range";
+        renderWorkspaceFileList();
+        return;
+    }
+    fileViewerName = workspaceFiles[workspaceFileIndex].name;
+    fileViewerPreviousOffsets.clear();
+    const cardputer::OperationResult result = loadFileViewerChunk(0);
+    if (!result.success) {
+        menuStatus = result.error;
+        renderWorkspaceFileList();
+        return;
+    }
+    menuStatus = "";
+    currentScreen = Screen::FileViewer;
+    renderFileViewer();
+}
+
+void openWifiPicker(Screen returnScreen)
+{
+    wifiReturnScreen = returnScreen;
     cardputer::showBusyScreen("WI-FI", "Scanning 2.4 GHz...");
     const cardputer::WifiScanResult scanResult = cardputer::scanWifiNetworks();
     if (!scanResult.success) {
         menuStatus = scanResult.error;
-        currentScreen = Screen::SettingsMenu;
-        renderSettingsMenu();
+        currentScreen = wifiReturnScreen;
+        if (currentScreen == Screen::MainCarousel) {
+            renderCarousel();
+        } else {
+            render();
+        }
         Serial.println("WARN event=wifi_scan result=failed source=device_ui");
         return;
     }
     if (scanResult.networks.empty()) {
         menuStatus = "No 2.4 GHz networks found";
-        currentScreen = Screen::SettingsMenu;
-        renderSettingsMenu();
+        currentScreen = wifiReturnScreen;
+        if (currentScreen == Screen::MainCarousel) {
+            renderCarousel();
+        } else {
+            render();
+        }
         Serial.println("WARN event=wifi_scan result=empty source=device_ui");
         return;
     }
@@ -1102,8 +1426,13 @@ void saveSelectedModel()
 {
     if (modelPickerIndex >= availableModels.size()) {
         statusMessage = "Model selection is out of range";
-        currentScreen = Screen::Chat;
-        render();
+        currentScreen = modelReturnScreen;
+        if (currentScreen == Screen::MainCarousel) {
+            menuStatus = statusMessage;
+            renderCarousel();
+        } else {
+            render();
+        }
         return;
     }
     const cardputer::OperationResult result = cardputer::saveModel(availableModels[modelPickerIndex]);
@@ -1114,9 +1443,14 @@ void saveSelectedModel()
     }
     settings.model = availableModels[modelPickerIndex];
     setTransientStatus("Model: " + settings.model, 2500);
-    currentScreen = Screen::Chat;
+    currentScreen = modelReturnScreen;
     Serial.println("INFO event=model_update result=ok source=device_ui");
-    render();
+    if (currentScreen == Screen::MainCarousel) {
+        menuStatus = "Model selected";
+        renderCarousel();
+    } else {
+        render();
+    }
 }
 
 void renderWifiPassword()
@@ -1177,11 +1511,19 @@ void connectSelectedWifi(const String& enteredPassword)
     }
     settings = candidate;
     wifiPasswordInput.clear();
-    currentScreen = Screen::Chat;
-    setTransientStatus("Wi-Fi connected", 2500);
+    currentScreen = wifiReturnScreen;
+    if (currentScreen == Screen::MainCarousel) {
+        menuStatus = "Wi-Fi connected";
+    } else {
+        setTransientStatus("Wi-Fi connected", 2500);
+    }
     Serial.println("INFO event=wifi_update result=ok source=device_ui");
     refreshModels();
-    render();
+    if (currentScreen == Screen::MainCarousel) {
+        renderCarousel();
+    } else {
+        render();
+    }
 }
 
 void selectWifiNetwork()
@@ -1262,9 +1604,11 @@ void handleKeyboard()
         return;
     }
     auto& keys = M5Cardputer.Keyboard.keysState();
-    const bool cancelPressed = keys.fn && keys.esc;
-    const bool upPressed = keys.fn && (keys.f5 || keys.up);
-    const bool downPressed = keys.fn && (keys.f6 || keys.down);
+    const bool cancelPressed = keys.esc || (!keys.fn && newPressContains(newPresses, '`'));
+    const bool upPressed = keys.f5 || keys.up || (!keys.fn && newPressContains(newPresses, ';'));
+    const bool downPressed = keys.f6 || keys.down || (!keys.fn && newPressContains(newPresses, '.'));
+    const bool leftPressed = keys.left || (!keys.fn && newPressContains(newPresses, ','));
+    const bool rightPressed = keys.right || (!keys.fn && newPressContains(newPresses, '/'));
     const bool enterPressed = newPressContains(newPresses, KEY_ENTER);
     const bool deletePressed = keys.fn && keys.del;
     const bool clearDraftPressed = keys.ctrl && newPressContains(newPresses, KEY_BACKSPACE);
@@ -1274,9 +1618,13 @@ void handleKeyboard()
     if (currentScreen == Screen::ChatList) {
         const std::size_t itemCount = chats.size() + 1;
         if (cancelPressed) {
-            currentScreen = Screen::Chat;
+            currentScreen = chatListReturnScreen;
             menuStatus = "";
-            render();
+            if (currentScreen == Screen::MainCarousel) {
+                renderCarousel();
+            } else {
+                render();
+            }
         } else if (upPressed) {
             chatListIndex = chatListIndex > 0 ? chatListIndex - 1 : 0;
             menuStatus = "";
@@ -1293,34 +1641,165 @@ void handleKeyboard()
                 const cardputer::ChatSummary& selected = chats[chatListIndex - 1];
                 deleteChatId = selected.id;
                 deleteChatTitle = selected.title;
+                deleteChatReturnScreen = Screen::ChatList;
                 currentScreen = Screen::DeleteChatConfirm;
                 cardputer::showConfirmation("DELETE CHAT", deleteChatTitle,
-                                            "ENTER delete  FN+` cancel");
+                                            "ENTER delete  ` cancel");
             }
         } else if (enterPressed) {
-            const cardputer::OperationResult result = chatListIndex == 0
-                ? createAndActivateChat()
-                : activateChat(chats[chatListIndex - 1].id);
-            if (!result.success) {
-                menuStatus = result.error;
-                renderChatList();
+            if (chatListIndex > 0) {
+                openChatActions(chats[chatListIndex - 1]);
             } else {
+                const cardputer::OperationResult result = createAndActivateChat();
+                if (!result.success) {
+                    menuStatus = result.error;
+                    renderChatList();
+                    return;
+                }
                 currentScreen = Screen::Chat;
                 menuStatus = "";
-                setTransientStatus(chatListIndex == 0 ? String("New chat created")
-                                                      : String("Chat opened"), 2000);
+                setTransientStatus("New chat created", 2000);
                 render();
             }
         }
         return;
     }
 
-    if (currentScreen == Screen::DeleteChatConfirm) {
+    if (currentScreen == Screen::ChatActions) {
+        const std::size_t itemCount = chatActionItems().size();
         if (cancelPressed) {
             currentScreen = Screen::ChatList;
+            menuStatus = "";
+            renderChatList();
+        } else if (upPressed) {
+            chatActionsIndex = chatActionsIndex > 0 ? chatActionsIndex - 1 : 0;
+            menuStatus = "";
+            renderChatActions();
+        } else if (downPressed) {
+            chatActionsIndex = std::min(chatActionsIndex + 1, itemCount - 1);
+            menuStatus = "";
+            renderChatActions();
+        } else if (enterPressed && chatActionsIndex == 0) {
+            const cardputer::OperationResult result = activateChat(selectedChatId);
+            if (!result.success) {
+                menuStatus = result.error;
+                renderChatActions();
+            } else {
+                currentScreen = Screen::Chat;
+                setTransientStatus("Chat opened", 2000);
+                render();
+            }
+        } else if (enterPressed && chatActionsIndex == 1) {
+            const cardputer::ChatDocumentResult loaded = cardputer::loadChat(selectedChatId);
+            if (!loaded.success) {
+                menuStatus = loaded.error;
+                renderChatActions();
+            } else {
+                instructionsInput = loaded.chat.instructions;
+                instructionsStatus = "";
+                currentScreen = Screen::ChatInstructions;
+                renderChatInstructions();
+            }
+        } else if (enterPressed && chatActionsIndex == 2) {
+            deleteChatId = selectedChatId;
+            deleteChatTitle = selectedChatTitle;
+            deleteChatReturnScreen = Screen::ChatActions;
+            currentScreen = Screen::DeleteChatConfirm;
+            cardputer::showConfirmation("DELETE CHAT", deleteChatTitle,
+                                        "ENTER delete  ESC cancel");
+        } else if (enterPressed) {
+            currentScreen = Screen::ChatList;
+            menuStatus = "";
+            renderChatList();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ChatInstructions) {
+        if (cancelPressed) {
+            instructionsInput.clear();
+            instructionsStatus = "";
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (keys.fn && keys.f3) {
+            keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
+                ? cardputer::KeyboardLayout::Russian
+                : cardputer::KeyboardLayout::English;
+            instructionsStatus = keyboardLayout == cardputer::KeyboardLayout::English
+                ? String("English layout")
+                : String("Russian layout");
+            renderChatInstructions();
+        } else if (clearDraftPressed) {
+            instructionsInput.clear();
+            instructionsStatus = "Instructions cleared; ENTER to save";
+            renderChatInstructions();
+        } else if (backspacePressed) {
+            if (!instructionsInput.empty()) {
+                instructionsInput = cardputer::removeLastUtf8CodePoint(instructionsInput);
+            }
+            instructionsStatus = "";
+            renderChatInstructions();
+        } else if (enterPressed) {
+            cardputer::ChatDocumentResult loaded = cardputer::loadChat(selectedChatId);
+            if (!loaded.success) {
+                instructionsStatus = loaded.error;
+                renderChatInstructions();
+                return;
+            }
+            loaded.chat.instructions = instructionsInput;
+            const std::uint64_t updatedAt = currentChatTimestamp();
+            if (updatedAt != 0) {
+                loaded.chat.summary.updatedAt = updatedAt;
+            }
+            const cardputer::OperationResult saved = cardputer::saveChat(loaded.chat);
+            if (!saved.success) {
+                instructionsStatus = saved.error;
+                renderChatInstructions();
+                return;
+            }
+            if (selectedChatId == activeChatId) {
+                activeChatInstructions = instructionsInput;
+            }
+            const cardputer::OperationResult listResult = refreshChatList();
+            if (!listResult.success) {
+                instructionsStatus = listResult.error;
+                renderChatInstructions();
+                return;
+            }
+            instructionsInput.clear();
+            instructionsStatus = "";
+            menuStatus = loaded.chat.instructions.empty()
+                ? String("Instructions disabled")
+                : String("Instructions saved");
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
+            for (const char character : printableNewKeys(newPresses)) {
+                const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
+                    ? cardputer::mapKeyToRussian(character)
+                    : std::string(1, character);
+                if (instructionsInput.size() + text.size() > cardputer::kMaximumChatInstructionsBytes) {
+                    instructionsStatus = "Instruction limit: 2048 bytes";
+                    break;
+                }
+                instructionsInput += text;
+                instructionsStatus = "";
+            }
+            renderChatInstructions();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::DeleteChatConfirm) {
+        if (cancelPressed) {
+            currentScreen = deleteChatReturnScreen;
             deleteChatId = "";
             deleteChatTitle = "";
-            renderChatList();
+            if (currentScreen == Screen::ChatActions) {
+                renderChatActions();
+            } else {
+                renderChatList();
+            }
         } else if (enterPressed) {
             const bool deletingActive = deleteChatId == activeChatId;
             cardputer::OperationResult result = cardputer::deleteChat(deleteChatId);
@@ -1346,33 +1825,56 @@ void handleKeyboard()
         return;
     }
 
-    if (currentScreen == Screen::SettingsMenu) {
-        const std::size_t itemCount = settingsMenuItems().size();
+    if (currentScreen == Screen::MainCarousel) {
         if (cancelPressed) {
             currentScreen = Screen::Chat;
-            statusMessage = "Ready";
+            menuStatus = "";
             render();
-        } else if (upPressed) {
-            settingsMenuIndex = settingsMenuIndex > 0 ? settingsMenuIndex - 1 : 0;
-            renderSettingsMenu();
-        } else if (downPressed) {
-            settingsMenuIndex = std::min(settingsMenuIndex + 1, itemCount - 1);
-            renderSettingsMenu();
+        } else if (leftPressed) {
+            moveCarousel(cardputer::CarouselDirection::Previous);
+        } else if (rightPressed) {
+            moveCarousel(cardputer::CarouselDirection::Next);
         } else if (enterPressed) {
-            if (settingsMenuIndex == 0) {
+            if (carouselIndex == 0) {
+                openChatList(Screen::MainCarousel);
+            } else if (carouselIndex == 1) {
+                openModelPicker(Screen::MainCarousel);
+            } else if (carouselIndex == 2) {
+                openVoiceMenu();
+            } else if (carouselIndex == 3) {
+                openWifiPicker(Screen::MainCarousel);
+            } else if (carouselIndex == 4) {
+                openFilesMenu();
+            } else if (carouselIndex == 5) {
+                openDeviceMenu();
+            } else if (carouselIndex == 6) {
                 controlsHelpIndex = 0;
                 currentScreen = Screen::ControlsHelp;
                 renderControlsHelp();
-            } else if (settingsMenuIndex == 1) {
-                openWifiPicker();
-            } else if (settingsMenuIndex == 2) {
-                cardputer::runFilePortal();
-            } else if (settingsMenuIndex == 3) {
-                cardputer::runProvisioningPortal(settings);
-            } else if (settingsMenuIndex == 4) {
+            } else {
+                cardputer::showFatalError("Carousel selection is out of range");
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::VoiceMenu) {
+        const std::size_t itemCount = voiceMenuItems().size();
+        if (cancelPressed) {
+            currentScreen = Screen::MainCarousel;
+            menuStatus = "";
+            renderCarousel();
+        } else if (upPressed) {
+            voiceMenuIndex = voiceMenuIndex > 0 ? voiceMenuIndex - 1 : 0;
+            renderVoiceMenu();
+        } else if (downPressed) {
+            voiceMenuIndex = std::min(voiceMenuIndex + 1, itemCount - 1);
+            renderVoiceMenu();
+        } else if (enterPressed) {
+            if (voiceMenuIndex == 0) {
                 if (!settings.ttsAutoPlay && !cardputer::ttsSettingsAreComplete(settings)) {
                     menuStatus = "Configure TTS in Web setup first";
-                    renderSettingsMenu();
+                    renderVoiceMenu();
                     return;
                 }
                 cardputer::Settings candidate = settings;
@@ -1384,8 +1886,8 @@ void handleKeyboard()
                     settings = candidate;
                     menuStatus = settings.ttsAutoPlay ? "Auto TTS enabled" : "Auto TTS disabled";
                 }
-                renderSettingsMenu();
-            } else if (settingsMenuIndex == 5) {
+                renderVoiceMenu();
+            } else if (voiceMenuIndex == 1) {
                 cardputer::Settings candidate = settings;
                 candidate.ttsVolume = nextTtsVolume(candidate.ttsVolume);
                 const cardputer::OperationResult result = cardputer::saveSettings(candidate);
@@ -1397,12 +1899,150 @@ void handleKeyboard()
                         (static_cast<unsigned int>(settings.ttsVolume) * 100U + 127U) / 255U;
                     menuStatus = "TTS volume set to " + String(volumePercent) + "%";
                 }
-                renderSettingsMenu();
+                renderVoiceMenu();
+            } else if (voiceMenuIndex == 2) {
+                cardputer::runProvisioningPortal(settings);
             } else {
-                currentScreen = Screen::Chat;
-                statusMessage = "Ready";
-                render();
+                currentScreen = Screen::MainCarousel;
+                menuStatus = "";
+                renderCarousel();
             }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::DeviceMenu) {
+        const std::size_t itemCount = deviceMenuItems().size();
+        if (cancelPressed) {
+            currentScreen = Screen::MainCarousel;
+            menuStatus = "";
+            renderCarousel();
+        } else if (upPressed) {
+            deviceMenuIndex = deviceMenuIndex > 0 ? deviceMenuIndex - 1 : 0;
+            renderDeviceMenu();
+        } else if (downPressed) {
+            deviceMenuIndex = std::min(deviceMenuIndex + 1, itemCount - 1);
+            renderDeviceMenu();
+        } else if (enterPressed) {
+            if (deviceMenuIndex == 0) {
+                cardputer::runProvisioningPortal(settings);
+            } else if (deviceMenuIndex == 1) {
+                diagnosticsIndex = 0;
+                currentScreen = Screen::Diagnostics;
+                renderDiagnostics();
+            } else {
+                currentScreen = Screen::MainCarousel;
+                menuStatus = "";
+                renderCarousel();
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::FilesMenu) {
+        const std::size_t itemCount = filesMenuItems().size();
+        if (cancelPressed) {
+            currentScreen = Screen::MainCarousel;
+            menuStatus = "";
+            renderCarousel();
+        } else if (upPressed) {
+            filesMenuIndex = filesMenuIndex > 0 ? filesMenuIndex - 1 : 0;
+            renderFilesMenu();
+        } else if (downPressed) {
+            filesMenuIndex = std::min(filesMenuIndex + 1, itemCount - 1);
+            renderFilesMenu();
+        } else if (enterPressed) {
+            if (filesMenuIndex == 0) {
+                openWorkspaceFileList();
+            } else if (filesMenuIndex == 1) {
+                cardputer::runFilePortal();
+            } else {
+                currentScreen = Screen::MainCarousel;
+                menuStatus = "";
+                renderCarousel();
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::WorkspaceFileList) {
+        const std::size_t itemCount = workspaceFiles.size();
+        if (cancelPressed) {
+            currentScreen = Screen::FilesMenu;
+            menuStatus = "";
+            renderFilesMenu();
+        } else if (upPressed && itemCount > 0) {
+            workspaceFileIndex = workspaceFileIndex > 0 ? workspaceFileIndex - 1 : 0;
+            renderWorkspaceFileList();
+        } else if (downPressed && itemCount > 0) {
+            workspaceFileIndex = std::min(workspaceFileIndex + 1, itemCount - 1);
+            renderWorkspaceFileList();
+        } else if (enterPressed && itemCount > 0) {
+            openSelectedWorkspaceFile();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::FileViewer) {
+        if (cancelPressed) {
+            currentScreen = Screen::WorkspaceFileList;
+            menuStatus = "";
+            renderWorkspaceFileList();
+        } else if (upPressed) {
+            if (fileViewerFirstLine > 0) {
+                fileViewerFirstLine = fileViewerFirstLine > kFileViewerPageLines - 1
+                    ? fileViewerFirstLine - (kFileViewerPageLines - 1)
+                    : 0;
+                renderFileViewer();
+            } else if (!fileViewerPreviousOffsets.empty()) {
+                const std::uint32_t previousOffset = fileViewerPreviousOffsets.back();
+                fileViewerPreviousOffsets.pop_back();
+                const cardputer::OperationResult result = loadFileViewerChunk(previousOffset);
+                if (!result.success) {
+                    currentScreen = Screen::WorkspaceFileList;
+                    menuStatus = result.error;
+                    renderWorkspaceFileList();
+                } else {
+                    fileViewerFirstLine = fileViewerLines.size() > kFileViewerPageLines
+                        ? fileViewerLines.size() - kFileViewerPageLines
+                        : 0;
+                    renderFileViewer();
+                }
+            }
+        } else if (downPressed) {
+            if (fileViewerFirstLine + kFileViewerPageLines < fileViewerLines.size()) {
+                fileViewerFirstLine = std::min(
+                    fileViewerFirstLine + kFileViewerPageLines - 1,
+                    fileViewerLines.size() - 1);
+                renderFileViewer();
+            } else if (!fileViewerEof) {
+                const std::uint32_t currentOffset = fileViewerChunkOffset;
+                const cardputer::OperationResult result = loadFileViewerChunk(fileViewerNextOffset);
+                if (!result.success) {
+                    currentScreen = Screen::WorkspaceFileList;
+                    menuStatus = result.error;
+                    renderWorkspaceFileList();
+                } else {
+                    fileViewerPreviousOffsets.push_back(currentOffset);
+                    renderFileViewer();
+                }
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::Diagnostics) {
+        const std::size_t itemCount = diagnosticsItems().size();
+        if (cancelPressed) {
+            currentScreen = Screen::DeviceMenu;
+            menuStatus = "";
+            renderDeviceMenu();
+        } else if (upPressed) {
+            diagnosticsIndex = diagnosticsIndex > 0 ? diagnosticsIndex - 1 : 0;
+            renderDiagnostics();
+        } else if (downPressed) {
+            diagnosticsIndex = std::min(diagnosticsIndex + 1, itemCount - 1);
+            renderDiagnostics();
         }
         return;
     }
@@ -1410,9 +2050,9 @@ void handleKeyboard()
     if (currentScreen == Screen::ControlsHelp) {
         const std::size_t itemCount = controlsHelpItems().size();
         if (cancelPressed) {
-            currentScreen = Screen::SettingsMenu;
+            currentScreen = Screen::MainCarousel;
             menuStatus = "";
-            renderSettingsMenu();
+            renderCarousel();
         } else if (upPressed) {
             controlsHelpIndex = controlsHelpIndex > 0 ? controlsHelpIndex - 1 : 0;
             renderControlsHelp();
@@ -1425,9 +2065,14 @@ void handleKeyboard()
 
     if (currentScreen == Screen::ModelPicker) {
         if (cancelPressed) {
-            currentScreen = Screen::Chat;
-            statusMessage = "Model selection cancelled";
-            render();
+            currentScreen = modelReturnScreen;
+            if (currentScreen == Screen::MainCarousel) {
+                menuStatus = "Model selection cancelled";
+                renderCarousel();
+            } else {
+                statusMessage = "Model selection cancelled";
+                render();
+            }
         } else if (upPressed) {
             modelPickerIndex = modelPickerIndex > 0 ? modelPickerIndex - 1 : 0;
             renderModelPicker();
@@ -1442,9 +2087,13 @@ void handleKeyboard()
 
     if (currentScreen == Screen::WifiPicker) {
         if (cancelPressed) {
-            currentScreen = Screen::SettingsMenu;
+            currentScreen = wifiReturnScreen;
             menuStatus = "";
-            renderSettingsMenu();
+            if (currentScreen == Screen::MainCarousel) {
+                renderCarousel();
+            } else {
+                render();
+            }
         } else if (upPressed) {
             wifiPickerIndex = wifiPickerIndex > 0 ? wifiPickerIndex - 1 : 0;
             menuStatus = "";
@@ -1488,11 +2137,11 @@ void handleKeyboard()
 
     if (keys.fn && keys.f1) {
         menuStatus = "";
-        openChatList();
+        openChatList(Screen::Chat);
         return;
     } else if (keys.fn && keys.f2) {
         menuStatus = "";
-        openModelPicker();
+        openModelPicker(Screen::Chat);
         return;
     } else if (keys.fn && keys.f3) {
         keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
@@ -1502,7 +2151,7 @@ void handleKeyboard()
                                ? String("English layout") : String("Russian layout"),
                            1800);
     } else if (keys.fn && keys.f4) {
-        openSettingsMenu();
+        openCarousel();
         return;
     } else if (keys.fn && keys.f7) {
         const cardputer::OperationResult result = createAndActivateChat();
@@ -1554,6 +2203,8 @@ void setup()
             delay(1000);
         }
     }
+    statusMessage = "Starting...";
+    cardputer::showBusyScreen("CARDMIND", statusMessage);
     const bool isAdv = M5.getBoard() == m5::board_t::board_M5CardputerADV;
     Serial.printf("BOARD adv=%s type=%d\n", isAdv ? "yes" : "no", static_cast<int>(M5.getBoard()));
     if (!isAdv) {
@@ -1563,6 +2214,9 @@ void setup()
             delay(1000);
         }
     }
+    refreshBatteryStatus();
+    Serial.printf("POWER battery=%d charging=%s\n",
+                  batteryLevel, batteryCharging ? "yes" : "no");
     Serial.printf("SELFTEST result=%s\n", runPureSelfTest() ? "pass" : "fail");
     if (!runPureSelfTest()) {
         cardputer::showFatalError("Built-in UTF-8, layout, SSE, or Cyrillic font self-test failed");
@@ -1613,13 +2267,29 @@ void setup()
     } else {
         Serial.println("ERROR event=network_start result=failed");
     }
-    render();
+    carouselIndex = 0;
+    menuStatus = "";
+    startupInProgress = false;
+    currentScreen = Screen::MainCarousel;
+    renderCarousel();
     Serial.println("READY");
 }
 
 void loop()
 {
     M5Cardputer.update();
+    if (millis() - lastBatteryRefreshAt >= kBatteryRefreshIntervalMs) {
+        const int previousBatteryLevel = batteryLevel;
+        const bool previousBatteryCharging = batteryCharging;
+        refreshBatteryStatus();
+        if (batteryLevel != previousBatteryLevel || batteryCharging != previousBatteryCharging) {
+            if (currentScreen == Screen::Chat) {
+                render();
+            } else if (currentScreen == Screen::MainCarousel) {
+                renderCarousel();
+            }
+        }
+    }
     updateTransientStatus();
     updateSerial();
     if (currentScreen == Screen::Chat && M5Cardputer.BtnA.wasPressed()) {

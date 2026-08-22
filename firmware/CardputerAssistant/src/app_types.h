@@ -95,6 +95,7 @@ struct ChatSummary {
 struct ChatDocument {
     ChatSummary summary;
     std::vector<Message> messages;
+    std::string instructions;
 };
 
 struct ChatsResult {
