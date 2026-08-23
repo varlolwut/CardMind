@@ -260,7 +260,9 @@ void updateProvisioningSerial()
         const char character = static_cast<char>(Serial.read());
         if (character == '\n') {
             serialCommand.trim();
-            if (serialCommand == "STATUS") {
+            if (serialCommand == "PING") {
+                Serial.println("PONG");
+            } else if (serialCommand == "STATUS") {
                 Serial.printf("STATUS board_adv=%s configured=%s search_configured=%s tts_configured=%s wifi=ap portal=ready heap=%u\n",
                               M5.getBoard() == m5::board_t::board_M5CardputerADV ? "yes" : "no",
                               settingsAreComplete(currentSettings) ? "yes" : "no",
@@ -272,6 +274,7 @@ void updateProvisioningSerial()
             } else if (!serialCommand.isEmpty()) {
                 Serial.println("ERROR event=serial_command reason=unsupported_command");
             }
+            Serial.flush();
             serialCommand = "";
         } else if (character != '\r' && serialCommand.length() < 32) {
             serialCommand += character;

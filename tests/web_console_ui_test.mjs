@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 
 const sourcePath = new URL("../firmware/CardputerAssistant/src/web_console.cpp", import.meta.url);
 const source = readFileSync(sourcePath, "utf8");
-const functionStart = source.indexOf("String consolePage()\n{");
+const functionStart = source.indexOf("void sendConsolePage()\n{");
 const functionEnd = source.indexOf("\nvoid sendLoginPage()", functionStart);
 
 if (functionStart < 0 || functionEnd < 0) {
-    throw new Error("Could not locate consolePage in web_console.cpp");
+    throw new Error("Could not locate sendConsolePage in web_console.cpp");
 }
 
 const functionSource = source.slice(functionStart, functionEnd);
@@ -25,6 +25,8 @@ const requiredFragments = [
     'id="fileContent"',
     'id="sshTerminal"',
     'id="diagnostics"',
+    'id="actionDialog"',
+    'class="mobile-nav"',
 ];
 
 for (const fragment of requiredFragments) {

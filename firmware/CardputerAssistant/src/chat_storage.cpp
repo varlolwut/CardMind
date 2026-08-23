@@ -196,6 +196,33 @@ String generateChatId()
 
 }  // namespace
 
+HistoryFitResult fitHistoryToActiveContext(const std::vector<Message>& messages)
+{
+    std::size_t firstRetained = 0;
+    std::size_t retainedBytes = 0;
+    for (const auto& message : messages) {
+        retainedBytes += message.content.size();
+    }
+    while (messages.size() - firstRetained > kMaximumStoredMessages ||
+           retainedBytes > kMaximumStoredHistoryBytes) {
+        const std::size_t remaining = messages.size() - firstRetained;
+        if (remaining < 2) {
+            firstRetained = messages.size();
+            retainedBytes = 0;
+            break;
+        }
+        retainedBytes -= messages[firstRetained].content.size();
+        retainedBytes -= messages[firstRetained + 1].content.size();
+        firstRetained += 2;
+    }
+    return {
+        std::vector<Message>(messages.begin() + static_cast<std::ptrdiff_t>(firstRetained),
+                             messages.end()),
+        std::vector<Message>(messages.begin(),
+                             messages.begin() + static_cast<std::ptrdiff_t>(firstRetained)),
+    };
+}
+
 OperationResult initializeChatStorage()
 {
     if (SD.cardType() == CARD_NONE) {
