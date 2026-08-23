@@ -717,7 +717,8 @@ bool runPureSelfTest()
 
 void printStatus()
 {
-    Serial.printf("STATUS board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s crash_journal=%s previous_operation=%s wifi=%s tls_time=%s battery=%d charging=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u brightness=%u sleep_min=%u repeat_ms=%u power=%u cpu_mhz=%u reset_reason=%d\n",
+    Serial.printf("STATUS version=%s board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s crash_journal=%s previous_operation=%s wifi=%s tls_time=%s battery=%d charging=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u brightness=%u sleep_min=%u repeat_ms=%u power=%u cpu_mhz=%u reset_reason=%d\n",
+                  kFirmwareVersion,
                   M5.getBoard() == m5::board_t::board_M5CardputerADV ? "yes" : "no",
                   cardputer::settingsAreComplete(settings) ? "yes" : "no",
                   cardputer::voiceSettingsAreComplete(settings) ? "yes" : "no",
