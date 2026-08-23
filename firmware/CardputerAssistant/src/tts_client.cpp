@@ -59,6 +59,88 @@ constexpr std::size_t kPlaybackBuffers = 3;
 constexpr int kMaximumAttempts = 3;
 std::array<std::array<std::int16_t, kPlaybackSamples>, kPlaybackBuffers> playbackBuffers;
 
+class ControlledFileStream final : public Stream {
+public:
+    ControlledFileStream(File& file,
+                         std::size_t maximumBytes,
+                         const SpeechPlaybackControl& control)
+        : file_(file), maximumBytes_(maximumBytes), control_(control)
+    {
+    }
+
+    std::size_t write(std::uint8_t value) override
+    {
+        return write(&value, 1);
+    }
+
+    std::size_t write(const std::uint8_t* buffer, std::size_t bytes) override
+    {
+        if (control_() == SpeechPlaybackCommand::Stop) {
+            canceled_ = true;
+            return 0;
+        }
+        if (buffer == nullptr || written_ + bytes > maximumBytes_) {
+            limitExceeded_ = true;
+            return 0;
+        }
+        const std::size_t result = file_.write(buffer, bytes);
+        written_ += result;
+        if (result != bytes) {
+            storageFailed_ = true;
+        }
+        return result;
+    }
+
+    int available() override
+    {
+        return 0;
+    }
+
+    int read() override
+    {
+        return -1;
+    }
+
+    int peek() override
+    {
+        return -1;
+    }
+
+    void flush() override
+    {
+        file_.flush();
+    }
+
+    std::size_t written() const
+    {
+        return written_;
+    }
+
+    bool canceled() const
+    {
+        return canceled_;
+    }
+
+    bool limitExceeded() const
+    {
+        return limitExceeded_;
+    }
+
+    bool storageFailed() const
+    {
+        return storageFailed_;
+    }
+
+private:
+    File& file_;
+    std::size_t maximumBytes_;
+    const SpeechPlaybackControl& control_;
+    std::size_t written_ = 0;
+    bool canceled_ = false;
+    bool limitExceeded_ = false;
+    bool storageFailed_ = false;
+};
+
 bool isTransientStatus(int status)
 {
     return status <= 0 || status == 429 || status == 500 || status == 502 ||
@@ -216,53 +298,39 @@ OperationResult downloadSpeech(const Settings& settings,
                 http.end();
                 return {false, "Failed to create temporary TTS PCM file on microSD"};
             }
-            NetworkClient* stream = http.getStreamPtr();
-            std::array<std::uint8_t, 2048> buffer = {};
-            std::size_t written = 0;
-            std::uint32_t lastDataAt = millis();
-            OperationResult transfer = {true, ""};
-            while (declaredSize < 0 || written < static_cast<std::size_t>(declaredSize)) {
-                if (control() == SpeechPlaybackCommand::Stop) {
-                    transfer = {false, "Speech synthesis canceled by user"};
-                    break;
-                }
-                const int available = stream->available();
-                if (available <= 0) {
-                    if (!http.connected()) {
-                        break;
-                    }
-                    if (millis() - lastDataAt >= kHttpTimeoutMs) {
-                        transfer = {false, "TTS PCM response body timed out"};
-                        break;
-                    }
-                    delay(2);
-                    continue;
-                }
-                const std::size_t requested = std::min<std::size_t>(
-                    buffer.size(), static_cast<std::size_t>(available));
-                const std::size_t received = stream->readBytes(buffer.data(), requested);
-                if (received == 0 || written + received > kMaximumPcmBytes ||
-                    file.write(buffer.data(), received) != received) {
-                    transfer = {false, written + received > kMaximumPcmBytes
-                        ? "TTS PCM response exceeded the 16 MiB microSD safety limit"
-                        : "Failed to stream TTS PCM response to microSD"};
-                    break;
-                }
-                written += received;
-                lastDataAt = millis();
-            }
-            file.flush();
+            ControlledFileStream sink(file, kMaximumPcmBytes, control);
+            const int transferBytes = http.writeToStream(&sink);
+            sink.flush();
             file.close();
             http.end();
-            if (!transfer.success) {
+            if (sink.canceled()) {
                 removeTemporaryPcm();
-                return transfer;
+                return {false, "Speech synthesis canceled by user"};
             }
-            if (declaredSize >= 0 && written != static_cast<std::size_t>(declaredSize)) {
+            if (sink.limitExceeded()) {
+                removeTemporaryPcm();
+                return {false, "TTS PCM response exceeded the 16 MiB microSD safety limit"};
+            }
+            if (sink.storageFailed()) {
+                removeTemporaryPcm();
+                return {false, "Failed to stream TTS PCM response to microSD"};
+            }
+            if (transferBytes < 0) {
+                removeTemporaryPcm();
+                lastError = "TTS PCM response failed: " + HTTPClient::errorToString(transferBytes);
+                if (attempt == kMaximumAttempts) {
+                    return {false, lastError};
+                }
+                Serial.printf("WARN event=tts_body attempt=%d error=%d retry=yes\n",
+                              attempt, transferBytes);
+                delay(250U * static_cast<std::uint32_t>(attempt));
+                continue;
+            }
+            if (declaredSize >= 0 && sink.written() != static_cast<std::size_t>(declaredSize)) {
                 removeTemporaryPcm();
                 return {false, "TTS PCM response ended before all bytes arrived"};
             }
-            if (written == 0) {
+            if (sink.written() == 0) {
                 removeTemporaryPcm();
                 return {false, "TTS returned an empty PCM response"};
             }

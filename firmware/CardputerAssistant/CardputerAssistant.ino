@@ -41,7 +41,7 @@ SET_LOOP_TASK_STACK_SIZE(16384);
 
 namespace {
 
-constexpr const char* kFirmwareVersion = "1.9.0";
+constexpr const char* kFirmwareVersion = "1.9.1";
 constexpr std::size_t kMaximumInputBytes = 1200;
 constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
