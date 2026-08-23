@@ -616,7 +616,7 @@ void runWebSearchRoundTripTest()
                 return cardputer::executeWebSearchTool(settings, call);
             }
             return executeAvailableTool(call);
-        });
+        }, []() { return false; });
     Serial.printf("SEARCHTEST result=%s search_called=%s response_bytes=%u\n",
                   result.success && searchCalled ? "pass" : "failed",
                   searchCalled ? "yes" : "no",
@@ -634,7 +634,7 @@ void runApiTest()
         {"user", "Reply with exactly OK."},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletion(
-        settings, testHistory, "", [](const std::string&) {});
+        settings, testHistory, "", [](const std::string&) {}, []() { return false; });
     if (!result.success) {
         String safeError = result.error;
         safeError.replace("\r", " ");
@@ -809,7 +809,7 @@ void runToolApiTest()
                 writeSucceeded = true;
             }
             return execution;
-        });
+        }, []() { return false; });
     const String testPath = cardputer::workspaceFilePath(testName);
     const bool fileCreated = SD.exists(testPath);
     const bool cleanup = !fileCreated || SD.remove(testPath);
@@ -833,6 +833,15 @@ void handleSerialCommand(const String& command)
     }
     if (command == "APITEST") {
         runApiTest();
+        return;
+    }
+    if (command == "CANCELTEST") {
+        const std::vector<cardputer::Message> testHistory = {{"user", "cancel"}};
+        const cardputer::ChatResult result = cardputer::streamChatCompletion(
+            settings, testHistory, "", [](const std::string&) {}, []() { return true; });
+        Serial.printf("CANCELTEST result=%s\n",
+                      !result.success && result.error == "Request canceled by user"
+                          ? "pass" : "failed");
         return;
     }
     if (command == "STORAGETEST") {
@@ -1066,14 +1075,19 @@ void submitPrompt()
                   webSearchAvailable ? "yes" : "no",
                   useWebSearch ? "enabled" : "disabled");
     cardputer::markOperation(useTools ? "chat_tools" : "chat_stream");
+    const cardputer::CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        return M5Cardputer.Keyboard.keysState().esc;
+    };
     const cardputer::ChatResult result = useTools
         ? cardputer::streamChatCompletionWithTools(
               settings, history, activeChatInstructions, onText, [](const cardputer::ToolCall& call) {
                   statusMessage = "Tool: " + String(call.name.c_str());
                   render();
                   return executeAvailableTool(call);
-              })
-        : cardputer::streamChatCompletion(settings, history, activeChatInstructions, onText);
+              }, isCancelled)
+        : cardputer::streamChatCompletion(
+              settings, history, activeChatInstructions, onText, isCancelled);
     cardputer::markOperation("idle");
     if (!result.success) {
         activeResponse = result.response;
