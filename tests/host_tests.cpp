@@ -1,5 +1,6 @@
 #include "../firmware/CardputerAssistant/src/text_utils.h"
 #include "../firmware/CardputerAssistant/src/audio_utils.h"
+#include "../firmware/CardputerAssistant/src/document_reader.h"
 #include "../firmware/CardputerAssistant/src/ssh_terminal.h"
 
 #include <cstdlib>
@@ -173,6 +174,36 @@ void testSshTerminalFiltering()
             "SSH terminal viewport failed");
 }
 
+void testDocumentReader()
+{
+    using cardputer::DocumentReaderMode;
+    require(cardputer::detectDocumentReaderMode("notes.MD") == DocumentReaderMode::Markdown,
+            "Markdown reader mode detection failed");
+    require(cardputer::detectDocumentReaderMode("table.csv") == DocumentReaderMode::Csv,
+            "CSV reader mode detection failed");
+    require(cardputer::detectDocumentReaderMode("data.json") == DocumentReaderMode::Json,
+            "JSON reader mode detection failed");
+    require(cardputer::detectDocumentReaderMode("page.HTML") == DocumentReaderMode::HtmlSource,
+            "HTML source reader mode detection failed");
+    require(cardputer::formatDocumentChunk(DocumentReaderMode::Markdown,
+                                            "# Title\n- item") ==
+                "Title\n• item",
+            "Markdown reader formatting failed");
+    require(cardputer::formatDocumentChunk(DocumentReaderMode::Csv,
+                                            "name,\"one,two\"") ==
+                "name | one,two",
+            "Quoted CSV reader formatting failed");
+    const std::string json = cardputer::formatDocumentChunk(
+        DocumentReaderMode::Json, "{\"ok\":true,\"n\":2}");
+    require(json.find("\n") != std::string::npos &&
+                json.find("\"ok\": true") != std::string::npos,
+            "JSON reader formatting failed");
+    require(cardputer::documentSpeechText(DocumentReaderMode::HtmlSource,
+                                           "<p>Hello &amp; bye</p>") ==
+                "Hello & bye ",
+            "HTML speech extraction failed");
+}
+
 }  // namespace
 
 int main()
@@ -188,6 +219,7 @@ int main()
         testWorkspaceRouting();
         testWebSearchRouting();
         testSshTerminalFiltering();
+        testDocumentReader();
         std::cout << "host_tests: PASS\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

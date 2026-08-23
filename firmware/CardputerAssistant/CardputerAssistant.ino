@@ -10,6 +10,7 @@
 #include "src/audio_utils.h"
 #include "src/chat_storage.h"
 #include "src/crash_journal.h"
+#include "src/document_reader.h"
 #include "src/file_workspace.h"
 #include "src/file_portal.h"
 #include "src/provisioning.h"
@@ -56,6 +57,7 @@ enum class Screen {
     FileViewer,
     FileEditor,
     FileFind,
+    FileSpeechSelection,
     FileNameEntry,
     DeleteFileConfirm,
     Diagnostics,
@@ -125,6 +127,7 @@ String fileViewerName;
 std::string fileViewerContent;
 std::vector<std::string> fileViewerLines;
 std::vector<std::uint32_t> fileViewerPreviousOffsets;
+cardputer::DocumentReaderMode fileReaderMode = cardputer::DocumentReaderMode::Text;
 std::size_t fileViewerFirstLine = 0;
 std::uint32_t fileViewerChunkOffset = 0;
 std::uint32_t fileViewerNextOffset = 0;
@@ -139,6 +142,10 @@ std::string fileFindInput;
 std::string lastFileFindQuery;
 std::uint32_t lastFileFindOffset = 0;
 String fileFindStatus;
+std::size_t fileSpeechSelectionIndex = 0;
+std::size_t fileSpeechSelectionStart = 0;
+bool fileSpeechSelectionStarted = false;
+String fileSpeechSelectionStatus;
 FileNameAction fileNameAction = FileNameAction::Create;
 std::string fileNameInput;
 String fileNameSource;
@@ -175,6 +182,7 @@ void renderDiagnostics();
 void renderFileActions();
 void renderFileEditor();
 void renderFileFind();
+void renderFileSpeechSelection();
 void renderFileNameEntry();
 void renderFileViewer();
 void renderFilesMenu();
@@ -185,6 +193,7 @@ void renderWifiPicker();
 void renderWorkspaceFileList();
 void openWebConsole();
 cardputer::OperationResult runSshTerminal();
+bool keyboardWordContains(const Keyboard_Class::KeysState& keys, char expected);
 void submitPrompt();
 void runUiSearchEndToEndTest();
 
@@ -493,6 +502,9 @@ void render()
     case Screen::FileFind:
         renderFileFind();
         return;
+    case Screen::FileSpeechSelection:
+        renderFileSpeechSelection();
+        return;
     case Screen::FileNameEntry:
         renderFileNameEntry();
         return;
@@ -571,8 +583,15 @@ bool runPureSelfTest()
         cardputer::nextUtf8Boundary(cursorText, 1) == 3 &&
         cardputer::insertUtf8At(cursorText, 3, "!") == "Aя!B" &&
         cardputer::eraseUtf8Before(cursorText, 3) == "AB";
+    const bool documentReader =
+        cardputer::detectDocumentReaderMode("notes.md") ==
+            cardputer::DocumentReaderMode::Markdown &&
+        cardputer::formatDocumentChunk(cardputer::DocumentReaderMode::Csv,
+                                        "name,\"one,two\"") == "name | one,two" &&
+        cardputer::documentSpeechText(cardputer::DocumentReaderMode::HtmlSource,
+                                      "<p>Hello</p>") == "Hello ";
     return utf8Backspace && russianLayout && sse && wav && chatText && utf8Cursor &&
-           cardputer::fontSupportsCyrillic();
+           documentReader && cardputer::fontSupportsCyrillic();
 }
 
 void printStatus()
@@ -1515,6 +1534,124 @@ void speakLastAssistantResponse()
     render();
 }
 
+std::string joinedViewerLines(std::size_t firstLine, std::size_t lastLine)
+{
+    if (fileViewerLines.empty() || firstLine >= fileViewerLines.size()) {
+        return "";
+    }
+    const std::size_t boundedLast = std::min(lastLine, fileViewerLines.size() - 1);
+    std::string text;
+    for (std::size_t index = firstLine; index <= boundedLast; ++index) {
+        if (!text.empty()) {
+            text += '\n';
+        }
+        text += fileViewerLines[index];
+    }
+    return text;
+}
+
+std::size_t speechSegmentBytes(const std::string& text, std::size_t offset)
+{
+    constexpr std::size_t maximumBytes = 4500;
+    const std::size_t remaining = text.size() - offset;
+    std::size_t bytes = std::min(maximumBytes, remaining);
+    while (bytes > 0 && !cardputer::isValidUtf8(text.substr(offset, bytes))) {
+        --bytes;
+    }
+    if (bytes == 0) {
+        return 0;
+    }
+    if (bytes < remaining) {
+        const std::size_t separator = text.find_last_of("\n.?! ", offset + bytes - 1);
+        if (separator != std::string::npos && separator >= offset + bytes / 2) {
+            bytes = separator - offset + 1;
+        }
+    }
+    return bytes;
+}
+
+cardputer::OperationResult playDocumentSpeechText(const std::string& text,
+                                                  const String& source)
+{
+    if (text.empty()) {
+        return {false, "Selected document text is empty"};
+    }
+    bool paused = false;
+    bool stopped = false;
+    const cardputer::SpeechPlaybackControl control = [&paused, &stopped, &source]() {
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+            const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+            if (keys.esc || keyboardWordContains(keys, '`')) {
+                stopped = true;
+            } else if (keys.enter) {
+                paused = !paused;
+                cardputer::showBusyScreen(
+                    "DOCUMENT TTS",
+                    paused ? String("Paused - ENTER resume, ESC stop")
+                           : source + " - ENTER pause, ESC stop");
+            }
+        }
+        if (stopped) {
+            return cardputer::SpeechPlaybackCommand::Stop;
+        }
+        return paused ? cardputer::SpeechPlaybackCommand::Pause
+                      : cardputer::SpeechPlaybackCommand::Continue;
+    };
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const std::size_t bytes = speechSegmentBytes(text, offset);
+        if (bytes == 0) {
+            return {false, "Document TTS could not split text at a valid UTF-8 boundary"};
+        }
+        cardputer::showBusyScreen("DOCUMENT TTS", source + " - ENTER pause, ESC stop");
+        const cardputer::OperationResult spoken = cardputer::synthesizeAndPlaySpeechControlled(
+            settings, text.substr(offset, bytes), control);
+        if (!spoken.success || stopped || !spoken.error.isEmpty()) {
+            return spoken;
+        }
+        offset += bytes;
+    }
+    return {true, ""};
+}
+
+cardputer::OperationResult prepareDocumentSpeech()
+{
+    if (!cardputer::ttsSettingsAreComplete(settings)) {
+        return {false, "TTS is not configured; use Voice > Web setup"};
+    }
+    ensureNetworkReady();
+    if (WiFi.status() != WL_CONNECTED) {
+        return {false, statusMessage.isEmpty() ? String("Wi-Fi is not connected") : statusMessage};
+    }
+    if (std::time(nullptr) < 1700000000) {
+        return {false, "TLS time is not synchronized"};
+    }
+    return {true, ""};
+}
+
+cardputer::OperationResult speakEntireDocument()
+{
+    std::uint32_t offset = 0;
+    while (true) {
+        const cardputer::WorkspaceChunkResult chunk = cardputer::readWorkspaceFileChunk(
+            fileViewerName, offset, 3000);
+        if (!chunk.success) {
+            return {false, chunk.error};
+        }
+        const std::string speech = cardputer::documentSpeechText(fileReaderMode, chunk.content);
+        const cardputer::OperationResult spoken = playDocumentSpeechText(
+            speech, String("Reading ") + fileViewerName);
+        if (!spoken.success || !spoken.error.isEmpty()) {
+            return spoken;
+        }
+        if (chunk.eof) {
+            return {true, ""};
+        }
+        offset = chunk.nextOffset;
+    }
+}
+
 std::vector<String> voiceMenuItems()
 {
     const unsigned int volumePercent =
@@ -1576,9 +1713,13 @@ std::vector<String> workspaceFileItems()
 
 std::vector<String> fileActionItems()
 {
+    const String mode = cardputer::documentReaderModeLabel(fileReaderMode).c_str();
     return {
-        "View file",
+        "View as " + mode,
         "Edit current chunk",
+        "Read current page",
+        "Read selected lines...",
+        "Read entire document",
         "Find text...",
         "Find next",
         "Save bookmark here",
@@ -1970,10 +2111,25 @@ void renderFileActions()
 
 void renderFileViewer()
 {
-    const String position = String(fileViewerChunkOffset) + "/" +
+    const String position = String(cardputer::documentReaderModeLabel(fileReaderMode).c_str()) +
+        "  " + String(fileViewerChunkOffset) + "/" +
         String(fileViewerTotalBytes) + " B";
     cardputer::showTextViewer(fileViewerName, fileViewerLines,
                               fileViewerFirstLine, position);
+}
+
+void renderFileSpeechSelection()
+{
+    std::vector<String> items;
+    items.reserve(fileViewerLines.size());
+    for (std::size_t index = 0; index < fileViewerLines.size(); ++index) {
+        items.push_back(String(index + 1) + "  " + fileViewerLines[index].c_str());
+    }
+    const String footer = fileSpeechSelectionStatus.isEmpty()
+        ? String("UP/DOWN  ENTER start  ESC")
+        : fileSpeechSelectionStatus;
+    cardputer::showSelectionList("READ SELECTED LINES", items,
+                                 fileSpeechSelectionIndex, footer);
 }
 
 void renderFileEditor()
@@ -2109,7 +2265,9 @@ cardputer::OperationResult loadFileViewerChunk(std::uint32_t offset)
         return {false, result.error};
     }
     fileViewerContent = result.content;
-    fileViewerLines = cardputer::wrapUtf8Text(fileViewerContent, 38);
+    const std::string formatted = cardputer::formatDocumentChunk(
+        fileReaderMode, fileViewerContent);
+    fileViewerLines = cardputer::wrapUtf8Text(formatted, 38);
     if (fileViewerLines.empty()) {
         fileViewerLines.push_back("");
     }
@@ -2129,6 +2287,7 @@ void openSelectedWorkspaceFile()
         return;
     }
     fileViewerName = workspaceFiles[workspaceFileIndex - 1].name;
+    fileReaderMode = cardputer::detectDocumentReaderMode(fileViewerName.c_str());
     lastFileFindQuery.clear();
     lastFileFindOffset = 0;
     fileViewerPreviousOffsets.clear();
@@ -2232,6 +2391,7 @@ void completeFileNameEntry()
         return;
     }
     fileViewerName = destination;
+    fileReaderMode = cardputer::detectDocumentReaderMode(fileViewerName.c_str());
     fileViewerPreviousOffsets.clear();
     result = selectWorkspaceFileByName(destination);
     if (result.success) {
@@ -2959,8 +3119,42 @@ void handleKeyboard()
             } else if (fileActionsIndex == 1) {
                 beginFileEditor();
             } else if (fileActionsIndex == 2) {
-                beginFileFind();
+                cardputer::OperationResult result = prepareDocumentSpeech();
+                if (result.success) {
+                    cardputer::markOperation("document_tts_page");
+                    result = playDocumentSpeechText(
+                        joinedViewerLines(fileViewerFirstLine,
+                                          fileViewerFirstLine + kFileViewerPageLines - 1),
+                        "Reading current page");
+                    cardputer::markOperation("idle");
+                }
+                menuStatus = result.success
+                    ? (result.error.isEmpty() ? String("Current page spoken") : result.error)
+                    : result.error;
+                renderFileActions();
             } else if (fileActionsIndex == 3) {
+                fileSpeechSelectionIndex = std::min(
+                    fileViewerFirstLine,
+                    fileViewerLines.empty() ? std::size_t{0} : fileViewerLines.size() - 1);
+                fileSpeechSelectionStart = fileSpeechSelectionIndex;
+                fileSpeechSelectionStarted = false;
+                fileSpeechSelectionStatus = "";
+                currentScreen = Screen::FileSpeechSelection;
+                renderFileSpeechSelection();
+            } else if (fileActionsIndex == 4) {
+                cardputer::OperationResult result = prepareDocumentSpeech();
+                if (result.success) {
+                    cardputer::markOperation("document_tts_all");
+                    result = speakEntireDocument();
+                    cardputer::markOperation("idle");
+                }
+                menuStatus = result.success
+                    ? (result.error.isEmpty() ? String("Document spoken") : result.error)
+                    : result.error;
+                renderFileActions();
+            } else if (fileActionsIndex == 5) {
+                beginFileFind();
+            } else if (fileActionsIndex == 6) {
                 if (lastFileFindQuery.empty()) {
                     menuStatus = "Run Find text first";
                     renderFileActions();
@@ -2969,14 +3163,14 @@ void handleKeyboard()
                         static_cast<std::uint32_t>(lastFileFindQuery.size());
                     findFileText(lastFileFindQuery, nextOffset);
                 }
-            } else if (fileActionsIndex == 4) {
+            } else if (fileActionsIndex == 7) {
                 const cardputer::OperationResult result = cardputer::saveWorkspaceBookmark(
                     fileViewerName, fileViewerChunkOffset);
                 menuStatus = result.success
                     ? String("Bookmark saved at byte ") + String(fileViewerChunkOffset)
                     : result.error;
                 renderFileActions();
-            } else if (fileActionsIndex == 5) {
+            } else if (fileActionsIndex == 8) {
                 const cardputer::WorkspaceBookmarkResult bookmark =
                     cardputer::loadWorkspaceBookmark(fileViewerName);
                 if (!bookmark.success || !bookmark.found) {
@@ -2994,11 +3188,11 @@ void handleKeyboard()
                         renderFileViewer();
                     }
                 }
-            } else if (fileActionsIndex == 6) {
+            } else if (fileActionsIndex == 9) {
                 beginFileNameEntry(FileNameAction::Copy, fileViewerName);
-            } else if (fileActionsIndex == 7) {
+            } else if (fileActionsIndex == 10) {
                 beginFileNameEntry(FileNameAction::Rename, fileViewerName);
-            } else if (fileActionsIndex == 8) {
+            } else if (fileActionsIndex == 11) {
                 deleteFileName = fileViewerName;
                 currentScreen = Screen::DeleteFileConfirm;
                 cardputer::showConfirmation("DELETE FILE", deleteFileName,
@@ -3007,6 +3201,49 @@ void handleKeyboard()
                 currentScreen = Screen::WorkspaceFileList;
                 menuStatus = "";
                 renderWorkspaceFileList();
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::FileSpeechSelection) {
+        if (cancelPressed) {
+            fileSpeechSelectionStarted = false;
+            fileSpeechSelectionStatus = "";
+            currentScreen = Screen::FileActions;
+            renderFileActions();
+        } else if (upPressed && fileSpeechSelectionIndex > 0) {
+            --fileSpeechSelectionIndex;
+            renderFileSpeechSelection();
+        } else if (downPressed && fileSpeechSelectionIndex + 1 < fileViewerLines.size()) {
+            ++fileSpeechSelectionIndex;
+            renderFileSpeechSelection();
+        } else if (enterPressed && !fileViewerLines.empty()) {
+            if (!fileSpeechSelectionStarted) {
+                fileSpeechSelectionStart = fileSpeechSelectionIndex;
+                fileSpeechSelectionStarted = true;
+                fileSpeechSelectionStatus = "Start " + String(fileSpeechSelectionStart + 1) +
+                    "; choose end + ENTER";
+                renderFileSpeechSelection();
+            } else {
+                const std::size_t first = std::min(
+                    fileSpeechSelectionStart, fileSpeechSelectionIndex);
+                const std::size_t last = std::max(
+                    fileSpeechSelectionStart, fileSpeechSelectionIndex);
+                cardputer::OperationResult result = prepareDocumentSpeech();
+                if (result.success) {
+                    cardputer::markOperation("document_tts_selection");
+                    result = playDocumentSpeechText(
+                        joinedViewerLines(first, last), "Reading selected lines");
+                    cardputer::markOperation("idle");
+                }
+                fileSpeechSelectionStarted = false;
+                fileSpeechSelectionStatus = "";
+                menuStatus = result.success
+                    ? (result.error.isEmpty() ? String("Selection spoken") : result.error)
+                    : result.error;
+                currentScreen = Screen::FileActions;
+                renderFileActions();
             }
         }
         return;
