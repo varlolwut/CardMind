@@ -57,6 +57,7 @@ enum class Screen {
     VoiceMenu,
     DeviceMenu,
     UtilitiesMenu,
+    SystemMonitor,
     TimerMenu,
     Calculator,
     QrEntry,
@@ -212,6 +213,7 @@ bool timerRunning = false;
 std::uint32_t timerEndsAt = 0;
 std::uint32_t timerDurationSeconds = 0;
 std::uint32_t lastTimerRenderAt = 0;
+std::uint32_t lastSystemMonitorRenderAt = 0;
 
 void ensureNetworkReady();
 void render();
@@ -223,6 +225,7 @@ void renderChatList();
 void renderControlsHelp();
 void renderDeviceMenu();
 void renderUtilitiesMenu();
+void renderSystemMonitor();
 void renderTimerMenu();
 void renderCalculator();
 void renderQrEntry();
@@ -578,6 +581,9 @@ void render()
         return;
     case Screen::UtilitiesMenu:
         renderUtilitiesMenu();
+        return;
+    case Screen::SystemMonitor:
+        renderSystemMonitor();
         return;
     case Screen::TimerMenu:
         renderTimerMenu();
@@ -2157,20 +2163,15 @@ cardputer::OperationResult saveAndApplyDeviceSettings(const cardputer::Settings&
 
 std::vector<String> deviceMenuItems()
 {
-    const unsigned int volumePercent =
-        (static_cast<unsigned int>(settings.ttsVolume) * 100U + 127U) / 255U;
     return {
         "Brightness: " + brightnessSettingLabel(settings.displayBrightness),
         "Screen sleep: " + sleepSettingLabel(settings.screenSleepMinutes),
         "Keyboard repeat: " + keyboardRepeatSettingLabel(settings.keyboardRepeatMs),
         "Power: " + powerProfileLabel(settings.powerProfile),
-        "Speaker volume: " + String(volumePercent) + "%",
         "Create local backup",
         "Restore local backup...",
         "Backup information",
         "API and services setup",
-        "Web console",
-        "SSH tool",
         "Firmware update",
         "Diagnostics",
         "Back to carousel",
@@ -2211,6 +2212,8 @@ std::vector<String> utilitiesMenuItems()
         "Timer: " + timerStatusLabel(),
         "Calculator",
         "QR display",
+        "SSH tool",
+        "Web console",
         "System monitor",
         "Back to carousel",
     };
@@ -2296,8 +2299,8 @@ std::vector<cardputer::CarouselCard> carouselCards()
         {"SPEECH", "VOICE", "STT · TTS · Volume", 0xFD20, cardputer::CarouselIcon::Voice},
         {"CONNECTIVITY", "NETWORK", networkSubtitle, 0xB7E6, cardputer::CarouselIcon::Network},
         {"WORKSPACE", "FILES", "Edit · Read · Export", 0x4DFF, cardputer::CarouselIcon::Files},
-        {"SYSTEM", "DEVICE", "Battery · SD · Diagnostics", 0xFFE0, cardputer::CarouselIcon::Device},
-        {"OFFLINE", "TOOLS", "Notes · Timer · QR", 0x07FF, cardputer::CarouselIcon::Tools},
+        {"SYSTEM", "DEVICE", "Settings · Backup · Update", 0xFFE0, cardputer::CarouselIcon::Device},
+        {"UTILITIES", "TOOLS", "Notes · SSH · Monitor", 0x07FF, cardputer::CarouselIcon::Tools},
         {"REFERENCE", "HELP", "Controls · About · Support", 0xF81F, cardputer::CarouselIcon::Help},
     };
 }
@@ -2450,9 +2453,54 @@ void renderDeviceMenu()
 
 void renderUtilitiesMenu()
 {
-    cardputer::showSelectionList("OFFLINE TOOLS", utilitiesMenuItems(),
+    cardputer::showSelectionList("TOOLS", utilitiesMenuItems(),
                                  utilitiesMenuIndex,
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+String systemMonitorUptime()
+{
+    const std::uint32_t totalSeconds = millis() / 1000U;
+    const std::uint32_t hours = totalSeconds / 3600U;
+    const std::uint32_t minutes = (totalSeconds / 60U) % 60U;
+    const std::uint32_t seconds = totalSeconds % 60U;
+    char value[24] = {};
+    std::snprintf(value, sizeof(value), "%luh %02lum %02lus",
+                  static_cast<unsigned long>(hours),
+                  static_cast<unsigned long>(minutes),
+                  static_cast<unsigned long>(seconds));
+    return String(value);
+}
+
+void renderSystemMonitor()
+{
+    refreshBatteryStatus();
+    const String battery = batteryLevel >= 0
+        ? String(batteryLevel) + "%" + (batteryCharging ? " charging" : " battery")
+        : String("unavailable");
+    const String wifi = WiFi.status() == WL_CONNECTED
+        ? String(WiFi.RSSI()) + " dBm"
+        : String("disconnected");
+    const std::uint64_t totalBytes = fileWorkspaceReady ? SD.totalBytes() : 0;
+    const std::uint64_t usedBytes = fileWorkspaceReady ? SD.usedBytes() : 0;
+    const String storage = fileWorkspaceReady
+        ? String(static_cast<unsigned long>(usedBytes / (1024U * 1024U))) + "/" +
+          String(static_cast<unsigned long>(totalBytes / (1024U * 1024U))) + " MiB"
+        : String("unavailable");
+    const auto line = [](const String& value) { return std::string(value.c_str()); };
+    const std::vector<std::string> lines = {
+        line("Battery  " + battery),
+        line("Wi-Fi    " + wifi),
+        line("Heap     " + String(ESP.getFreeHeap() / 1024U) + " KiB"),
+        line("Largest  " + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / 1024U) + " KiB"),
+        line("Stack    " + String(uxTaskGetStackHighWaterMark(nullptr)) + " B"),
+        line("microSD  " + storage),
+        line("CPU      " + String(getCpuFrequencyMhz()) + " MHz"),
+        line("Uptime   " + systemMonitorUptime()),
+    };
+    cardputer::showTextViewer("SYSTEM MONITOR", lines, 0,
+                             "Live every second  ESC back");
+    lastSystemMonitorRenderAt = millis();
 }
 
 void renderTimerMenu()
@@ -2542,10 +2590,12 @@ int modalSelection(const String& title, const std::vector<String>& items,
                 waitForModalKeyRelease();
                 return -1;
             }
-            if (keys.up || keys.f5) {
+            const bool plainUp = !keys.fn && keyboardWordContains(keys, ';');
+            const bool plainDown = !keys.fn && keyboardWordContains(keys, '.');
+            if (keys.up || keys.f5 || plainUp) {
                 index = index == 0 ? items.size() - 1 : index - 1;
                 cardputer::showSelectionList(title, items, index, footer);
-            } else if (keys.down || keys.f6) {
+            } else if (keys.down || keys.f6 || plainDown) {
                 index = (index + 1) % items.size();
                 cardputer::showSelectionList(title, items, index, footer);
             } else if (keys.enter) {
@@ -3228,7 +3278,7 @@ cardputer::OperationResult runSshTool()
             "Manage profiles (" + String(profiles.size()) + ")",
             String("Install private key: ") + (cardputer::sshPrivateKeyIsInstalled() ? "yes" : "no"),
             "Terminal shortcuts",
-            "Back to Device"}, 0, status.isEmpty() ? "UP/DOWN  ENTER  ESC back" : status);
+            "Back to Tools"}, 0, status.isEmpty() ? "UP/DOWN  ENTER  ESC back" : status);
         status = "";
         if (action < 0 || action == 5) return {true, ""};
         if ((action == 0 || action == 1) && profiles.empty()) {
@@ -4489,15 +4539,30 @@ void handleKeyboard()
                 currentScreen = Screen::QrEntry;
                 renderQrEntry();
             } else if (utilitiesMenuIndex == 5) {
-                diagnosticsReturnScreen = Screen::UtilitiesMenu;
-                diagnosticsIndex = 0;
-                currentScreen = Screen::Diagnostics;
-                renderDiagnostics();
+                const cardputer::OperationResult result = runSshTool();
+                menuStatus = result.error;
+                currentScreen = Screen::UtilitiesMenu;
+                renderUtilitiesMenu();
+            } else if (utilitiesMenuIndex == 6) {
+                openWebConsole(Screen::UtilitiesMenu);
+            } else if (utilitiesMenuIndex == 7) {
+                menuStatus = "";
+                currentScreen = Screen::SystemMonitor;
+                renderSystemMonitor();
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
                 renderCarousel();
             }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::SystemMonitor) {
+        if (cancelPressed) {
+            currentScreen = Screen::UtilitiesMenu;
+            menuStatus = "";
+            renderUtilitiesMenu();
         }
         return;
     }
@@ -4678,14 +4743,6 @@ void handleKeyboard()
                     : result.error;
                 renderDeviceMenu();
             } else if (deviceMenuIndex == 4) {
-                cardputer::Settings candidate = settings;
-                candidate.ttsVolume = nextTtsVolume(candidate.ttsVolume);
-                const cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
-                menuStatus = result.success
-                    ? "Speaker volume: " + brightnessSettingLabel(settings.ttsVolume)
-                    : result.error;
-                renderDeviceMenu();
-            } else if (deviceMenuIndex == 5) {
                 cardputer::OperationResult result = saveCurrentChat();
                 if (result.success) {
                     cardputer::showBusyScreen("BACKUP", "Copying chats and metadata...");
@@ -4695,29 +4752,22 @@ void handleKeyboard()
                 }
                 menuStatus = result.success ? String("Local backup updated") : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 6) {
+            } else if (deviceMenuIndex == 5) {
                 currentScreen = Screen::RestoreBackupConfirm;
                 render();
-            } else if (deviceMenuIndex == 7) {
+            } else if (deviceMenuIndex == 6) {
                 String summary;
                 const cardputer::OperationResult result = cardputer::localBackupSummary(summary);
                 menuStatus = result.success ? summary : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 8) {
+            } else if (deviceMenuIndex == 7) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
                 cardputer::markOperation("idle");
                 const cardputer::OperationResult result = applyDisplayAndCpuSettings(settings);
                 menuStatus = result.success ? String("Settings portal closed") : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 9) {
-                openWebConsole(Screen::DeviceMenu);
-            } else if (deviceMenuIndex == 10) {
-                const cardputer::OperationResult result = runSshTool();
-                menuStatus = result.error;
-                currentScreen = Screen::DeviceMenu;
-                renderDeviceMenu();
-            } else if (deviceMenuIndex == 11) {
+            } else if (deviceMenuIndex == 8) {
                 ensureNetworkReady();
                 if (WiFi.status() != WL_CONNECTED || std::time(nullptr) < 1700000000) {
                     menuStatus = statusMessage;
@@ -4742,7 +4792,7 @@ void handleKeyboard()
                     currentScreen = Screen::FirmwareUpdateConfirm;
                     render();
                 }
-            } else if (deviceMenuIndex == 12) {
+            } else if (deviceMenuIndex == 9) {
                 diagnosticsReturnScreen = Screen::DeviceMenu;
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
@@ -5563,6 +5613,10 @@ void loop()
                millis() - lastTimerRenderAt >= 1000U) {
         lastTimerRenderAt = millis();
         renderTimerMenu();
+    }
+    if (currentScreen == Screen::SystemMonitor &&
+        millis() - lastSystemMonitorRenderAt >= 1000U) {
+        renderSystemMonitor();
     }
     if (currentScreen == Screen::Chat && inputBuffer != persistedDraft &&
         millis() - lastDraftAutosaveAt >= kDraftAutosaveIntervalMs) {
