@@ -65,6 +65,10 @@ OperationResult loadSettings(Settings& settings)
         preferences.getString("tts_voice", ""),
         preferences.getBool("tts_auto", false),
         preferences.getUChar("tts_volume", 192),
+        preferences.getUChar("brightness", 192),
+        preferences.getUShort("sleep_min", 5),
+        preferences.getUShort("key_repeat", 125),
+        preferences.getUChar("power", 1),
     };
     preferences.end();
     settings = loaded;
@@ -125,6 +129,21 @@ OperationResult saveSettings(const Settings& settings)
     if ((!settings.ttsModel.isEmpty() && !isSafeTtsIdentifier(settings.ttsModel)) ||
         (!settings.ttsVoice.isEmpty() && !isSafeTtsIdentifier(settings.ttsVoice))) {
         return {false, "TTS model and voice ids may contain only letters, digits, '-' and '_'"};
+    }
+    if (settings.displayBrightness < 32) {
+        return {false, "Display brightness must be at least 32"};
+    }
+    if (settings.screenSleepMinutes != 0 && settings.screenSleepMinutes != 1 &&
+        settings.screenSleepMinutes != 5 && settings.screenSleepMinutes != 10 &&
+        settings.screenSleepMinutes != 30) {
+        return {false, "Screen sleep must be Off, 1, 5, 10, or 30 minutes"};
+    }
+    if (settings.keyboardRepeatMs != 0 && settings.keyboardRepeatMs != 75 &&
+        settings.keyboardRepeatMs != 125 && settings.keyboardRepeatMs != 200) {
+        return {false, "Keyboard repeat must be Off, 75, 125, or 200 ms"};
+    }
+    if (settings.powerProfile > 2) {
+        return {false, "Power profile must be Performance, Balanced, or Saver"};
     }
 
     Preferences preferences;
@@ -191,6 +210,18 @@ OperationResult saveSettings(const Settings& settings)
     if (result.success && preferences.putUChar("tts_volume", settings.ttsVolume) != 1) {
         result = {false, "Failed to store TTS playback volume"};
     }
+    if (result.success && preferences.putUChar("brightness", settings.displayBrightness) != 1) {
+        result = {false, "Failed to store display brightness"};
+    }
+    if (result.success && preferences.putUShort("sleep_min", settings.screenSleepMinutes) != 2) {
+        result = {false, "Failed to store screen sleep timeout"};
+    }
+    if (result.success && preferences.putUShort("key_repeat", settings.keyboardRepeatMs) != 2) {
+        result = {false, "Failed to store keyboard repeat interval"};
+    }
+    if (result.success && preferences.putUChar("power", settings.powerProfile) != 1) {
+        result = {false, "Failed to store power profile"};
+    }
     if (result.success) {
         result = verifyStoredValue(preferences.getString("ssid", ""), settings.wifiSsid, "Wi-Fi SSID");
     }
@@ -249,6 +280,18 @@ OperationResult saveSettings(const Settings& settings)
     }
     if (result.success && preferences.getUChar("tts_volume", 0) != settings.ttsVolume) {
         result = {false, "Failed to verify TTS playback volume after NVS write"};
+    }
+    if (result.success && preferences.getUChar("brightness", 0) != settings.displayBrightness) {
+        result = {false, "Failed to verify display brightness after NVS write"};
+    }
+    if (result.success && preferences.getUShort("sleep_min", 0) != settings.screenSleepMinutes) {
+        result = {false, "Failed to verify screen sleep timeout after NVS write"};
+    }
+    if (result.success && preferences.getUShort("key_repeat", 1) != settings.keyboardRepeatMs) {
+        result = {false, "Failed to verify keyboard repeat interval after NVS write"};
+    }
+    if (result.success && preferences.getUChar("power", 255) != settings.powerProfile) {
+        result = {false, "Failed to verify power profile after NVS write"};
     }
     preferences.end();
     return result;

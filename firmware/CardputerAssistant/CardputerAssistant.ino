@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp32-hal-cpu.h>
 
 #include "src/api_client.h"
 #include "src/app_types.h"
@@ -92,6 +93,8 @@ std::uint32_t transientStatusUntil = 0;
 std::size_t scrollOffset = 0;
 String serialInput;
 std::vector<Point2D_t> pressedKeys;
+std::uint32_t keyboardRepeatStartedAt = 0;
+std::uint32_t lastKeyboardRepeatAt = 0;
 Screen currentScreen = Screen::MainCarousel;
 String activeChatId;
 String activeChatTitle = "New chat";
@@ -169,6 +172,8 @@ bool crashJournalReady = false;
 String crashJournalError;
 bool sshStorageReady = false;
 String sshStorageError;
+std::uint32_t lastUserActivityAt = 0;
+bool displaySleeping = false;
 
 void ensureNetworkReady();
 void render();
@@ -193,6 +198,7 @@ void renderWifiPicker();
 void renderWorkspaceFileList();
 void openWebConsole();
 cardputer::OperationResult runSshTerminal();
+cardputer::OperationResult saveAndApplyDeviceSettings(const cardputer::Settings& candidate);
 bool keyboardWordContains(const Keyboard_Class::KeysState& keys, char expected);
 void submitPrompt();
 void runUiSearchEndToEndTest();
@@ -596,7 +602,7 @@ bool runPureSelfTest()
 
 void printStatus()
 {
-    Serial.printf("STATUS board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s crash_journal=%s previous_operation=%s wifi=%s tls_time=%s battery=%d charging=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u reset_reason=%d\n",
+    Serial.printf("STATUS board_adv=%s configured=%s voice_configured=%s search_configured=%s tts_configured=%s tts_auto=%s microsd=%s chats=%s chat_count=%u files=%s crash_journal=%s previous_operation=%s wifi=%s tls_time=%s battery=%d charging=%s history=%u heap=%u largest_heap=%u min_heap=%u stack_free=%u brightness=%u sleep_min=%u repeat_ms=%u power=%u cpu_mhz=%u reset_reason=%d\n",
                   M5.getBoard() == m5::board_t::board_M5CardputerADV ? "yes" : "no",
                   cardputer::settingsAreComplete(settings) ? "yes" : "no",
                   cardputer::voiceSettingsAreComplete(settings) ? "yes" : "no",
@@ -618,6 +624,11 @@ void printStatus()
                   static_cast<unsigned int>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
                   static_cast<unsigned int>(ESP.getMinFreeHeap()),
                   static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+                  static_cast<unsigned int>(settings.displayBrightness),
+                  static_cast<unsigned int>(settings.screenSleepMinutes),
+                  static_cast<unsigned int>(settings.keyboardRepeatMs),
+                  static_cast<unsigned int>(settings.powerProfile),
+                  static_cast<unsigned int>(getCpuFrequencyMhz()),
                   static_cast<int>(esp_reset_reason()));
 }
 
@@ -932,6 +943,35 @@ void runFileWorkspaceEditTest()
     Serial.printf("FILETEST result=%s\n", result.success ? "pass" : "failed");
 }
 
+void runDeviceSettingsTest()
+{
+    const cardputer::Settings original = settings;
+    cardputer::Settings candidate = settings;
+    candidate.displayBrightness = 128;
+    candidate.screenSleepMinutes = 1;
+    candidate.keyboardRepeatMs = 75;
+    candidate.powerProfile = 0;
+    cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
+    cardputer::Settings loaded;
+    if (result.success) {
+        result = cardputer::loadSettings(loaded);
+    }
+    if (result.success &&
+        (loaded.displayBrightness != candidate.displayBrightness ||
+         loaded.screenSleepMinutes != candidate.screenSleepMinutes ||
+         loaded.keyboardRepeatMs != candidate.keyboardRepeatMs ||
+         loaded.powerProfile != candidate.powerProfile || getCpuFrequencyMhz() != 240)) {
+        result = {false, "Device settings did not survive an NVS round trip"};
+    }
+    const cardputer::OperationResult restored = saveAndApplyDeviceSettings(original);
+    if (result.success && !restored.success) {
+        result = {false, "Device settings test passed but original settings could not be restored"};
+    }
+    Serial.printf("DEVICESETTINGSTEST result=%s error=%s\n",
+                  result.success ? "pass" : "failed",
+                  result.success ? "none" : result.error.c_str());
+}
+
 void runToolApiTest()
 {
     ensureNetworkReady();
@@ -997,6 +1037,10 @@ void handleSerialCommand(const String& command)
     }
     if (command == "FILETEST") {
         runFileWorkspaceEditTest();
+        return;
+    }
+    if (command == "DEVICESETTINGSTEST") {
+        runDeviceSettingsTest();
         return;
     }
     if (command == "SSHCHECK") {
@@ -1664,9 +1708,94 @@ std::vector<String> voiceMenuItems()
     };
 }
 
+String brightnessSettingLabel(std::uint8_t brightness)
+{
+    const unsigned int percent =
+        (static_cast<unsigned int>(brightness) * 100U + 127U) / 255U;
+    return String(percent) + "%";
+}
+
+String sleepSettingLabel(std::uint16_t minutes)
+{
+    return minutes == 0 ? String("Off") : String(minutes) + " min";
+}
+
+String keyboardRepeatSettingLabel(std::uint16_t intervalMs)
+{
+    if (intervalMs == 0) {
+        return "Off";
+    }
+    if (intervalMs == 200) {
+        return "Slow";
+    }
+    if (intervalMs == 125) {
+        return "Normal";
+    }
+    return "Fast";
+}
+
+String powerProfileLabel(std::uint8_t profile)
+{
+    if (profile == 0) {
+        return "Performance";
+    }
+    if (profile == 1) {
+        return "Balanced";
+    }
+    return "Saver";
+}
+
+cardputer::OperationResult applyDisplayAndCpuSettings(const cardputer::Settings& candidate)
+{
+    M5Cardputer.Display.setBrightness(candidate.displayBrightness);
+    const std::uint32_t frequency = candidate.powerProfile == 0
+        ? 240U
+        : (candidate.powerProfile == 1 ? 160U : 80U);
+    return setCpuFrequencyMhz(frequency)
+        ? cardputer::OperationResult{true, ""}
+        : cardputer::OperationResult{false, "ESP32 rejected the selected CPU frequency"};
+}
+
+cardputer::OperationResult applyWifiPowerSetting(const cardputer::Settings& candidate)
+{
+    if (WiFi.getMode() == WIFI_OFF) {
+        return {true, ""};
+    }
+    const wifi_ps_type_t requested = candidate.powerProfile == 2
+        ? WIFI_PS_MIN_MODEM
+        : WIFI_PS_NONE;
+    if (WiFi.getSleep() == requested) {
+        return {true, ""};
+    }
+    return WiFi.setSleep(requested)
+        ? cardputer::OperationResult{true, ""}
+        : cardputer::OperationResult{false, "ESP32 rejected the Wi-Fi power-save setting"};
+}
+
+cardputer::OperationResult saveAndApplyDeviceSettings(const cardputer::Settings& candidate)
+{
+    cardputer::OperationResult result = cardputer::saveSettings(candidate);
+    if (!result.success) {
+        return result;
+    }
+    settings = candidate;
+    result = applyDisplayAndCpuSettings(settings);
+    if (result.success) {
+        result = applyWifiPowerSetting(settings);
+    }
+    return result;
+}
+
 std::vector<String> deviceMenuItems()
 {
+    const unsigned int volumePercent =
+        (static_cast<unsigned int>(settings.ttsVolume) * 100U + 127U) / 255U;
     return {
+        "Brightness: " + brightnessSettingLabel(settings.displayBrightness),
+        "Screen sleep: " + sleepSettingLabel(settings.screenSleepMinutes),
+        "Keyboard repeat: " + keyboardRepeatSettingLabel(settings.keyboardRepeatMs),
+        "Power: " + powerProfileLabel(settings.powerProfile),
+        "Speaker volume: " + String(volumePercent) + "%",
         "API and services setup",
         "Web console",
         "SSH terminal",
@@ -1690,6 +1819,11 @@ std::vector<String> diagnosticsItems()
         "Firmware: " + String(kFirmwareVersion),
         "Board: Cardputer ADV",
         "Battery: " + (batteryLevel >= 0 ? String(batteryLevel) + "%" : String("unavailable")),
+        "Brightness: " + brightnessSettingLabel(settings.displayBrightness),
+        "Screen sleep: " + sleepSettingLabel(settings.screenSleepMinutes),
+        "Keyboard repeat: " + keyboardRepeatSettingLabel(settings.keyboardRepeatMs),
+        "Power: " + powerProfileLabel(settings.powerProfile),
+        "CPU: " + String(getCpuFrequencyMhz()) + " MHz",
         "Wi-Fi: " + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected"),
         "microSD: " + String(fileWorkspaceReady ? "ready" : "unavailable"),
         "Chats: " + String(chats.size()),
@@ -1801,6 +1935,54 @@ std::uint8_t nextTtsVolume(std::uint8_t currentVolume)
     return kTtsVolumeStep;
 }
 
+std::uint8_t nextDisplayBrightness(std::uint8_t currentBrightness)
+{
+    if (currentBrightness < 64) {
+        return 64;
+    }
+    if (currentBrightness < 128) {
+        return 128;
+    }
+    if (currentBrightness < 192) {
+        return 192;
+    }
+    if (currentBrightness < 255) {
+        return 255;
+    }
+    return 64;
+}
+
+std::uint16_t nextScreenSleepMinutes(std::uint16_t currentMinutes)
+{
+    if (currentMinutes == 0) {
+        return 1;
+    }
+    if (currentMinutes == 1) {
+        return 5;
+    }
+    if (currentMinutes == 5) {
+        return 10;
+    }
+    if (currentMinutes == 10) {
+        return 30;
+    }
+    return 0;
+}
+
+std::uint16_t nextKeyboardRepeatMs(std::uint16_t currentIntervalMs)
+{
+    if (currentIntervalMs == 0) {
+        return 200;
+    }
+    if (currentIntervalMs == 200) {
+        return 125;
+    }
+    if (currentIntervalMs == 125) {
+        return 75;
+    }
+    return 0;
+}
+
 std::vector<String> controlsHelpItems()
 {
     return {
@@ -1864,10 +2046,13 @@ void openWebConsole()
         menuStatus = result.error;
     } else {
         const cardputer::OperationResult settingsResult = cardputer::loadSettings(settings);
+        const cardputer::OperationResult runtimeResult = settingsResult.success
+            ? applyDisplayAndCpuSettings(settings)
+            : settingsResult;
         const cardputer::OperationResult activeResult = activateChat(result.activeChatId);
         const cardputer::OperationResult listResult = refreshChatList();
-        if (!settingsResult.success) {
-            menuStatus = settingsResult.error;
+        if (!runtimeResult.success) {
+            menuStatus = runtimeResult.error;
         } else if (!activeResult.success) {
             menuStatus = activeResult.error;
         } else if (!listResult.success) {
@@ -2639,7 +2824,19 @@ bool newPressContains(const std::vector<Point2D_t>& newPresses, std::uint8_t exp
 void handleKeyboard()
 {
     const std::vector<Point2D_t> currentKeys = M5Cardputer.Keyboard.keyList();
-    const std::vector<Point2D_t> newPresses = newKeyPresses(currentKeys, pressedKeys);
+    std::vector<Point2D_t> newPresses = newKeyPresses(currentKeys, pressedKeys);
+    const bool sameKeys = currentKeys.size() == pressedKeys.size() &&
+        std::equal(currentKeys.begin(), currentKeys.end(), pressedKeys.begin());
+    const std::uint32_t now = millis();
+    if (!sameKeys || currentKeys.empty()) {
+        keyboardRepeatStartedAt = now;
+        lastKeyboardRepeatAt = now;
+    } else if (newPresses.empty() && settings.keyboardRepeatMs > 0 &&
+               now - keyboardRepeatStartedAt >= 500U &&
+               now - lastKeyboardRepeatAt >= settings.keyboardRepeatMs) {
+        newPresses = currentKeys;
+        lastKeyboardRepeatAt = now;
+    }
     pressedKeys = currentKeys;
     if (newPresses.empty()) {
         return;
@@ -3027,17 +3224,63 @@ void handleKeyboard()
             renderDeviceMenu();
         } else if (enterPressed) {
             if (deviceMenuIndex == 0) {
+                cardputer::Settings candidate = settings;
+                candidate.displayBrightness = nextDisplayBrightness(candidate.displayBrightness);
+                const cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
+                menuStatus = result.success
+                    ? "Brightness set to " + brightnessSettingLabel(settings.displayBrightness)
+                    : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 1) {
+                cardputer::Settings candidate = settings;
+                candidate.screenSleepMinutes = nextScreenSleepMinutes(
+                    candidate.screenSleepMinutes);
+                const cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
+                menuStatus = result.success
+                    ? "Screen sleep: " + sleepSettingLabel(settings.screenSleepMinutes)
+                    : result.error;
+                lastUserActivityAt = millis();
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 2) {
+                cardputer::Settings candidate = settings;
+                candidate.keyboardRepeatMs = nextKeyboardRepeatMs(candidate.keyboardRepeatMs);
+                const cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
+                menuStatus = result.success
+                    ? "Keyboard repeat: " + keyboardRepeatSettingLabel(settings.keyboardRepeatMs)
+                    : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 3) {
+                cardputer::Settings candidate = settings;
+                candidate.powerProfile = static_cast<std::uint8_t>(
+                    (candidate.powerProfile + 1U) % 3U);
+                const cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
+                menuStatus = result.success
+                    ? "Power profile: " + powerProfileLabel(settings.powerProfile)
+                    : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 4) {
+                cardputer::Settings candidate = settings;
+                candidate.ttsVolume = nextTtsVolume(candidate.ttsVolume);
+                const cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
+                menuStatus = result.success
+                    ? "Speaker volume: " + brightnessSettingLabel(settings.ttsVolume)
+                    : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 5) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
                 cardputer::markOperation("idle");
-            } else if (deviceMenuIndex == 1) {
+                const cardputer::OperationResult result = applyDisplayAndCpuSettings(settings);
+                menuStatus = result.success ? String("Settings portal closed") : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 6) {
                 openWebConsole();
-            } else if (deviceMenuIndex == 2) {
+            } else if (deviceMenuIndex == 7) {
                 const cardputer::OperationResult result = runSshTerminal();
                 menuStatus = result.error;
                 currentScreen = Screen::DeviceMenu;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 3) {
+            } else if (deviceMenuIndex == 8) {
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
                 renderDiagnostics();
@@ -3695,6 +3938,15 @@ void setup()
             delay(1000);
         }
     }
+    const cardputer::OperationResult deviceSettingsResult = applyDisplayAndCpuSettings(settings);
+    if (!deviceSettingsResult.success) {
+        cardputer::showFatalError(deviceSettingsResult.error);
+        Serial.println("FATAL event=device_settings result=failed");
+        while (true) {
+            delay(1000);
+        }
+    }
+    lastUserActivityAt = millis();
     Serial.printf("CONFIG configured=%s\n", cardputer::settingsAreComplete(settings) ? "yes" : "no");
     if (!cardputer::settingsAreComplete(settings)) {
         cardputer::markOperation("provisioning");
@@ -3747,12 +3999,41 @@ void setup()
     currentScreen = Screen::MainCarousel;
     renderCarousel();
     beginConfiguredNetwork();
+    const cardputer::OperationResult wifiPowerResult = applyWifiPowerSetting(settings);
+    if (!wifiPowerResult.success) {
+        menuStatus = wifiPowerResult.error;
+        renderCarousel();
+        Serial.println("ERROR event=wifi_power_setting result=failed");
+    }
     Serial.println("READY");
 }
 
 void loop()
 {
     M5Cardputer.update();
+    const bool inputActivity = M5Cardputer.Keyboard.isChange() || M5Cardputer.BtnA.wasPressed();
+    if (inputActivity) {
+        lastUserActivityAt = millis();
+        if (displaySleeping) {
+            displaySleeping = false;
+            M5Cardputer.Display.setBrightness(settings.displayBrightness);
+            pressedKeys = M5Cardputer.Keyboard.keyList();
+            render();
+            delay(5);
+            return;
+        }
+    }
+    if (!displaySleeping && settings.screenSleepMinutes > 0 &&
+        millis() - lastUserActivityAt >=
+            static_cast<std::uint32_t>(settings.screenSleepMinutes) * 60000U) {
+        displaySleeping = true;
+        M5Cardputer.Display.setBrightness(0);
+    }
+    if (displaySleeping) {
+        updateSerial();
+        delay(20);
+        return;
+    }
     const wl_status_t wifiStatus = WiFi.status();
     if (wifiStatus != lastWifiStatus) {
         lastWifiStatus = wifiStatus;
