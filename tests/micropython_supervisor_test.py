@@ -38,6 +38,23 @@ def main() -> None:
         raise RuntimeError("MicroPython login page did not render its error message")
     if "__ERROR__" in page:
         raise RuntimeError("MicroPython login page retained its template marker")
+    constant_time_equals = load_function(source_path, "_constant_time_equals")
+    if not constant_time_equals("A1b2", "A1b2"):
+        raise RuntimeError("MicroPython handoff token comparison rejected an exact match")
+    if constant_time_equals("A1b2", "A1b3") or constant_time_equals("A1b2", "A1b20"):
+        raise RuntimeError("MicroPython handoff token comparison accepted a mismatch")
+    safe_script_name = load_function(source_path, "_safe_script_name")
+    if not safe_script_name("hello_world-2.py"):
+        raise RuntimeError("MicroPython script name validation rejected an ASCII filename")
+    if safe_script_name("../escape.py") or safe_script_name("кириллица.py"):
+        raise RuntimeError("MicroPython script name validation accepted an unsafe filename")
+    source = source_path.read_text(encoding="utf-8")
+    if 'path == "/handoff"' not in source or 'namespace.erase_key(key)' not in source:
+        raise RuntimeError("MicroPython one-time browser handoff is missing")
+    if "machine.Pin(0" in source:
+        raise RuntimeError("MicroPython must not treat the ADV G0 signal as a runtime button")
+    if "CardMind is restarting. Continue on the device." not in source:
+        raise RuntimeError("MicroPython return flow does not explain the controlled restart")
     start = load_function_node(source_path, "start")
     first_statement = ast.unparse(start.body[0])
     if first_statement != "esp32.Partition.mark_app_valid_cancel_rollback()":

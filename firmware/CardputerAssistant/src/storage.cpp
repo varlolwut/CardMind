@@ -48,7 +48,7 @@ OperationResult loadSettings(Settings& settings)
     if (!preferences.begin(kNamespace, false)) {
         return {false, "Failed to initialize NVS namespace 'assistant'"};
     }
-    const Settings loaded = {
+    Settings loaded = {
         preferences.getString("ssid", ""),
         preferences.getString("wifi_pass", ""),
         preferences.getString("api_key", ""),
@@ -71,6 +71,10 @@ OperationResult loadSettings(Settings& settings)
         preferences.getUChar("power", 1),
     };
     preferences.end();
+    loaded.apiKey.trim();
+    loaded.sttApiKey.trim();
+    loaded.webSearchApiKey.trim();
+    loaded.ttsApiKey.trim();
     settings = loaded;
     return {true, ""};
 }

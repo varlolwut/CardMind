@@ -10,6 +10,7 @@ struct WebConsoleResult {
     String error;
 };
 
-WebConsoleResult runWebConsole(const Settings& settings, const String& initialChatId);
+WebConsoleResult runWebConsole(const Settings& settings, const String& initialChatId,
+                               const String& version);
 
 }  // namespace cardputer

@@ -121,7 +121,7 @@ String setupPage(const String& error)
             "<input id='wifi_password' name='wifi_password' type='password' maxlength='63' autocomplete='new-password'>"
             "<p class='note'>Leave blank to keep the saved password. Open networks may use an empty password.</p>"
             "<label for='api_key'>API key</label>"
-            "<input id='api_key' name='api_key' type='password' minlength='8' autocomplete='off' placeholder='Never displayed or logged'>"
+            "<input id='api_key' name='api_key' type='password' minlength='8' autocomplete='new-password' data-1p-ignore data-lpignore='true' placeholder='Never displayed or logged'>"
             "<p class='note'>Leave blank to keep the saved key. The key is stored only in device NVS.</p>"
             "<label for='api_base_url'>API base URL</label>"
             "<input id='api_base_url' name='api_base_url' type='url' required maxlength='180' placeholder='https://api.example.com' value='" +
@@ -131,7 +131,7 @@ String setupPage(const String& error)
             "<h2>Voice input (optional)</h2>"
             "<p class='note'>Use a separate Groq API key. It is stored only in device NVS and is never displayed or logged.</p>"
             "<label for='stt_api_key'>STT API key</label>"
-            "<input id='stt_api_key' name='stt_api_key' type='password' minlength='8' autocomplete='off' placeholder='Leave blank to keep saved STT key'>"
+            "<input id='stt_api_key' name='stt_api_key' type='password' minlength='8' autocomplete='new-password' data-1p-ignore data-lpignore='true' placeholder='Leave blank to keep saved STT key'>"
             "<label for='stt_base_url'>STT base URL</label>"
             "<input id='stt_base_url' name='stt_base_url' type='url' maxlength='180' value='" +
             htmlEscape(sttBaseUrl) + "'>"
@@ -141,14 +141,14 @@ String setupPage(const String& error)
             "<h2>Web search (optional)</h2>"
             "<p class='note'>Exa is the default provider and offers a starter tier without a payment method. Its key is stored only in device NVS and is never displayed or logged.</p>"
             "<label for='search_api_key'>Web search API key</label>"
-            "<input id='search_api_key' name='search_api_key' type='password' minlength='8' autocomplete='off' placeholder='Leave blank to keep saved search key'>"
+            "<input id='search_api_key' name='search_api_key' type='password' minlength='8' autocomplete='new-password' data-1p-ignore data-lpignore='true' placeholder='Leave blank to keep saved search key'>"
             "<label for='search_base_url'>Web search base URL</label>"
             "<input id='search_base_url' name='search_base_url' type='url' maxlength='180' value='" +
             htmlEscape(webSearchBaseUrl) + "'>"
             "<h2>Speech output (optional)</h2>"
             "<p class='note'>ElevenLabs multilingual TTS. The separate key is stored only in device NVS.</p>"
             "<label for='tts_api_key'>TTS API key</label>"
-            "<input id='tts_api_key' name='tts_api_key' type='password' minlength='8' autocomplete='off' placeholder='Leave blank to keep saved TTS key'>"
+            "<input id='tts_api_key' name='tts_api_key' type='password' minlength='8' autocomplete='new-password' data-1p-ignore data-lpignore='true' placeholder='Leave blank to keep saved TTS key'>"
             "<label for='tts_base_url'>TTS base URL</label>"
             "<input id='tts_base_url' name='tts_base_url' type='url' maxlength='180' value='" +
             htmlEscape(ttsBaseUrl) + "'>"
@@ -204,10 +204,14 @@ void saveSubmittedSettings()
     submitted.ttsVoice = webServer.arg("tts_voice");
     submitted.ttsAutoPlay = webServer.hasArg("tts_auto");
     const String wifiPassword = webServer.arg("wifi_password");
-    const String apiKey = webServer.arg("api_key");
-    const String sttApiKey = webServer.arg("stt_api_key");
-    const String webSearchApiKey = webServer.arg("search_api_key");
-    const String ttsApiKey = webServer.arg("tts_api_key");
+    String apiKey = webServer.arg("api_key");
+    String sttApiKey = webServer.arg("stt_api_key");
+    String webSearchApiKey = webServer.arg("search_api_key");
+    String ttsApiKey = webServer.arg("tts_api_key");
+    apiKey.trim();
+    sttApiKey.trim();
+    webSearchApiKey.trim();
+    ttsApiKey.trim();
     if (!wifiPassword.isEmpty() || currentSettings.wifiSsid.isEmpty()) {
         submitted.wifiPassword = wifiPassword;
     }

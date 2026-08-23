@@ -190,7 +190,12 @@ def _safe_script_name(value):
     if value in (".", "..") or "/" in value or "\\" in value:
         return False
     for character in value:
-        if not (character.isalnum() or character in "._-"):
+        if not (
+            "a" <= character <= "z"
+            or "A" <= character <= "Z"
+            or "0" <= character <= "9"
+            or character in "._-"
+        ):
             return False
     return True
 
@@ -295,6 +300,16 @@ def _query_value(target, key):
     return ""
 
 
+def _constant_time_equals(left, right):
+    difference = len(left) ^ len(right)
+    maximum = max(len(left), len(right))
+    for index in range(maximum):
+        left_value = ord(left[index]) if index < len(left) else 0
+        right_value = ord(right[index]) if index < len(right) else 0
+        difference |= left_value ^ right_value
+    return difference == 0
+
+
 def _read_request(connection):
     data = bytearray()
     header_end = -1
@@ -361,6 +376,15 @@ def _authorized(headers):
     return True
 
 
+def _begin_session(connection):
+    global _session_seen_at
+    _session_seen_at = time.time()
+    _send(connection, "303 See Other", "text/plain", "", {
+        "Location": "/",
+        "Set-Cookie": "cardmind_py={}; HttpOnly; SameSite=Strict; Path=/".format(_session_token),
+    })
+
+
 def _login_page(error):
     message = "<p class='error'>{}</p>".format(error) if error else ""
     template = """<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>CardMind Python</title><style>body{margin:0;background:#0a0c12;color:#edf1ff;font:15px system-ui;display:grid;place-items:center;min-height:100vh}.box{width:min(360px,calc(100% - 32px));background:#11141d;border:1px solid #2b3140;padding:24px}h1{margin-top:0}input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:10px;background:#0d1412;color:#edf1ff;border:1px solid #34413d}button{background:#ff6b45;color:#111;font-weight:800}.error{color:#ff897f}</style><form class=box method=post action=/login><small>CARDMIND / PYTHON</small><h1>Python workspace</h1><p>Use the CardMind installation password.</p>__ERROR__<input name=password type=password required autocomplete=current-password><button>Open workspace</button></form>"""
@@ -368,7 +392,7 @@ def _login_page(error):
 
 
 def _console_page():
-    return """<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>CardMind Python</title><style>:root{color-scheme:dark;--bg:#0a0c12;--panel:#11141d;--line:#2b3140;--text:#edf1ff;--muted:#8d96aa;--accent:#ff6b45;--mint:#61e6b5}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui}.app{display:grid;grid-template-columns:260px 1fr;min-height:100vh}.side{border-right:1px solid var(--line);padding:20px}.main{padding:22px;display:grid;gap:14px;grid-template-rows:auto 1fr auto}h1,h2{margin:0 0 8px}small,p{color:var(--muted)}select,textarea,button,input{width:100%;background:#0d1412;color:var(--text);border:1px solid var(--line);padding:10px}button{font-weight:750;cursor:pointer}.primary{background:var(--accent);color:#111}.mint{border-color:#286552;color:var(--mint)}.row{display:flex;gap:8px}.row>*{flex:1}textarea{min-height:52vh;resize:vertical;font:13px ui-monospace,monospace}.output{white-space:pre-wrap;min-height:130px;max-height:260px;overflow:auto;background:#05070b;border:1px solid var(--line);padding:12px;font:12px ui-monospace,monospace}.status{color:var(--mint)}@media(max-width:720px){.app{display:block}.side{border-right:0;border-bottom:1px solid var(--line)}.main{padding:14px}textarea{min-height:42vh}}</style><div class=app><aside class=side><small>CARDMIND / PYTHON</small><h1>Python workspace</h1><p>Scripts share the CardMind microSD workspace.</p><select id=files size=10></select><div class=row><button id=newFile>New</button><button id=loadFile>Open</button></div><button id=back class=mint>Return to CardMind</button><button id=restart>Restart Python</button></aside><main class=main><header><h2 id=title>No script selected</h2><span class=status id=status>Ready</span></header><textarea id=source spellcheck=false placeholder='# Write a MicroPython script'></textarea><div><div class=row><button id=save>Save file</button><button id=run class=primary>Run</button><button id=refresh>Refresh output</button></div><pre class=output id=output></pre></div></main></div><script>const q=s=>document.querySelector(s);let current='';async function api(path,options){const r=await fetch(path,options);const v=await r.json();if(!r.ok)throw Error(v.error||('HTTP '+r.status));return v}function message(v,bad=false){q('#status').textContent=v;q('#status').style.color=bad?'#ff897f':'#61e6b5'}async function state(){try{const v=await api('/api/state');q('#files').innerHTML=v.files.map(f=>`<option value="${f.name}">${f.name} · ${f.bytes} B</option>`).join('');q('#output').textContent=v.output;q('#run').disabled=v.running;message(v.running?'Running '+v.script:'Ready')}catch(e){message(e.message,true)}}q('#loadFile').onclick=async()=>{try{current=q('#files').value;if(!current)throw Error('Select a script');const v=await api('/api/file?name='+encodeURIComponent(current));q('#source').value=v.content;q('#title').textContent=current;message('Loaded')}catch(e){message(e.message,true)}};q('#newFile').onclick=()=>{const n=prompt('Script filename','script.py');if(n){current=n;q('#title').textContent=n;q('#source').value='';message('New unsaved script')}};q('#save').onclick=async()=>{try{if(!current)throw Error('Create or open a script first');await api('/api/file?name='+encodeURIComponent(current),{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:q('#source').value});message('Saved');await state()}catch(e){message(e.message,true)}};q('#run').onclick=async()=>{try{if(!current)throw Error('Create or open a script first');await api('/api/run?name='+encodeURIComponent(current),{method:'POST'});message('Started');setTimeout(state,250)}catch(e){message(e.message,true)}};q('#refresh').onclick=state;q('#back').onclick=async()=>{if(confirm('Return to CardMind firmware?'))await api('/api/cardmind',{method:'POST'})};q('#restart').onclick=async()=>{if(confirm('Restart Python mode?'))await api('/api/restart',{method:'POST'})};state();setInterval(state,2000)</script>"""
+    return """<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>CardMind Python</title><style>:root{color-scheme:dark;--bg:#0a0c12;--panel:#11141d;--line:#2b3140;--text:#edf1ff;--muted:#8d96aa;--accent:#ff6b45;--mint:#61e6b5}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui}.app{display:grid;grid-template-columns:260px 1fr;min-height:100vh}.side{border-right:1px solid var(--line);padding:20px}.main{padding:22px;display:grid;gap:14px;grid-template-rows:auto 1fr auto}h1,h2{margin:0 0 8px}small,p{color:var(--muted)}select,textarea,button,input{width:100%;background:#0d1412;color:var(--text);border:1px solid var(--line);padding:10px}button{font-weight:750;cursor:pointer}.primary{background:var(--accent);color:#111}.mint{border-color:#286552;color:var(--mint)}.row{display:flex;gap:8px}.row>*{flex:1}textarea{min-height:52vh;resize:vertical;font:13px ui-monospace,monospace}.output{white-space:pre-wrap;min-height:130px;max-height:260px;overflow:auto;background:#05070b;border:1px solid var(--line);padding:12px;font:12px ui-monospace,monospace}.status{color:var(--mint)}@media(max-width:720px){.app{display:block}.side{border-right:0;border-bottom:1px solid var(--line)}.main{padding:14px}textarea{min-height:42vh}}</style><div class=app><aside class=side><small>CARDMIND / PYTHON</small><h1>Python workspace</h1><p>Scripts share the CardMind microSD workspace.</p><select id=files size=10></select><div class=row><button id=newFile>New</button><button id=loadFile>Open</button></div><button id=back class=mint>Return to CardMind</button><button id=restart>Restart Python</button></aside><main class=main><header><h2 id=title>No script selected</h2><span class=status id=status>Ready</span></header><textarea id=source spellcheck=false placeholder='# Write a MicroPython script'></textarea><div><div class=row><button id=save>Save file</button><button id=run class=primary>Run</button><button id=refresh>Refresh output</button></div><pre class=output id=output></pre></div></main></div><script>const q=s=>document.querySelector(s);let current='';async function api(path,options){const r=await fetch(path,options);const v=await r.json();if(!r.ok)throw Error(v.error||('HTTP '+r.status));return v}function message(v,bad=false){q('#status').textContent=v;q('#status').style.color=bad?'#ff897f':'#61e6b5'}async function state(){try{const v=await api('/api/state');q('#files').innerHTML=v.files.map(f=>`<option value="${f.name}">${f.name} · ${f.bytes} B</option>`).join('');q('#output').textContent=v.output;q('#run').disabled=v.running;message(v.running?'Running '+v.script:'Ready')}catch(e){message(e.message,true)}}q('#loadFile').onclick=async()=>{try{current=q('#files').value;if(!current)throw Error('Select a script');const v=await api('/api/file?name='+encodeURIComponent(current));q('#source').value=v.content;q('#title').textContent=current;message('Loaded')}catch(e){message(e.message,true)}};q('#newFile').onclick=()=>{const n=prompt('Script filename','script.py');if(n){current=n;q('#title').textContent=n;q('#source').value='';message('New unsaved script')}};q('#save').onclick=async()=>{try{if(!current)throw Error('Create or open a script first');await api('/api/file?name='+encodeURIComponent(current),{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:q('#source').value});message('Saved');await state()}catch(e){message(e.message,true)}};q('#run').onclick=async()=>{try{if(!current)throw Error('Create or open a script first');await api('/api/run?name='+encodeURIComponent(current),{method:'POST'});message('Started');setTimeout(state,250)}catch(e){message(e.message,true)}};q('#refresh').onclick=state;q('#back').onclick=async()=>{if(!confirm('Return to CardMind firmware?'))return;q('#back').disabled=true;message('CardMind is restarting. Continue on the device.');try{await api('/api/cardmind',{method:'POST'})}catch(e){message('CardMind restart sent; browser connection closed.')}};q('#restart').onclick=async()=>{if(confirm('Restart Python mode?'))await api('/api/restart',{method:'POST'})};state();setInterval(state,2000)</script>"""
 
 
 def _handle_api(connection, method, target, headers, body):
@@ -425,7 +449,7 @@ def _handle_api(connection, method, target, headers, body):
         _json_response(connection, "404 Not Found", {"error": "Unknown Python workspace endpoint"})
 
 
-def _serve(password, address):
+def _serve(password, address, namespace):
     global _session_token, _session_seen_at
     _session_token = binascii.hexlify(machine.unique_id() + os.urandom(12)).decode()
     listener = socket.socket()
@@ -439,7 +463,16 @@ def _serve(password, address):
         try:
             method, target, headers, body = _read_request(connection)
             path = target.split("?", 1)[0]
-            if method == "POST" and path == "/login":
+            if method == "GET" and path == "/handoff":
+                supplied = _query_value(target, "token")
+                expected = _try_read_blob(namespace, "handoff", 33)
+                if not expected or not _constant_time_equals(supplied, expected):
+                    _send(connection, "403 Forbidden", "text/html; charset=utf-8", _login_page("Handoff expired"), {})
+                else:
+                    _clear_key(namespace, "handoff")
+                    namespace.commit()
+                    _begin_session(connection)
+            elif method == "POST" and path == "/login":
                 fields = {}
                 for field in body.decode().split("&"):
                     parts = field.split("=", 1)
@@ -448,11 +481,7 @@ def _serve(password, address):
                 if fields.get("password", "") != password:
                     _send(connection, "403 Forbidden", "text/html; charset=utf-8", _login_page("Incorrect password"), {})
                 else:
-                    _session_seen_at = time.time()
-                    _send(connection, "303 See Other", "text/plain", "", {
-                        "Location": "/",
-                        "Set-Cookie": "cardmind_py={}; HttpOnly; SameSite=Strict; Path=/".format(_session_token),
-                    })
+                    _begin_session(connection)
             elif method == "GET" and path == "/":
                 page = _console_page() if _authorized(headers) else _login_page("")
                 _send(connection, "200 OK", "text/html; charset=utf-8", page, {})
@@ -485,4 +514,4 @@ def start():
     if len(password) < 8:
         raise RuntimeError("Python mode has no synchronized console password")
     address = _connect_wifi(namespace)
-    _serve(password, address)
+    _serve(password, address, namespace)

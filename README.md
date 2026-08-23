@@ -26,7 +26,7 @@ the device; it does not run alongside Bruce or another firmware.
 ## Quick start
 
 1. Download the full image and `SHA256SUMS.txt` from the
-   [latest release](https://github.com/varlolwut/CardMind/releases/latest).
+   [latest release](https://github.com/varlolwut/cardmind/releases/latest).
 2. Verify the checksum, connect the Cardputer ADV with a data-capable USB cable, and
    flash `CardMind-cardputer-adv-full.bin` at `0x0`.
 3. Insert a FAT32-formatted microSD card and restart the device.

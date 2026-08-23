@@ -126,10 +126,20 @@ void testWorkspaceRouting()
             "Ordinary English instruction enabled workspace tools");
     require(cardputer::requestsWorkspaceAccess("Сохрани ответ в файл release.md"),
             "Explicit Russian file request did not enable workspace tools");
+    require(cardputer::requestsWorkspaceAccess(
+                "Можешь набросапть простой тестовый скрипт на Python, и сохранить его?"),
+            "Natural Russian Python save request did not enable workspace tools");
     require(cardputer::requestsWorkspaceAccess("ПОКАЖИ, КАКИЕ ФАЙЛЫ ЕСТЬ НА SD"),
             "Uppercase Russian file request did not enable workspace tools");
     require(cardputer::requestsWorkspaceAccess("/file create notes.txt"),
             "Explicit file command did not enable workspace tools");
+    require(cardputer::requestsWorkspaceWrite(
+                "Можешь набросапть простой тестовый скрипт на Python, и сохранить его?"),
+            "Natural Russian Python save request did not require a file write");
+    require(cardputer::requestsWorkspaceWrite("Create a downloadable file notes.md"),
+            "English create request did not require a file write");
+    require(!cardputer::requestsWorkspaceWrite("ПОКАЖИ, КАКИЕ ФАЙЛЫ ЕСТЬ НА SD"),
+            "Read-only file request incorrectly required a file write");
 }
 
 void testWebSearchRouting()

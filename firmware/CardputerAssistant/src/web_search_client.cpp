@@ -150,6 +150,7 @@ OperationResult requestJsonToMicroSd(const Settings& settings,
         client.setCACert(kGtsRootR4);
         client.setHandshakeTimeout(20);
         HTTPClient http;
+        http.setReuse(false);
         http.setTimeout(kHttpTimeoutMs);
         if (!http.begin(client, endpointUrl(settings, path))) {
             return {false, "Failed to initialize HTTPS " + operation + " request"};

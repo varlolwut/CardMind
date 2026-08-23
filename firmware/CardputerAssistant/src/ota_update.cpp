@@ -15,10 +15,10 @@ namespace cardputer {
 namespace {
 
 constexpr const char* kLatestReleaseUrl =
-    "https://api.github.com/repos/varlolwut/CardMind/releases/latest";
+    "https://api.github.com/repos/varlolwut/cardmind/releases/latest";
 constexpr const char* kAssetName = "CardMind-cardputer-adv.bin";
 constexpr const char* kAllowedAssetPrefix =
-    "https://github.com/varlolwut/CardMind/releases/download/";
+    "https://github.com/varlolwut/cardmind/releases/download/";
 constexpr const char* kTemporaryFirmwarePath = "/assistant/update.bin.tmp";
 constexpr const char* kFirmwarePath = "/assistant/update.bin";
 constexpr std::uint32_t kMaximumFirmwareBytes = 0x3f0000U;
@@ -208,6 +208,7 @@ FirmwareUpdateInfo checkLatestFirmwareUpdate(const String& currentVersion)
     client.setCACert(kGithubRoots);
     client.setHandshakeTimeout(20);
     HTTPClient http;
+    http.setReuse(false);
     http.setTimeout(30000);
     if (!http.begin(client, kLatestReleaseUrl)) {
         return {false, false, "", "", "", 0, pythonRecoveryReady(),
@@ -310,6 +311,7 @@ OperationResult downloadFirmwareUpdate(const FirmwareUpdateInfo& info,
     client.setCACert(kGithubRoots);
     client.setHandshakeTimeout(20);
     HTTPClient http;
+    http.setReuse(false);
     http.setTimeout(30000);
     http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
     if (!http.begin(client, info.assetUrl)) {

@@ -43,7 +43,7 @@ SET_LOOP_TASK_STACK_SIZE(16384);
 
 namespace {
 
-constexpr const char* kFirmwareVersion = "1.11.0";
+constexpr const char* kFirmwareVersion = "1.12.0";
 constexpr std::size_t kMaximumInputBytes = 1200;
 constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
@@ -81,9 +81,11 @@ enum class Screen {
     ModelPicker,
     ChatList,
     ChatActions,
+    ArchivedChatViewer,
     SearchSources,
     SearchSourceViewer,
     ChatInstructions,
+    ClearChatConfirm,
     DeleteChatConfirm,
     WifiPicker,
     WifiPassword,
@@ -137,6 +139,12 @@ std::vector<cardputer::WebSearchSource> searchSources;
 String searchSourcesQuery;
 std::vector<std::string> searchSourceViewerLines;
 std::size_t searchSourceViewerFirstLine = 0;
+std::vector<std::string> archivedChatViewerLines;
+std::vector<std::uint32_t> archivedChatPreviousOffsets;
+std::size_t archivedChatViewerFirstLine = 0;
+std::uint32_t archivedChatPageOffset = 0;
+std::uint32_t archivedChatNextOffset = 0;
+bool archivedChatEof = true;
 String selectedChatId;
 String selectedChatTitle;
 bool selectedChatSshToolsEnabled = false;
@@ -145,6 +153,8 @@ String instructionsStatus;
 String deleteChatId;
 String deleteChatTitle;
 Screen deleteChatReturnScreen = Screen::ChatList;
+String clearChatId;
+String clearChatTitle;
 std::size_t voiceMenuIndex = 0;
 std::size_t webConsoleMenuIndex = 0;
 std::size_t deviceMenuIndex = 0;
@@ -448,6 +458,7 @@ std::vector<String> chatActionItems()
         "Duplicate chat",
         "Export Markdown",
         "Export portable bundle",
+        "Clear messages",
         "Delete chat",
         "Back",
     };
@@ -472,6 +483,44 @@ void renderSearchSources()
                                  menuStatus.isEmpty()
                                      ? String("UP/DOWN  ENTER view  ESC back")
                                      : menuStatus);
+}
+
+cardputer::OperationResult loadArchivedChatViewerPage(std::uint32_t offset)
+{
+    const cardputer::ArchivedMessagesPageResult loaded =
+        cardputer::readArchivedChatMessages(selectedChatId, offset, 8, 12000);
+    if (!loaded.success) {
+        return {false, loaded.error};
+    }
+
+    std::vector<std::string> lines;
+    for (const auto& message : loaded.messages) {
+        const std::string heading = message.role == "user"
+            ? std::string("YOU - ARCHIVED") : std::string("AI - ARCHIVED");
+        const std::vector<std::string> wrapped = cardputer::wrapUtf8Text(
+            heading + "\n" + message.content, 38);
+        lines.insert(lines.end(), wrapped.begin(), wrapped.end());
+        lines.emplace_back("");
+    }
+    if (lines.empty()) {
+        lines.emplace_back("No archived messages.");
+    }
+
+    archivedChatViewerLines = std::move(lines);
+    archivedChatViewerFirstLine = 0;
+    archivedChatPageOffset = offset;
+    archivedChatNextOffset = loaded.nextOffset;
+    archivedChatEof = loaded.eof;
+    return {true, ""};
+}
+
+void renderArchivedChatViewer()
+{
+    const String suffix = archivedChatEof ? String("END") : String("MORE");
+    cardputer::showTextViewer("CHAT ARCHIVE - " + suffix,
+                             archivedChatViewerLines,
+                             archivedChatViewerFirstLine,
+                             "UP/DOWN scroll  ESC back");
 }
 
 void openLatestSearchSources()
@@ -634,6 +683,9 @@ void render()
     case Screen::ChatActions:
         renderChatActions();
         return;
+    case Screen::ArchivedChatViewer:
+        renderArchivedChatViewer();
+        return;
     case Screen::SearchSources:
         renderSearchSources();
         return;
@@ -644,6 +696,10 @@ void render()
         return;
     case Screen::ChatInstructions:
         renderChatInstructions();
+        return;
+    case Screen::ClearChatConfirm:
+        cardputer::showConfirmation("CLEAR MESSAGES", clearChatTitle,
+                                    "ENTER clear  ESC cancel");
         return;
     case Screen::DeleteChatConfirm:
         cardputer::showConfirmation("DELETE CHAT", deleteChatTitle,
@@ -709,8 +765,15 @@ bool runPureSelfTest()
         "(2 + 3) * 4");
     const bool calculator = calculation.success && calculation.value == 20.0 &&
         !cardputer::calculateExpression("4 / 0").success;
+    const bool workspaceRouting = cardputer::requestsWorkspaceAccess(
+        "Можешь набросать простой тестовый скрипт на Python и сохранить его?") &&
+        cardputer::requestsWorkspaceWrite(
+            "Можешь набросать простой тестовый скрипт на Python и сохранить его?") &&
+        !cardputer::requestsWorkspaceAccess("Объясни простой скрипт на Python") &&
+        !cardputer::requestsWorkspaceWrite("Покажи файлы на SD");
     return utf8Backspace && russianLayout && sse && wav && chatText && utf8Cursor &&
-           documentReader && calculator && cardputer::fontSupportsCyrillic();
+           documentReader && calculator && workspaceRouting &&
+           cardputer::fontSupportsCyrillic();
 }
 
 void printStatus()
@@ -969,6 +1032,14 @@ void runChatQolTest()
                            !loaded.chat.sshToolsEnabled)) {
         result = {false, "Chat version-4 metadata round trip failed"};
     }
+    const cardputer::ArchivedMessagesPageResult archivedPage = result.success
+        ? cardputer::readArchivedChatMessages(source.summary.id, 0, 8, 12000)
+        : cardputer::ArchivedMessagesPageResult{false, {}, 0, true, result.error};
+    if (result.success && (!archivedPage.success || archivedPage.messages.size() != 2 ||
+                           archivedPage.messages[0].content != "old" ||
+                           !archivedPage.eof)) {
+        result = {false, "Archived chat viewer page verification failed"};
+    }
     const cardputer::ChatDocumentResult duplicated = result.success
         ? cardputer::duplicateChat(source.summary.id)
         : cardputer::ChatDocumentResult{false, {}, result.error};
@@ -994,6 +1065,17 @@ void runChatQolTest()
                            imported.chat.instructions != "Be concise." ||
                            imported.chat.sshToolsEnabled)) {
         result = {false, "Portable chat import verification failed"};
+    }
+    if (result.success) {
+        result = cardputer::clearChatHistory(source.summary.id);
+    }
+    const cardputer::ChatDocumentResult cleared = result.success
+        ? cardputer::loadChat(source.summary.id)
+        : cardputer::ChatDocumentResult{false, {}, result.error};
+    if (result.success && (!cleared.success || !cleared.chat.messages.empty() ||
+                           cleared.chat.summary.archivedMessageCount != 0 ||
+                           cleared.chat.instructions != "Be concise.")) {
+        result = {false, "Clear chat verification failed"};
     }
     if (duplicated.success) {
         const cardputer::OperationResult cleanup = cardputer::deleteChat(
@@ -1232,22 +1314,29 @@ void runToolApiTest()
         Serial.println("TOOLTEST result=failed stage=network");
         return;
     }
-    const String testName = "firmware_tool_test.txt";
     bool writeSucceeded = false;
+    String writtenName;
     const std::vector<cardputer::Message> testHistory = {
-        {"user", "Use write_file to save exactly OK in firmware_tool_test.txt, then confirm briefly."},
+        {"user", "Можешь набросать простой тестовый скрипт на Python и сохранить его?"},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
         settings, testHistory, "", false, [](const std::string&) {},
-        [&writeSucceeded](const cardputer::ToolCall& call) {
+        [&writeSucceeded, &writtenName](const cardputer::ToolCall& call) {
             const cardputer::ToolExecutionResult execution = cardputer::executeWorkspaceTool(call);
             if (call.name == "write_file" && execution.success) {
-                writeSucceeded = true;
+                JsonDocument arguments;
+                const DeserializationError error = deserializeJson(arguments, call.arguments);
+                if (!error && arguments["name"].is<const char*>()) {
+                    writtenName = String(arguments["name"].as<const char*>());
+                    writeSucceeded = cardputer::isValidWorkspaceFilename(writtenName.c_str()) &&
+                        writtenName.endsWith(".py");
+                }
             }
             return execution;
         }, []() { return false; });
-    const String testPath = cardputer::workspaceFilePath(testName);
-    const bool fileCreated = SD.exists(testPath);
+    const String testPath = writtenName.isEmpty()
+        ? String() : cardputer::workspaceFilePath(writtenName);
+    const bool fileCreated = !testPath.isEmpty() && SD.exists(testPath);
     const bool cleanup = !fileCreated || SD.remove(testPath);
     if (!result.success || !writeSucceeded || !fileCreated || !cleanup) {
         Serial.println("TOOLTEST result=failed stage=tool_roundtrip");
@@ -1491,7 +1580,7 @@ void handleSerialCommand(const String& command)
         String password;
         cardputer::OperationResult result = cardputer::loadSetupAccessPointPassword(password);
         if (result.success) {
-            result = cardputer::synchronizePythonModeSettings(settings, password);
+            result = cardputer::synchronizePythonModeSettings(settings, password, "");
         }
         if (result.success) {
             result = cardputer::activatePythonMode();
@@ -1611,6 +1700,13 @@ void handleSerialCommand(const String& command)
     if (command == "TTSHW") {
         const cardputer::OperationResult result = cardputer::playTtsHardwareTest(settings.ttsVolume);
         Serial.printf("TTSHW result=%s\n", result.success ? "pass" : "failed");
+        return;
+    }
+    if (command == "TTSSTOPTEST") {
+        const cardputer::OperationResult result = cardputer::playTtsHardwareTestControlled(
+            settings.ttsVolume, []() { return cardputer::SpeechPlaybackCommand::Stop; });
+        const bool passed = result.success && result.error == "Speech playback stopped";
+        Serial.printf("TTSSTOPTEST result=%s\n", passed ? "pass" : "failed");
         return;
     }
     if (command == "MICTEST") {
@@ -1902,12 +1998,22 @@ void submitPrompt()
     }
     Serial.println("INFO event=chat_completion result=ok");
     if (settings.ttsAutoPlay) {
-        cardputer::showBusyScreen("SPEAKING", "Generating multilingual audio...");
+        cardputer::showBusyScreen("SPEAKING", "ESC stops download or playback");
         cardputer::markOperation("tts_auto");
-        const cardputer::OperationResult speech = cardputer::synthesizeAndPlaySpeech(
-            settings, result.response);
+        const cardputer::OperationResult speech = cardputer::synthesizeAndPlaySpeechControlled(
+            settings, result.response, []() {
+                M5Cardputer.update();
+                return M5Cardputer.Keyboard.keysState().esc
+                    ? cardputer::SpeechPlaybackCommand::Stop
+                    : cardputer::SpeechPlaybackCommand::Continue;
+            });
         cardputer::markOperation("idle");
-        if (!speech.success) {
+        const bool stopped = speech.error == "Speech playback stopped" ||
+            speech.error == "Speech synthesis canceled by user";
+        if (stopped) {
+            setTransientStatus("Speech stopped", 1500);
+            Serial.println("INFO event=tts_playback result=stopped source=auto");
+        } else if (!speech.success) {
             statusMessage = speech.error;
             Serial.println("ERROR event=tts_playback result=failed source=auto");
         } else {
@@ -2090,6 +2196,20 @@ void handleVoiceInput()
     render();
 }
 
+cardputer::SpeechPlaybackCommand chatSpeechPlaybackControl()
+{
+    M5Cardputer.update();
+    return M5Cardputer.Keyboard.keysState().esc
+        ? cardputer::SpeechPlaybackCommand::Stop
+        : cardputer::SpeechPlaybackCommand::Continue;
+}
+
+bool speechWasStopped(const cardputer::OperationResult& result)
+{
+    return result.error == "Speech playback stopped" ||
+           result.error == "Speech synthesis canceled by user";
+}
+
 void speakLastAssistantResponse()
 {
     const auto message = std::find_if(history.rbegin(), history.rend(), [](const cardputer::Message& item) {
@@ -2110,11 +2230,15 @@ void speakLastAssistantResponse()
         render();
         return;
     }
-    cardputer::showBusyScreen("SPEAKING", "Generating multilingual audio...");
+    cardputer::showBusyScreen("SPEAKING", "ESC stops download or playback");
     cardputer::markOperation("tts_request");
-    const cardputer::OperationResult result = cardputer::synthesizeAndPlaySpeech(settings, message->content);
+    const cardputer::OperationResult result = cardputer::synthesizeAndPlaySpeechControlled(
+        settings, message->content, chatSpeechPlaybackControl);
     cardputer::markOperation("idle");
-    if (result.success) {
+    if (speechWasStopped(result)) {
+        setTransientStatus("Speech stopped", 1500);
+        Serial.println("INFO event=tts_playback result=stopped source=manual");
+    } else if (result.success) {
         setTransientStatus("Spoken", 1500);
         Serial.println("INFO event=tts_playback result=ok source=manual");
     } else {
@@ -2448,26 +2572,21 @@ std::vector<String> timerMenuItems()
     };
 }
 
-std::vector<String> diagnosticsItems()
+String resetReasonLabel()
 {
-    return {
-        "Firmware: " + String(kFirmwareVersion),
-        "Board: Cardputer ADV",
-        "Battery: " + (batteryLevel >= 0 ? String(batteryLevel) + "%" : String("unavailable")),
-        "Brightness: " + brightnessSettingLabel(settings.displayBrightness),
-        "Screen sleep: " + sleepSettingLabel(settings.screenSleepMinutes),
-        "Keyboard repeat: " + keyboardRepeatSettingLabel(settings.keyboardRepeatMs),
-        "Power: " + powerProfileLabel(settings.powerProfile),
-        "CPU: " + String(getCpuFrequencyMhz()) + " MHz",
-        "Wi-Fi: " + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected"),
-        "microSD: " + String(fileWorkspaceReady ? "ready" : "unavailable"),
-        "Chats: " + String(chats.size()),
-        "Free heap: " + String(ESP.getFreeHeap()) + " B",
-        "Crash journal: " + String(crashJournalReady ? "ready" : "unavailable"),
-        "SSH storage: " + String(sshStorageReady ? "ready" : "unavailable"),
-        "Previous op: " + cardputer::previousOperation(),
-        "Reset reason: " + String(static_cast<int>(esp_reset_reason())),
-    };
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON: return "Power on";
+        case ESP_RST_EXT: return "External reset";
+        case ESP_RST_SW: return "Software restart";
+        case ESP_RST_PANIC: return "Software panic";
+        case ESP_RST_INT_WDT: return "Interrupt watchdog";
+        case ESP_RST_TASK_WDT: return "Task watchdog";
+        case ESP_RST_WDT: return "Watchdog";
+        case ESP_RST_DEEPSLEEP: return "Deep sleep wake";
+        case ESP_RST_BROWNOUT: return "Brownout";
+        case ESP_RST_SDIO: return "SDIO reset";
+        default: return "Unknown (" + String(static_cast<int>(esp_reset_reason())) + ")";
+    }
 }
 
 std::vector<String> workspaceFileItems()
@@ -2761,7 +2880,10 @@ void openWebConsole(Screen returnScreen)
         return;
     }
     cardputer::markOperation("web_console");
-    const cardputer::WebConsoleResult result = cardputer::runWebConsole(settings, activeChatId);
+    const String previousWifiSsid = settings.wifiSsid;
+    const String previousWifiPassword = settings.wifiPassword;
+    const cardputer::WebConsoleResult result = cardputer::runWebConsole(
+        settings, activeChatId, kFirmwareVersion);
     cardputer::markOperation("idle");
     if (!result.success) {
         menuStatus = result.error;
@@ -2770,10 +2892,23 @@ void openWebConsole(Screen returnScreen)
         const cardputer::OperationResult runtimeResult = settingsResult.success
             ? applyDisplayAndCpuSettings(settings)
             : settingsResult;
+        const bool wifiChanged = settingsResult.success &&
+            (settings.wifiSsid != previousWifiSsid ||
+             settings.wifiPassword != previousWifiPassword);
+        const cardputer::OperationResult wifiResult = wifiChanged
+            ? cardputer::connectToWifi(settings)
+            : cardputer::OperationResult{true, ""};
+        const cardputer::OperationResult clockResult = wifiResult.success && wifiChanged
+            ? cardputer::synchronizeTlsClock()
+            : wifiResult;
         const cardputer::OperationResult activeResult = activateChat(result.activeChatId);
         const cardputer::OperationResult listResult = refreshChatList();
         if (!runtimeResult.success) {
             menuStatus = runtimeResult.error;
+        } else if (!wifiResult.success) {
+            menuStatus = wifiResult.error;
+        } else if (!clockResult.success) {
+            menuStatus = clockResult.error;
         } else if (!activeResult.success) {
             menuStatus = activeResult.error;
         } else if (!listResult.success) {
@@ -2795,6 +2930,27 @@ void waitForModalKeyRelease()
 {
     while (!M5Cardputer.Keyboard.keyList().empty()) {
         M5Cardputer.update();
+        delay(5);
+    }
+}
+
+bool confirmPythonWorkspaceStart(const String& address, const String& password)
+{
+    waitForModalKeyRelease();
+    cardputer::showPythonWorkspaceAccess(address, password);
+    while (true) {
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+            const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+            if (keys.esc || keyboardWordContains(keys, '`')) {
+                waitForModalKeyRelease();
+                return false;
+            }
+            if (keys.enter) {
+                waitForModalKeyRelease();
+                return true;
+            }
+        }
         delay(5);
     }
 }
@@ -3669,8 +3825,39 @@ void renderFileNameEntry()
 
 void renderDiagnostics()
 {
-    cardputer::showSelectionList("DIAGNOSTICS", diagnosticsItems(), diagnosticsIndex,
-                                 "UP/DOWN scroll  ESC back");
+    refreshBatteryStatus();
+    const String battery = batteryLevel >= 0
+        ? (batteryLevel <= 15 ? String("LOW ") : String("")) + String(batteryLevel) +
+          "%" + (batteryCharging ? " +" : "")
+        : String("Unavailable");
+    const String wifi = WiFi.status() == WL_CONNECTED
+        ? String(WiFi.RSSI()) + " dBm"
+        : String("Disconnected");
+    const std::uint64_t totalBytes = fileWorkspaceReady ? SD.totalBytes() : 0;
+    const std::uint64_t usedBytes = fileWorkspaceReady ? SD.usedBytes() : 0;
+    const String storage = fileWorkspaceReady
+        ? String(static_cast<unsigned long>(usedBytes / (1024U * 1024U))) + "/" +
+          String(static_cast<unsigned long>(totalBytes / (1024U * 1024U))) + " MiB"
+        : String("Unavailable");
+    const cardputer::DeviceDiagnosticsView view = {
+        String(kFirmwareVersion),
+        battery,
+        wifi,
+        storage,
+        String(ESP.getFreeHeap() / 1024U) + " KiB",
+        String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / 1024U) + " KiB",
+        String(uxTaskGetStackHighWaterMark(nullptr)) + " B",
+        String(getCpuFrequencyMhz()) + " MHz",
+        systemMonitorUptime(),
+        String(chats.size()),
+        resetReasonLabel(),
+        cardputer::previousOperation(),
+        WiFi.status() == WL_CONNECTED,
+        fileWorkspaceReady,
+        crashJournalReady,
+        sshStorageReady,
+    };
+    cardputer::showDeviceDiagnostics(view, diagnosticsIndex);
 }
 
 void renderControlsHelp()
@@ -4355,8 +4542,16 @@ void handleKeyboard()
             }
             renderChatActions();
         } else if (enterPressed && chatActionsIndex == 3) {
-            menuStatus = "Older turns are preserved on microSD";
-            renderChatActions();
+            archivedChatPreviousOffsets.clear();
+            const cardputer::OperationResult loaded = loadArchivedChatViewerPage(0);
+            if (!loaded.success) {
+                menuStatus = loaded.error;
+                renderChatActions();
+            } else {
+                menuStatus = "";
+                currentScreen = Screen::ArchivedChatViewer;
+                renderArchivedChatViewer();
+            }
         } else if (enterPressed && chatActionsIndex == 4) {
             retryLastRequest();
         } else if (enterPressed && chatActionsIndex == 5) {
@@ -4425,6 +4620,12 @@ void handleKeyboard()
             menuStatus = exported.success ? "Exported as " + filename : exported.error;
             renderChatActions();
         } else if (enterPressed && chatActionsIndex == 11) {
+            clearChatId = selectedChatId;
+            clearChatTitle = selectedChatTitle;
+            currentScreen = Screen::ClearChatConfirm;
+            cardputer::showConfirmation("CLEAR MESSAGES", clearChatTitle,
+                                        "ENTER clear  ESC cancel");
+        } else if (enterPressed && chatActionsIndex == 12) {
             deleteChatId = selectedChatId;
             deleteChatTitle = selectedChatTitle;
             deleteChatReturnScreen = Screen::ChatActions;
@@ -4435,6 +4636,51 @@ void handleKeyboard()
             currentScreen = Screen::ChatList;
             menuStatus = "";
             renderChatList();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ArchivedChatViewer) {
+        if (cancelPressed) {
+            archivedChatPreviousOffsets.clear();
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (upPressed) {
+            if (archivedChatViewerFirstLine > 0) {
+                --archivedChatViewerFirstLine;
+                renderArchivedChatViewer();
+            } else if (!archivedChatPreviousOffsets.empty()) {
+                const std::uint32_t previousOffset = archivedChatPreviousOffsets.back();
+                archivedChatPreviousOffsets.pop_back();
+                const cardputer::OperationResult loaded =
+                    loadArchivedChatViewerPage(previousOffset);
+                if (!loaded.success) {
+                    menuStatus = loaded.error;
+                    currentScreen = Screen::ChatActions;
+                    renderChatActions();
+                } else {
+                    archivedChatViewerFirstLine = archivedChatViewerLines.size() > 8
+                        ? archivedChatViewerLines.size() - 8 : 0;
+                    renderArchivedChatViewer();
+                }
+            }
+        } else if (downPressed) {
+            if (archivedChatViewerFirstLine + 8 < archivedChatViewerLines.size()) {
+                ++archivedChatViewerFirstLine;
+                renderArchivedChatViewer();
+            } else if (!archivedChatEof && archivedChatNextOffset > archivedChatPageOffset) {
+                archivedChatPreviousOffsets.push_back(archivedChatPageOffset);
+                const cardputer::OperationResult loaded =
+                    loadArchivedChatViewerPage(archivedChatNextOffset);
+                if (!loaded.success) {
+                    archivedChatPreviousOffsets.pop_back();
+                    menuStatus = loaded.error;
+                    currentScreen = Screen::ChatActions;
+                    renderChatActions();
+                } else {
+                    renderArchivedChatViewer();
+                }
+            }
         }
         return;
     }
@@ -4556,6 +4802,40 @@ void handleKeyboard()
                 instructionsStatus = "";
             }
             renderChatInstructions();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ClearChatConfirm) {
+        if (cancelPressed) {
+            clearChatId = "";
+            clearChatTitle = "";
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (enterPressed) {
+            const bool clearingActive = clearChatId == activeChatId;
+            cardputer::OperationResult result = cardputer::clearChatHistory(clearChatId);
+            if (result.success) {
+                result = refreshChatList();
+            }
+            if (result.success && clearingActive) {
+                result = activateChat(clearChatId);
+            }
+            clearChatId = "";
+            clearChatTitle = "";
+            if (!result.success) {
+                currentScreen = Screen::ChatActions;
+                menuStatus = result.error;
+                renderChatActions();
+            } else if (clearingActive) {
+                currentScreen = Screen::Chat;
+                setTransientStatus("Chat messages cleared", 2000);
+                render();
+            } else {
+                currentScreen = Screen::ChatActions;
+                menuStatus = "Chat messages cleared";
+                renderChatActions();
+            }
         }
         return;
     }
@@ -4853,20 +5133,31 @@ void handleKeyboard()
                     result = {false, "Run configuration once to create an installation password"};
                 }
                 if (result.success) {
-                    result = cardputer::synchronizePythonModeSettings(settings, password);
-                }
-                if (result.success) {
-                    result = cardputer::activatePythonMode();
+                    result = cardputer::synchronizePythonModeSettings(settings, password, "");
                 }
                 if (!result.success) {
+                    password = "";
                     menuStatus = result.error;
                     renderWebConsoleMenu();
                     return;
                 }
                 const String address = WiFi.status() == WL_CONNECTED
-                    ? String("Open http://") + WiFi.localIP().toString() + " after restart"
-                    : String("Connect Wi-Fi after Python starts");
-                cardputer::showBusyScreen("PYTHON WORKSPACE", address);
+                    ? String("http://") + WiFi.localIP().toString() + "/"
+                    : String("Wi-Fi unavailable");
+                if (!confirmPythonWorkspaceStart(address, password)) {
+                    password = "";
+                    menuStatus = "Python start canceled";
+                    renderWebConsoleMenu();
+                    return;
+                }
+                password = "";
+                result = cardputer::activatePythonMode();
+                if (!result.success) {
+                    menuStatus = result.error;
+                    renderWebConsoleMenu();
+                    return;
+                }
+                cardputer::showBusyScreen("PYTHON WORKSPACE", "Restarting into MicroPython...");
                 delay(800);
                 ESP.restart();
             } else if (webConsoleMenuIndex == 5) {
@@ -5605,16 +5896,15 @@ void handleKeyboard()
     }
 
     if (currentScreen == Screen::Diagnostics) {
-        const std::size_t itemCount = diagnosticsItems().size();
         if (cancelPressed) {
             currentScreen = diagnosticsReturnScreen;
             menuStatus = "";
             render();
-        } else if (upPressed) {
-            diagnosticsIndex = diagnosticsIndex > 0 ? diagnosticsIndex - 1 : 0;
+        } else if (upPressed || leftPressed) {
+            diagnosticsIndex = diagnosticsIndex == 0 ? 1 : 0;
             renderDiagnostics();
-        } else if (downPressed) {
-            diagnosticsIndex = std::min(diagnosticsIndex + 1, itemCount - 1);
+        } else if (downPressed || rightPressed) {
+            diagnosticsIndex = diagnosticsIndex == 0 ? 1 : 0;
             renderDiagnostics();
         }
         return;

@@ -33,11 +33,31 @@ struct CarouselCard {
     CarouselIcon icon;
 };
 
+struct DeviceDiagnosticsView {
+    String firmware;
+    String battery;
+    String wifi;
+    String storage;
+    String heap;
+    String largestHeap;
+    String stack;
+    String cpu;
+    String uptime;
+    String chats;
+    String resetReason;
+    String previousOperation;
+    bool wifiConnected;
+    bool storageReady;
+    bool crashJournalReady;
+    bool sshStorageReady;
+};
+
 OperationResult beginUi();
 void showFatalError(const String& error);
 void showProvisioning(const String& accessPointName, const String& accessPointPassword);
 void showFilesPortal(const String& accessPointName, const String& accessPointPassword);
 void showWebConsoleAccess(const String& address, const String& accessPassword);
+void showPythonWorkspaceAccess(const String& address, const String& accessPassword);
 void showChat(const std::vector<Message>& history,
               const std::string& activeResponse,
               const std::string& input,
@@ -71,6 +91,7 @@ void showSelectionList(const String& title,
                        const std::vector<String>& items,
                        std::size_t selectedIndex,
                        const String& footer);
+void showDeviceDiagnostics(const DeviceDiagnosticsView& diagnostics, std::size_t pageIndex);
 void showTextViewer(const String& title,
                     const std::vector<std::string>& lines,
                     std::size_t firstLine,

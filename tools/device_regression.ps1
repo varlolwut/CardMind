@@ -7,7 +7,7 @@ param(
     [int]$BaudRate,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("offline", "full")]
+    [ValidateSet("offline", "online", "full")]
     [string]$Suite,
 
     [Parameter(Mandatory = $true)]
@@ -170,6 +170,7 @@ $offlineCases = @(
     (New-RegressionCase -Name "Python partition layout" -Command "PYTHONCHECK" -CompletionPattern "^PYTHONCHECK result=" -PassPattern "^PYTHONCHECK result=pass.*layout=yes.*image=yes" -TimeoutSeconds 20),
     (New-RegressionCase -Name "microphone before speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
     (New-RegressionCase -Name "speaker hardware" -Command "TTSHW" -CompletionPattern "^TTSHW result=" -PassPattern "^TTSHW result=pass$" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "speaker cancellation" -Command "TTSSTOPTEST" -CompletionPattern "^TTSSTOPTEST result=" -PassPattern "^TTSSTOPTEST result=pass$" -TimeoutSeconds 20),
     (New-RegressionCase -Name "microphone after speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
     (New-RegressionCase -Name "web console start" -Command "CONSOLE" -CompletionPattern "^WEB_CONSOLE result=ready" -PassPattern "^WEB_CONSOLE result=ready" -TimeoutSeconds 20),
     (New-RegressionCase -Name "web console status" -Command "STATUS" -CompletionPattern "^WEB_CONSOLE status=" -PassPattern "^WEB_CONSOLE status=ready authenticated=no" -TimeoutSeconds 15),
@@ -180,8 +181,8 @@ $offlineCases = @(
 $onlineCases = @(
     (New-RegressionCase -Name "chat API" -Command "APITEST" -CompletionPattern "^APITEST result=" -PassPattern "^APITEST result=pass" -TimeoutSeconds 120),
     (New-RegressionCase -Name "model file tool" -Command "TOOLTEST" -CompletionPattern "^TOOLTEST result=" -PassPattern "^TOOLTEST result=pass" -TimeoutSeconds 180),
-    (New-RegressionCase -Name "web search API" -Command "WEBTEST" -CompletionPattern "^WEBTEST result=" -PassPattern "^WEBTEST result=pass$" -TimeoutSeconds 120),
-    (New-RegressionCase -Name "web contents API" -Command "FETCHTEST" -CompletionPattern "^FETCHTEST result=" -PassPattern "^FETCHTEST result=pass$" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "web search API" -Command "WEBTEST" -CompletionPattern "^WEBTEST result=" -PassPattern "^WEBTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "web contents API" -Command "FETCHTEST" -CompletionPattern "^FETCHTEST result=" -PassPattern "^FETCHTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "search sources cache" -Command "SEARCHCACHETEST" -CompletionPattern "^SEARCHCACHETEST result=" -PassPattern "^SEARCHCACHETEST result=pass" -TimeoutSeconds 30),
     (New-RegressionCase -Name "model search tool round trip" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=pass.*search_called=yes" -TimeoutSeconds 240),
     (New-RegressionCase -Name "UI search path" -Command "E2ETEST" -CompletionPattern "^E2ETEST result=" -PassPattern "^E2ETEST result=pass.*response=yes.*cleanup=yes" -TimeoutSeconds 300),
@@ -218,8 +219,10 @@ try {
     Start-Sleep -Seconds 12
     $serial.ReadExisting() | Out-Null
     $cases = [System.Collections.Generic.List[object]]::new()
-    $cases.AddRange([object[]]$offlineCases)
-    if ($Suite -eq "full") {
+    if ($Suite -ne "online") {
+        $cases.AddRange([object[]]$offlineCases)
+    }
+    if ($Suite -ne "offline") {
         $cases.AddRange([object[]]$onlineCases)
     }
     foreach ($case in $cases) {

@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 
 const sourcePath = new URL("../firmware/CardputerAssistant/src/web_console.cpp", import.meta.url);
 const source = readFileSync(sourcePath, "utf8");
-const functionStart = source.indexOf("void sendConsolePage()\n{");
-const functionEnd = source.indexOf("\nvoid sendLoginPage()", functionStart);
+const functionStartMatch = /void sendConsolePage\(\)\r?\n\{/.exec(source);
+const functionStart = functionStartMatch?.index ?? -1;
+const functionEndMatch = /\r?\nvoid sendLoginPage\(\)/g;
+functionEndMatch.lastIndex = Math.max(functionStart, 0);
+const functionEnd = functionEndMatch.exec(source)?.index ?? -1;
 if (functionStart < 0 || functionEnd < 0) {
     throw new Error("Could not locate sendConsolePage in web_console.cpp");
 }
@@ -19,15 +22,48 @@ const previewState = {
     battery: 87,
     wifi_rssi: -53,
     free_heap: 124608,
+    minimum_heap: 98240,
     largest_heap: 63488,
+    stack_free: 4288,
+    cpu_mhz: 240,
+    uptime_ms: 4368000,
+    reset_reason: 1,
     sd_used_bytes: 3145728,
     sd_total_bytes: 31914983424,
     active_chat_id: "chat-1",
     active_chat_title: "CardMind UX review",
+    active_context_messages: 18,
+    active_context_bytes: 12480,
+    maximum_context_messages: 64,
+    maximum_context_bytes: 32768,
+    archived_messages: 6,
     instructions: "Answer clearly and keep code examples compact.",
+    ssh_tools_enabled: false,
     status: "",
+    firmware_version: "1.12.0-preview",
+    wifi_ssid: "Studio 2.4 GHz",
     model: "claude-sonnet-4-6",
     api_base_url: "https://api.example.com",
+    api_key_configured: true,
+    stt_base_url: "https://speech.example.com",
+    stt_model: "whisper-1",
+    stt_key_configured: true,
+    search_base_url: "https://search.example.com",
+    search_key_configured: true,
+    tts_base_url: "https://speech.example.com",
+    tts_model: "tts-1",
+    tts_voice: "alloy",
+    tts_key_configured: true,
+    tts_auto_play: false,
+    tts_volume: 190,
+    display_brightness: 180,
+    screen_sleep_minutes: 5,
+    keyboard_repeat_ms: 125,
+    power_profile: 1,
+    python_layout_ready: true,
+    python_image_ready: true,
+    python_error: "",
+    python_runtime_error: "",
     chats: [
         {id: "chat-1", title: "CardMind UX review", pinned: true, archived: false, total_messages: 18},
         {id: "chat-2", title: "Travel notes", pinned: false, archived: false, total_messages: 9},
@@ -49,6 +85,8 @@ const previewState = {
     ssh_username: "cardmind",
     ssh_auth_mode: "key",
     ssh_terminal_open: false,
+    ssh_key_installed: true,
+    ssh_configured: true,
     files: [
         {name: "notes.md", size: 18422},
         {name: "report.txt", size: 92480},

@@ -21,7 +21,7 @@ installation password.
 ## Download and verify a release
 
 Download these files from the
-[latest release](https://github.com/varlolwut/CardMind/releases/latest):
+[latest release](https://github.com/varlolwut/cardmind/releases/latest):
 
 - `CardMind-cardputer-adv-full.bin` for a clean installation, including the Python
   workspace and recovery image;

@@ -29,6 +29,8 @@ configuration and SFTP controls.
 - Use the two-pane desktop layout to keep conversations beside the active thread; on
   a phone the active conversation and composer appear first.
 - Select, create, rename, pin, archive, duplicate, export, or delete chats.
+- Load archived turns, clear a chat without deleting it, and monitor active context
+  usage by message count and UTF-8 bytes.
 - Send prompts with SSE streaming, cancel an active request, or retry the previous
   browser prompt.
 - Edit instructions that belong only to the active chat.
@@ -76,17 +78,30 @@ prompts, so confirmation remains usable and visually consistent on desktop and m
 
 ### Settings
 
-- Change the non-secret OpenAI-compatible base URL and model.
-- View battery, Wi-Fi RSSI, heap, largest free block, and microSD usage.
+- Change 2.4 GHz Wi-Fi, the OpenAI-compatible base URL, model, and write-only API key.
+- Configure the optional STT, web-search, and TTS providers, automatic speech, and
+  speaker volume.
+- Adjust brightness, display sleep, keyboard repeat, and the power profile.
+- Refresh the provider model list and test chat API authentication.
+- View and export firmware, reset, uptime, CPU, stack, heap, battery, Wi-Fi, microSD,
+  service, and Python diagnostics.
+- Start the installed Python workspace directly from the Settings page.
+- Choose browser-only density, motion, contrast, and terminal wake-lock preferences.
 
-API keys and Wi-Fi credentials are intentionally not returned to the browser. Use
-the on-device setup portal when a secret must be replaced.
+API keys and Wi-Fi passwords are intentionally not returned to the browser. A blank
+secret field preserves the saved value; explicit remove controls are provided for
+optional services. Select **End session** to close browser/SSH sessions and apply a
+changed Wi-Fi network. If the network changed, reopen the console at its new address.
 
 ## Python workspace
 
-The **Web Console** device menu also starts an isolated MicroPython workspace. It
+The **Web Console** device menu and the normal Web Console Settings page both start
+an isolated MicroPython workspace. It
 reuses the configured 2.4 GHz Wi-Fi network and installation password, then restarts
-into the Python image. Open the displayed CardMind address again and sign in to:
+into the Python image. Starting it from the browser transfers the current IP address
+and a one-time handoff token, waits for the restart, and opens the authenticated Python
+workspace automatically. Starting it from the Cardputer first shows the IP address and
+installation password; press Enter to continue or Esc to cancel.
 
 - create, open, edit, and save `.py` files in the shared `/assistant/files`
   workspace on microSD;
@@ -97,7 +112,10 @@ into the Python image. Open the displayed CardMind address again and sign in to:
 Normal chat, SSH, and Workspace pages are not active while the Python image is
 running. Returning to CardMind does not delete scripts. A model running in CardMind
 can create a `.py` file with its normal file tool; the same file can then be opened
-and executed after switching to MicroPython mode.
+and executed after switching to MicroPython mode. **Return to CardMind** selects the
+CardMind partition and performs the required controlled restart. If the Python page
+is unavailable, reconnect the Cardputer to its configured 2.4 GHz network and reopen
+the address shown before the mode switch. `RST` alone restarts the selected mode.
 
 ## Security model
 

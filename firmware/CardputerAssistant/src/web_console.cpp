@@ -4,6 +4,7 @@
 #include "chat_storage.h"
 #include "crash_journal.h"
 #include "file_workspace.h"
+#include "python_mode.h"
 #include "storage.h"
 #include "ssh_client.h"
 #include "ssh_tool.h"
@@ -68,6 +69,8 @@ bool webSshAwaitingTrust = false;
 bool webSshTerminalOpen = false;
 bool consoleEscapeConsumed = false;
 String consoleQrPayload;
+String firmwareVersion;
+bool pythonRestartRequested = false;
 
 bool consoleEscapePressed()
 {
@@ -95,6 +98,15 @@ bool parseUnsignedArgument(const String& value, std::uint32_t& result)
     return true;
 }
 
+String normalizedBaseUrl(String value)
+{
+    value.trim();
+    while (value.endsWith("/")) {
+        value.remove(value.length() - 1);
+    }
+    return value;
+}
+
 void clearConsoleSecrets()
 {
     webSshClient.close();
@@ -117,6 +129,7 @@ void clearConsoleSecrets()
     consoleSettings.webSearchApiKey = "";
     consoleSettings.ttsApiKey = "";
     consoleQrPayload = "";
+    firmwareVersion = "";
 }
 
 void failUpload(const String& error)
@@ -284,23 +297,31 @@ void sendConsolePage()
 #messages{flex:1;min-height:0;overflow:auto;padding:0 16px;scrollbar-color:#394640 transparent}.message{white-space:pre-wrap;max-width:none;padding:15px 0;border-radius:0;margin:0;line-height:1.58;border:0;border-bottom:1px solid #25302b}.user{margin:0;background:transparent;color:#dfe7e3}.assistant{background:transparent;color:#eef1ff}.assistant::first-line{color:var(--blue)}.stream{color:var(--warn)}.composer{margin:10px;padding:0;border:1px solid #3b4943;border-radius:3px;background:#101815}.composer textarea{min-height:82px;max-height:180px;border:0;background:transparent;box-shadow:none}.composer-bar{display:flex;align-items:center;gap:8px;padding:8px;border-top:1px solid #29342f;margin:0}.shortcut{color:var(--muted);font-size:11px;margin-right:auto}.intent-row{display:flex;align-items:center;gap:6px;padding:8px 10px 0}.intent-row>span{color:#7f879c;font:700 9px ui-monospace,Consolas,monospace;letter-spacing:.12em}.intent{min-height:28px;padding:0 9px;border:1px solid #5367bf;border-radius:14px;background:#6c82ff18;color:#aeb9ff;font-size:10px}
 textarea,input,select{box-sizing:border-box;width:100%;min-width:0;background:#0d1412;color:var(--text);border:1px solid var(--line2);border-radius:7px;padding:10px 11px;outline:none}textarea:focus,input:focus,select:focus{border-color:#ffd36a;box-shadow:0 0 0 2px #ffd36a33}textarea{min-height:96px;resize:vertical}button{min-width:0;min-height:38px;border:1px solid #ff8060;border-radius:7px;padding:8px 12px;cursor:pointer;background:#ff6b45;color:#1c0e09;font-weight:800;line-height:1.2;white-space:normal}button:hover{background:#ff8060}button:focus-visible{outline:2px solid #ffd36a;outline-offset:2px}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#18211f;color:#e5eee9;border-color:#46534e}.secondary:hover{background:#202c29}.ghost{background:#11141d;color:#b9c6c0;border:1px solid #3b4642}.ghost:hover{background:#1a211f;color:#f0f5f2}.danger{background:#3d2222;color:#ffb0aa;border-color:#754542}.danger:hover{background:#502928}.icon-button{min-width:38px;padding:7px 10px}
 .field-label{display:block;color:#b9cada;font-size:12px;font-weight:700;margin:13px 0 6px}.stack{display:grid;gap:9px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch}.row>*{flex:1 1 150px;min-width:0}.compact>*{flex:0 1 auto}.full{width:100%}small,.muted{color:var(--muted)}details{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}summary{cursor:pointer;color:#b9cada;padding:7px 0;font-weight:700}.qr-card{margin-top:16px}.qr-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,.55fr);gap:16px}.qr-actions{display:flex;gap:8px;flex-wrap:wrap}.qr-actions button{flex:1 1 150px}.permission{display:flex;align-items:flex-start;gap:10px;padding:11px;border:1px solid #46534e;border-radius:7px;background:#101815}.permission input{width:18px;height:18px;flex:0 0 auto;margin:1px 0 0}.permission span{line-height:1.4}.permission small{display:block;margin-top:3px}
-.split-layout{display:grid;grid-template-columns:minmax(250px,.72fr) minmax(0,1.55fr);gap:16px}.file-editor{min-height:58vh;font:13px ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.55}.terminal-layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px}.terminal{margin:0;background:#02060b;color:#c8ffe8;border:1px solid #274158;border-radius:12px;padding:14px;min-height:55vh;max-height:68vh;overflow:auto;white-space:pre-wrap;font:13px ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.48;outline:none}.terminal:focus{border-color:var(--accent);box-shadow:0 0 0 3px #65f2cc16}.terminal-card{padding:16px}.terminal-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.terminal-state{margin-right:auto;color:var(--muted);font-size:12px}.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.metric{background:#081522;border:1px solid var(--line);border-radius:12px;padding:13px}.metric b{display:block;color:var(--accent);font-size:20px}.metric span{color:var(--muted);font-size:11px}.settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.split-layout{display:grid;grid-template-columns:minmax(250px,.72fr) minmax(0,1.55fr);gap:16px}.file-editor{min-height:58vh;font:13px ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.55}.terminal-layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px}.terminal{margin:0;background:#02060b;color:#c8ffe8;border:1px solid #274158;border-radius:12px;padding:14px;min-height:55vh;max-height:68vh;overflow:auto;white-space:pre-wrap;font:13px ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.48;outline:none}.terminal:focus{border-color:var(--accent);box-shadow:0 0 0 3px #65f2cc16}.terminal-card{padding:16px}.terminal-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.terminal-state{margin-right:auto;color:var(--muted);font-size:12px}.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.metric{background:#081522;border:1px solid var(--line);border-radius:12px;padding:13px}.metric b{display:block;color:var(--accent);font-size:20px}.metric span{color:var(--muted);font-size:11px}.settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.settings-card h2{margin:0}.settings-card>p{margin:5px 0 10px;color:var(--muted);line-height:1.45}.checkline{display:flex;align-items:flex-start;gap:9px;margin-top:10px;color:#c8d5d0}.checkline input{width:18px;height:18px;flex:0 0 auto;margin:1px 0}.key-state{display:block;margin-top:5px;color:var(--mint);font:10px ui-monospace,Consolas,monospace}.settings-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}.settings-actions>*{flex:1 1 150px}.python-state{margin:12px 0;padding:11px;border:1px solid var(--line2);background:#0d1412;color:var(--muted);white-space:pre-wrap}.browser-pref{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #25302b}.browser-pref:last-child{border-bottom:0}.browser-pref input{width:18px;height:18px}
 .statusbar{position:fixed;right:22px;bottom:22px;z-index:80;max-width:min(430px,calc(100vw - 28px));padding:10px 13px;border:1px solid #765d28;border-radius:7px;background:#271f0ef2;color:var(--warn);box-shadow:var(--shadow)}.statusbar:empty{display:none}.mobile-nav{display:none}.dialog{width:min(430px,calc(100vw - 28px));padding:0;border:1px solid var(--line2);border-radius:9px;background:#11141d;color:var(--text);box-shadow:0 25px 80px #000b}.dialog::backdrop{background:#01050acc;backdrop-filter:blur(4px)}.dialog-body{padding:20px}.dialog h2{margin:0 0 7px}.dialog p{color:var(--muted);white-space:pre-wrap}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:16px}#saveSettings{margin:13px 0 9px}#saveSettings+small{display:block;line-height:1.45}.chat-details{position:fixed;z-index:70;top:78px;right:22px;bottom:22px;width:min(360px,calc(100vw - 44px));overflow:auto;opacity:0;pointer-events:none;transform:translateX(22px);transition:opacity .16s ease,transform .2s ease;box-shadow:0 28px 90px #0008}.chat-details.open{opacity:1;pointer-events:auto;transform:none}.details-head{display:flex;justify-content:space-between;gap:10px;padding:13px;border-bottom:1px solid var(--line)}.details-head h2{margin:0;font-size:14px}.details-head p{margin:3px 0 0;color:var(--muted);font-size:11px}.details-section{padding:13px;border-bottom:1px solid var(--line)}.details-section h3{color:var(--muted);font:700 10px ui-monospace,Consolas,monospace;letter-spacing:.12em}.action-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}#chats option,#workspaceFiles option{padding:8px 7px;background:#0d1412;color:var(--text)}#chats option:checked,#workspaceFiles option:checked{background:linear-gradient(90deg,#6c82ff42,#61e6b518)}[data-view="files"] .split-layout{min-height:500px}[data-view="files"] .card{min-height:0;overflow:auto}[data-view="files"] .card:last-child{display:flex;flex-direction:column}[data-view="files"] .file-editor{flex:1;min-height:58vh;resize:vertical}[data-view="files"] #workspaceFiles{height:220px;min-height:145px}.chat-layout{height:calc(100vh - 119px)}
+body.surface-solid .card,body.surface-solid .sidebar,body.surface-solid .topbar{backdrop-filter:none;background:#11141d}body.surface-contrast{--bg:#000;--surface:#070707;--raised:#101010;--line:#5c5c5c;--line2:#858585;--text:#fff;--muted:#c8c8c8;--accent:#ff835f;--mint:#75ffd0}body.compact .card-pad{padding:11px}body.compact .field-label{margin-top:8px}body.compact button{min-height:34px;padding:6px 10px}body.reduce-motion *,body.reduce-motion *::before,body.reduce-motion *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
 @media(max-width:960px){.app{grid-template-columns:86px minmax(0,1fr)}.brand{justify-content:center;padding-inline:0}.brand-copy,.nav-label,.side-status{display:none}.tab{justify-content:center;padding:10px}.chat-layout{grid-template-columns:230px minmax(0,1fr)}.terminal-layout{grid-template-columns:270px minmax(0,1fr)}}
-@media(max-width:720px){body{padding-bottom:96px}.app{display:block}.sidebar{display:none}.topbar{min-height:62px;height:auto;padding:10px 12px;display:grid;grid-template-columns:1fr 1fr;gap:8px}.topbar>div:first-child{grid-column:1/-1}.topbar>.spacer{display:none}.topbar>button{width:100%}.shell{padding:13px 10px 104px}.page-subtitle{display:none}.mobile-nav{position:fixed;display:grid;grid-template-columns:repeat(4,1fr);left:8px;right:8px;bottom:8px;z-index:40;padding:6px;border:1px solid var(--line2);border-radius:15px;background:#091521f5;box-shadow:var(--shadow);backdrop-filter:blur(16px)}.mobile-nav .tab{display:grid;gap:2px;min-height:48px;padding:6px 3px;font-size:10px;justify-items:center}.mobile-nav .tab.active{box-shadow:none;background:#17323b}.mobile-nav .nav-glyph{width:24px;height:24px}.chat-layout,.split-layout,.terminal-layout,.settings-grid,.qr-layout{grid-template-columns:1fr}.chat-main{min-height:calc(100vh - 154px)}#messages{max-height:none;min-height:44vh;padding:13px}.message{max-width:92%}.chat-rail{order:2}.terminal-card{order:-1}[data-view="files"] .split-layout{height:auto;min-height:0}[data-view="files"] .card{overflow:visible}[data-view="files"] #workspaceFiles{height:180px;min-height:145px}[data-view="files"] .file-editor{min-height:44vh}.terminal{min-height:50vh}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.section-head{flex-wrap:wrap}.section-actions{width:100%;margin-left:0}.section-actions button{flex:1 1 120px}.composer-bar{flex-wrap:wrap}.composer-bar button{flex:1 1 90px}.statusbar{right:14px;bottom:88px}.shortcut{display:none}}
+@media(max-width:720px){body{padding-bottom:96px}.app{display:block}.sidebar{display:none}.topbar{min-height:62px;height:auto;padding:10px 12px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.topbar>div:first-child{grid-column:1/-1}.topbar>.spacer{display:none}.topbar>button{width:100%;padding-inline:5px;font-size:11px}.shell{padding:13px 10px 104px}.page-subtitle{display:none}.mobile-nav{position:fixed;display:grid;grid-template-columns:repeat(4,1fr);left:8px;right:8px;bottom:8px;z-index:40;padding:6px;border:1px solid var(--line2);border-radius:15px;background:#091521f5;box-shadow:var(--shadow);backdrop-filter:blur(16px)}.mobile-nav .tab{display:grid;gap:2px;min-height:48px;padding:6px 3px;font-size:10px;justify-items:center}.mobile-nav .tab.active{box-shadow:none;background:#17323b}.mobile-nav .nav-glyph{width:24px;height:24px}.chat-layout,.split-layout,.terminal-layout,.settings-grid,.qr-layout{grid-template-columns:1fr}.chat-main{min-height:calc(100vh - 154px)}#messages{max-height:none;min-height:44vh;padding:13px}.message{max-width:92%}.chat-rail{order:2}.terminal-card{order:-1}[data-view="files"] .split-layout{height:auto;min-height:0}[data-view="files"] .card{overflow:visible}[data-view="files"] #workspaceFiles{height:180px;min-height:145px}[data-view="files"] .file-editor{min-height:44vh}.terminal{min-height:50vh}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.section-head{flex-wrap:wrap}.section-actions{width:100%;margin-left:0}.section-actions button{flex:1 1 120px}.composer-bar{flex-wrap:wrap}.composer-bar button{flex:1 1 90px}.statusbar{right:14px;bottom:88px}.shortcut{display:none}}
 </style></head><body>
 <div class="app"><aside class="sidebar"><div class="brand"><div class="brand-mark">CM</div><div class="brand-copy"><strong>CARDMIND</strong><small>Field console</small></div></div><div class="nav-caption">WORKBENCH</div><nav class="nav" aria-label="Console sections"><button class="tab active" data-panel="chat"><span class="nav-glyph">01</span><span class="nav-label">Chat log</span></button><button class="tab" data-panel="files"><span class="nav-glyph">02</span><span class="nav-label">Workspace</span></button><button class="tab" data-panel="ssh"><span class="nav-glyph">03</span><span class="nav-label">Terminal</span></button></nav><div class="side-bottom"><button class="tab" data-panel="settings"><span class="nav-glyph">04</span><span class="nav-label">Settings</span></button><div class="side-status"><span class="online"><span class="online-dot"></span>Cardputer online</span><span class="device-pill" id="device"></span></div></div></aside>
-<section class="workspace"><header class="topbar"><div><div class="page-kicker">WORKBENCH / <span id="pageKicker">CHAT</span></div><div class="page-title" id="pageTitle">Chat log</div><div class="page-subtitle" id="pageSubtitle">Continue a conversation on your Cardputer</div></div><span class="spacer"></span><button class="ghost" id="refresh">Refresh</button><button class="secondary" id="logout">Lock</button></header><div class="shell"><main>
+<section class="workspace"><header class="topbar"><div><div class="page-kicker">WORKBENCH / <span id="pageKicker">CHAT</span></div><div class="page-title" id="pageTitle">Chat log</div><div class="page-subtitle" id="pageSubtitle">Continue a conversation on your Cardputer</div></div><span class="spacer"></span><button class="ghost" id="refresh">Refresh</button><button class="secondary" id="endConsole">End session</button><button class="secondary" id="logout">Lock</button></header><div class="shell"><main>
 <section class="panel active" data-view="chat"><div class="chat-layout"><aside class="card chat-rail"><div class="section-head"><div><h2>Chat log</h2><p>microSD journal</p></div><button class="icon-button" id="newChat" title="New chat">＋</button></div><select id="chats" size="12" aria-label="Chat"></select></aside>
-<section class="card chat-main"><div class="section-head"><div><h2 id="activeChatTitle">Conversation</h2><p><span id="activeModel">Model</span> · streaming enabled</p></div><div class="section-actions"><button class="ghost" id="retry">Retry last</button><button class="ghost" id="openChatDetails" aria-controls="chatDetails" aria-expanded="false">Details</button></div></div><div id="messages" aria-live="polite"></div><div class="composer"><div class="intent-row"><span>INTENT</span><button type="button" class="intent" data-intent="/search ">Research</button><button type="button" class="intent" data-intent="/file ">Work with file</button></div><textarea id="prompt" maxlength="1200" placeholder="Ask CardMind... /search and /file are available"></textarea><div class="composer-bar"><span class="shortcut">Ctrl/⌘ + Enter to send</span><button class="danger" id="stop">Stop</button><button id="send">Send ↗</button></div></div></section></div></section>
+<section class="card chat-main"><div class="section-head"><div><h2 id="activeChatTitle">Conversation</h2><p><span id="activeModel">Model</span> · <span id="contextMeter">context</span></p></div><div class="section-actions"><button class="ghost" id="loadOlder">Load archived</button><button class="ghost" id="retry">Retry last</button><button class="ghost" id="openChatDetails" aria-controls="chatDetails" aria-expanded="false">Details</button></div></div><div id="messages" aria-live="polite"></div><div class="composer"><div class="intent-row"><span>INTENT</span><button type="button" class="intent" data-intent="/search ">Research</button><button type="button" class="intent" data-intent="/file ">Work with file</button></div><textarea id="prompt" maxlength="1200" placeholder="Ask CardMind... /search and /file are available"></textarea><div class="composer-bar"><span class="shortcut">Ctrl/⌘ + Enter to send</span><button class="danger" id="stop">Stop</button><button id="send">Send ↗</button></div></div></section></div></section>
 <section class="panel" data-view="files"><div class="section-head"><div><h2>microSD workspace</h2><p>Open, edit and save complete documents up to 480 KiB</p></div></div><div class="split-layout"><section class="card card-pad"><label class="field-label" for="workspaceFiles">Workspace files</label><select id="workspaceFiles" size="12"></select><div class="stack"><div class="row"><button id="openFile">Open</button><button class="secondary" id="downloadFile">Download</button></div><input id="uploadInput" type="file" accept=".txt,.md,.json,.jsonl,.csv,.html,.svg,.py"><button id="uploadFile">Upload new file</button><button class="ghost" id="importChat">Import selected chat bundle</button><div class="row"><button class="ghost" id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></div></section><section class="card card-pad"><div class="section-head"><div><h2 id="fileEditorTitle">File editor</h2><p id="filePosition">Select a file to begin</p></div><div class="section-actions"><button id="saveFile">Save file</button></div></div><textarea class="file-editor" id="fileContent" placeholder="File content appears here" spellcheck="false"></textarea></section></div><section class="card card-pad qr-card"><div class="qr-layout"><div><div class="section-head"><div><h2>QR display</h2><p>Show text or a small file directly on the Cardputer screen</p></div></div><textarea id="qrContent" maxlength="320" placeholder="URL, Wi-Fi details, token, or other text"></textarea><small id="qrCount">0 / 320 bytes</small></div><div class="stack"><p class="muted">QR payloads are limited to 320 UTF-8 bytes so the code remains scannable on the 240×135 display.</p><div class="qr-actions"><button id="showQr">Show on Cardputer</button><button class="secondary" id="qrFromFile">Use selected file</button><button class="ghost" id="closeQr">Restore console screen</button></div></div></div></section></section>
 <section class="panel" data-view="ssh"><div class="section-head"><div><h2>Remote terminal</h2><p>Interactive SSH and microSD-backed SFTP transfers</p></div></div><div class="terminal-layout"><aside class="stack"><section class="card card-pad"><div class="section-head"><div><h2>Connection</h2><p>Saved profiles stay on-device</p></div><button class="icon-button" id="newSsh" title="New profile">＋</button></div><select id="sshProfiles"></select><label class="field-label" for="sshName">Profile name</label><input id="sshName" maxlength="32" placeholder="Server"><div class="row"><input id="sshHost" maxlength="253" placeholder="Host"><input id="sshPort" type="number" min="1" max="65535" placeholder="Port"></div><input id="sshUser" maxlength="64" placeholder="Username"><select id="sshAuth"><option value="password">Password</option><option value="key">Private key</option></select><input id="sshPassword" type="password" maxlength="192" placeholder="New password (blank keeps current)"><input id="sshPassphrase" type="password" maxlength="192" placeholder="New key passphrase (blank keeps current)"><div class="row"><button id="saveSsh">Save profile</button><button class="danger" id="deleteSsh">Delete</button></div><input id="sshKeyInput" type="file" accept=".pem,.key"><button class="ghost" id="uploadSshKey">Install private key</button><small>Secrets are write-only. New host fingerprints require confirmation.</small></section><section class="card card-pad"><h2>SFTP</h2><div class="row"><input id="sftpPath" value="/" maxlength="511"><button id="listSftp">List</button></div><select id="sftpEntries" size="7"></select><div class="row"><button class="ghost" id="sftpOpen">Open directory</button><button id="sftpDownload">Download to SD</button></div><label class="field-label" for="sftpLocal">Workspace file to upload</label><div class="row"><select id="sftpLocal"></select><button id="sftpUpload">Upload</button></div></section></aside><section class="card terminal-card"><div class="terminal-toolbar"><span class="terminal-state" id="terminalState">Disconnected</span><button id="connectSsh">Connect</button><button id="disconnectSsh" class="danger">Disconnect</button><button class="ghost" id="clearSsh">Clear</button><button class="ghost" id="fullSsh">Fullscreen</button></div><pre id="sshTerminal" class="terminal" tabindex="0">Choose a profile and connect. Click here to type directly.</pre><div class="row"><input id="sshInput" maxlength="512" placeholder="Command for touch keyboards"><button id="sendSshInput">Send</button></div></section></div></section>
-<section class="panel" data-view="settings"><div class="section-head"><div><h2>Device settings</h2><p>Non-secret connection settings and live diagnostics</p></div></div><div class="settings-grid"><section class="card card-pad"><h2>LLM connection</h2><label class="field-label" for="apiBaseUrl">OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180"><label class="field-label" for="model">Model</label><input id="model" maxlength="120"><button id="saveSettings">Save settings</button><small>API keys remain write-only and are never sent to this page.</small></section><section class="card card-pad"><h2>Live device status</h2><div id="diagnostics" class="metrics"></div></section></div></section>
-</main></div></section></div><aside class="chat-details card" id="chatDetails" aria-hidden="true"><div class="details-head"><div><h2>Thread details</h2><p>Context, permissions and actions</p></div><button class="ghost" id="closeChatDetails" aria-label="Close thread details">×</button></div><section class="details-section"><label class="field-label" for="instructions">Instructions</label><textarea id="instructions" maxlength="2048" placeholder="For example: answer briefly and in Russian"></textarea><button class="full" id="saveInstructions">Save instructions</button></section><section class="details-section"><h3>Model permissions</h3><label class="permission" for="sshToolsEnabled"><input id="sshToolsEnabled" type="checkbox"><span>Allow SSH commands<small>The model may execute commands through the selected, already-trusted SSH profile. Disabled by default for every chat.</small></span></label><button class="secondary full" id="savePermissions">Save permissions</button></section><section class="details-section"><h3>Chat actions</h3><div class="action-grid"><button class="secondary" id="renameChat">Rename</button><button class="ghost" id="pinChat">Pin</button><button class="ghost" id="archiveChat">Archive</button><button class="ghost" id="duplicateChat">Duplicate</button><button class="ghost" id="exportChat">Export .md</button><button class="ghost" id="exportBundle">Bundle</button></div><button class="danger full" id="deleteChat">Delete chat</button></section></aside><nav class="mobile-nav" aria-label="Mobile console sections"><button class="tab active" data-panel="chat"><span class="nav-glyph">01</span>Chat log</button><button class="tab" data-panel="files"><span class="nav-glyph">02</span>Workspace</button><button class="tab" data-panel="ssh"><span class="nav-glyph">03</span>Terminal</button><button class="tab" data-panel="settings"><span class="nav-glyph">04</span>Settings</button></nav><p id="status" class="statusbar" role="status"></p>
+<section class="panel" data-view="settings"><div class="section-head"><div><h2>Device & console</h2><p>Connections, optional services, device preferences and diagnostics</p></div><div class="section-actions"><button id="saveSettings">Save all settings</button></div></div><div class="settings-grid">
+<section class="card card-pad settings-card"><h2>Wi-Fi & LLM</h2><p>Secrets are write-only. Leave a secret blank to keep its saved value.</p><label class="field-label" for="wifiSsid">2.4 GHz Wi-Fi SSID</label><input id="wifiSsid" maxlength="32" autocomplete="off"><label class="field-label" for="wifiPassword">New Wi-Fi password</label><input id="wifiPassword" type="password" maxlength="63" autocomplete="new-password" placeholder="Blank keeps current password"><label class="field-label" for="apiBaseUrl">OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180"><label class="field-label" for="apiKey">New API key</label><input id="apiKey" type="password" maxlength="192" autocomplete="new-password" placeholder="Blank keeps current key"><small class="key-state" id="apiKeyState"></small><label class="field-label" for="model">Model</label><input id="model" maxlength="120" list="modelOptions"><datalist id="modelOptions"></datalist><div class="settings-actions"><button class="secondary" id="refreshModels">Refresh models / test</button></div></section>
+<section class="card card-pad settings-card"><h2>Voice & web search</h2><p>Optional services may use independent compatible providers.</p><details open><summary>Speech to text</summary><input id="sttBaseUrl" maxlength="180" placeholder="STT base URL"><input id="sttModel" maxlength="80" placeholder="STT model"><input id="sttApiKey" type="password" maxlength="192" autocomplete="new-password" data-1p-ignore data-lpignore="true" placeholder="New STT key"><small class="key-state" id="sttKeyState"></small><label class="checkline"><input id="clearSttKey" type="checkbox">Remove saved STT key</label></details><details><summary>Web search</summary><input id="searchBaseUrl" maxlength="180" placeholder="Search base URL"><input id="searchApiKey" type="password" maxlength="192" autocomplete="new-password" data-1p-ignore data-lpignore="true" placeholder="New search key"><small class="key-state" id="searchKeyState"></small><label class="checkline"><input id="clearSearchKey" type="checkbox">Remove saved search key</label></details><details><summary>Text to speech</summary><input id="ttsBaseUrl" maxlength="180" placeholder="TTS base URL"><div class="row"><input id="ttsModel" maxlength="80" placeholder="TTS model"><input id="ttsVoice" maxlength="80" placeholder="Voice"></div><input id="ttsApiKey" type="password" maxlength="192" autocomplete="new-password" data-1p-ignore data-lpignore="true" placeholder="New TTS key"><small class="key-state" id="ttsKeyState"></small><label class="checkline"><input id="clearTtsKey" type="checkbox">Remove saved TTS key</label><label class="checkline"><input id="ttsAutoPlay" type="checkbox">Speak new replies automatically</label><label class="field-label" for="ttsVolume">Speaker volume</label><input id="ttsVolume" type="range" min="0" max="255" step="1"></details></section>
+<section class="card card-pad settings-card"><h2>Device preferences</h2><p>Display and performance changes are applied after the console closes.</p><label class="field-label" for="displayBrightness">Display brightness</label><input id="displayBrightness" type="range" min="32" max="255" step="1"><label class="field-label" for="screenSleep">Screen sleep</label><select id="screenSleep"><option value="0">Off</option><option value="1">1 minute</option><option value="5">5 minutes</option><option value="10">10 minutes</option><option value="30">30 minutes</option></select><label class="field-label" for="keyboardRepeat">Keyboard repeat</label><select id="keyboardRepeat"><option value="0">Off</option><option value="200">Slow · 200 ms</option><option value="125">Normal · 125 ms</option><option value="75">Fast · 75 ms</option></select><label class="field-label" for="powerProfile">Power profile</label><select id="powerProfile"><option value="0">Performance</option><option value="1">Balanced</option><option value="2">Saver</option></select></section>
+<section class="card card-pad settings-card"><h2>Python workspace</h2><p>Restart into isolated MicroPython and use the same browser address, password and microSD files.</p><div class="python-state" id="pythonState">Checking installation…</div><button id="startPython">Start Python workspace</button><small>A restart ends this Web Console session. Return to CardMind from the Python page.</small></section>
+<section class="card card-pad settings-card"><h2>Browser interface</h2><p>These preferences stay in this browser and never use device NVS.</p><label class="field-label" for="surfaceStyle">Surface style</label><select id="surfaceStyle"><option value="soft">Soft depth</option><option value="solid">Solid</option><option value="contrast">High contrast</option></select><label class="browser-pref"><span>Compact density</span><input id="compactDensity" type="checkbox"></label><label class="browser-pref"><span>Reduce motion</span><input id="reduceMotion" type="checkbox"></label><label class="browser-pref"><span>Keep SSH terminal awake</span><input id="keepAwake" type="checkbox"></label></section>
+<section class="card card-pad settings-card"><div class="section-head"><div><h2>Live diagnostics</h2><p>Secret-free health snapshot</p></div><button class="ghost" id="exportDiagnostics">Export</button></div><div id="diagnostics" class="metrics"></div></section>
+</div></section>
+</main></div></section></div><aside class="chat-details card" id="chatDetails" aria-hidden="true"><div class="details-head"><div><h2>Thread details</h2><p>Context, permissions and actions</p></div><button class="ghost" id="closeChatDetails" aria-label="Close thread details">×</button></div><section class="details-section"><label class="field-label" for="instructions">Instructions</label><textarea id="instructions" maxlength="2048" placeholder="For example: answer briefly and in Russian"></textarea><button class="full" id="saveInstructions">Save instructions</button></section><section class="details-section"><h3>Model permissions</h3><label class="permission" for="sshToolsEnabled"><input id="sshToolsEnabled" type="checkbox"><span>Allow SSH commands<small>The model may execute commands through the selected, already-trusted SSH profile. Disabled by default for every chat.</small></span></label><button class="secondary full" id="savePermissions">Save permissions</button></section><section class="details-section"><h3>Chat actions</h3><div class="action-grid"><button class="secondary" id="renameChat">Rename</button><button class="ghost" id="pinChat">Pin</button><button class="ghost" id="archiveChat">Archive</button><button class="ghost" id="duplicateChat">Duplicate</button><button class="ghost" id="exportChat">Export .md</button><button class="ghost" id="exportBundle">Bundle</button></div><button class="danger full" id="clearChat">Clear messages</button><button class="danger full" id="deleteChat">Delete chat</button></section></aside><nav class="mobile-nav" aria-label="Mobile console sections"><button class="tab active" data-panel="chat"><span class="nav-glyph">01</span>Chat log</button><button class="tab" data-panel="files"><span class="nav-glyph">02</span>Workspace</button><button class="tab" data-panel="ssh"><span class="nav-glyph">03</span>Terminal</button><button class="tab" data-panel="settings"><span class="nav-glyph">04</span>Settings</button></nav><p id="status" class="statusbar" role="status"></p>
 <dialog class="dialog" id="actionDialog"><form method="dialog" class="dialog-body"><h2 id="dialogTitle">Confirm action</h2><p id="dialogMessage"></p><input id="dialogInput"><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="dialogConfirm" value="confirm">Confirm</button></div></form></dialog>
 <script>)HTML";
     static const char pageEnd[] PROGMEM = R"HTML(
-const q=s=>document.querySelector(s);history.scrollRestoration='manual';let state=null,fileName='',fileBytes=0,activeRequest=null,lastPrompt='',sshConnected=false,sshPoll=null,sftpState=[],sshCreating=false;
+const q=s=>document.querySelector(s);history.scrollRestoration='manual';let state=null,fileName='',fileBytes=0,activeRequest=null,lastPrompt='',sshConnected=false,sshPoll=null,sftpState=[],sshCreating=false,wakeLock=null,archiveOffset=0;
 const panelCopy={chat:['Chat log','Continue a conversation on your Cardputer'],files:['Workspace','Open and edit complete microSD documents'],ssh:['Terminal','SSH and SFTP on remote machines'],settings:['Settings','Connection details and device health']};
 function closeChatDetails(){q('#chatDetails').classList.remove('open');q('#chatDetails').setAttribute('aria-hidden','true');q('#openChatDetails').setAttribute('aria-expanded','false')}
 function showPanel(name){const target=panelCopy[name]?name:'chat';closeChatDetails();for(const p of document.querySelectorAll('.panel'))p.classList.toggle('active',p.dataset.view===target);for(const b of document.querySelectorAll('.tab'))b.classList.toggle('active',b.dataset.panel===target);q('#pageTitle').textContent=panelCopy[target][0];q('#pageSubtitle').textContent=panelCopy[target][1];q('#pageKicker').textContent=target.toUpperCase();history.replaceState(null,'','#'+target);window.scrollTo(0,0)}
@@ -311,15 +332,16 @@ q('#prompt').addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey
 function askDialog(title,message,value,confirmLabel,danger,inputVisible){const dialog=q('#actionDialog');q('#dialogTitle').textContent=title;q('#dialogMessage').textContent=message;q('#dialogInput').value=value||'';q('#dialogInput').hidden=!inputVisible;q('#dialogConfirm').textContent=confirmLabel;q('#dialogConfirm').className=danger?'danger':'';dialog.showModal();if(inputVisible)q('#dialogInput').focus();return new Promise(resolve=>dialog.addEventListener('close',()=>resolve(dialog.returnValue==='confirm'?(inputVisible?q('#dialogInput').value:true):null),{once:true}))}
 const askText=(title,value)=>askDialog(title,'Enter a new value.',value,'Save',false,true);const askConfirm=(title,message,label)=>askDialog(title,message,'',label,true,false);
 q('#dialogInput').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();q('#actionDialog').close('confirm')}};
+const secretFields=['wifiPassword','apiKey','sttApiKey','searchApiKey','ttsApiKey'];const changedSecrets=new Set();for(const id of secretFields)q('#'+id).addEventListener('input',event=>{if(event.isTrusted)changedSecrets.add(id)});
 async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}if(!r.ok){let message=`HTTP ${r.status}`;try{message=(await r.json()).error||message}catch{}throw new Error(message)}return r}
 function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;if(s.status)showStatus(s.status);
 q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=`${c.pinned?'📌 ':c.archived?'📦 ':''}${c.title} · ${c.total_messages}`;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
-q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}
-q('#activeChatTitle').textContent=s.active_chat_title||'Conversation';q('#activeModel').textContent=s.model||'Model';q('#instructions').value=s.instructions||'';q('#sshToolsEnabled').checked=s.ssh_tools_enabled===true;q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
+archiveOffset=0;q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}q('#loadOlder').hidden=!s.archived_messages;q('#loadOlder').disabled=!s.archived_messages;q('#loadOlder').textContent=s.archived_messages?`Load archived · ${s.archived_messages}`:'No archive';
+q('#activeChatTitle').textContent=s.active_chat_title||'Conversation';q('#activeModel').textContent=s.model||'Model';const contextPercent=Math.min(100,Math.round(100*(s.active_context_bytes||0)/(s.maximum_context_bytes||1)));q('#contextMeter').textContent=`${s.active_context_messages}/${s.maximum_context_messages} messages · ${contextPercent}% bytes`;q('#instructions').value=s.instructions||'';q('#sshToolsEnabled').checked=s.ssh_tools_enabled===true;q('#wifiSsid').value=s.wifi_ssid||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';q('#sttBaseUrl').value=s.stt_base_url||'';q('#sttModel').value=s.stt_model||'';q('#searchBaseUrl').value=s.search_base_url||'';q('#ttsBaseUrl').value=s.tts_base_url||'';q('#ttsModel').value=s.tts_model||'';q('#ttsVoice').value=s.tts_voice||'';q('#ttsAutoPlay').checked=!!s.tts_auto_play;q('#ttsVolume').value=s.tts_volume;q('#displayBrightness').value=s.display_brightness;q('#screenSleep').value=String(s.screen_sleep_minutes);q('#keyboardRepeat').value=String(s.keyboard_repeat_ms);q('#powerProfile').value=String(s.power_profile);q('#apiKeyState').textContent=s.api_key_configured?'SAVED KEY PRESENT':'KEY MISSING';q('#sttKeyState').textContent=s.stt_key_configured?'SAVED KEY PRESENT':'NOT CONFIGURED';q('#searchKeyState').textContent=s.search_key_configured?'SAVED KEY PRESENT':'NOT CONFIGURED';q('#ttsKeyState').textContent=s.tts_key_configured?'SAVED KEY PRESENT':'NOT CONFIGURED';q('#pythonState').textContent=s.python_layout_ready&&s.python_image_ready?`Ready · firmware ${s.firmware_version}`:(s.python_runtime_error||s.python_error||'MicroPython is not installed');q('#startPython').disabled=!(s.python_layout_ready&&s.python_image_ready);
 q('#sshProfiles').innerHTML='';for(const [i,p] of (s.ssh_profiles||[]).entries()){const o=document.createElement('option');o.value=i;o.textContent=`${i===s.ssh_selected?'★ ':''}${p.name} · ${p.username}@${p.host}`;o.selected=i===s.ssh_selected;q('#sshProfiles').append(o)}
 q('#sshName').value=s.ssh_name||'';q('#sshHost').value=s.ssh_host||'';q('#sshPort').value=s.ssh_port||22;q('#sshUser').value=s.ssh_username||'';q('#sshAuth').value=s.ssh_auth_mode||'password';sshConnected=!!s.ssh_terminal_open;q('#terminalState').textContent=sshConnected?'Connected':'Disconnected';
-const metrics=[['Battery',`${s.battery}%`],['Wi-Fi',`${s.wifi_rssi} dBm`],['Free heap',`${Math.round(s.free_heap/1024)} KiB`],['Largest block',`${Math.round(s.largest_heap/1024)} KiB`],['microSD used',`${Math.round(s.sd_used_bytes/1048576)} MiB`],['microSD total',`${Math.round(s.sd_total_bytes/1048576)} MiB`]];q('#diagnostics').textContent='';for(const [label,value] of metrics){const d=document.createElement('div'),b=document.createElement('b'),span=document.createElement('span');d.className='metric';b.textContent=value;span.textContent=label;d.append(b,span);q('#diagnostics').append(d)}
-const selected=q('#workspaceFiles').value;q('#workspaceFiles').innerHTML='';q('#sftpLocal').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#workspaceFiles').append(o);q('#sftpLocal').append(o.cloneNode(true))}q('#messages').scrollTop=q('#messages').scrollHeight}
+const metrics=[['Battery',`${s.battery}%`],['Wi-Fi',`${s.wifi_rssi} dBm`],['Free heap',`${Math.round(s.free_heap/1024)} KiB`],['Min heap',`${Math.round(s.minimum_heap/1024)} KiB`],['Largest block',`${Math.round(s.largest_heap/1024)} KiB`],['Stack free',`${s.stack_free}`],['CPU',`${s.cpu_mhz} MHz`],['Uptime',`${Math.floor(s.uptime_ms/60000)} min`],['Reset',`${s.reset_reason}`],['microSD used',`${Math.round(s.sd_used_bytes/1048576)} MiB`],['microSD total',`${Math.round(s.sd_total_bytes/1048576)} MiB`],['Firmware',s.firmware_version]];q('#diagnostics').textContent='';for(const [label,value] of metrics){const d=document.createElement('div'),b=document.createElement('b'),span=document.createElement('span');d.className='metric';b.textContent=value;span.textContent=label;d.append(b,span);q('#diagnostics').append(d)}
+const selected=q('#workspaceFiles').value;q('#workspaceFiles').innerHTML='';q('#sftpLocal').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#workspaceFiles').append(o);q('#sftpLocal').append(o.cloneNode(true))}q('#messages').scrollTop=q('#messages').scrollHeight;updateWakeLock()}
 async function refresh(){const r=await request('/api/state');render(await r.json())}
 async function post(path,values){return request(path,{method:'POST',body:new URLSearchParams(values)})}
 const formatBytes=value=>value<1024?`${value} B`:`${(value/1024).toFixed(value<10240?1:0)} KiB`;
@@ -329,11 +351,16 @@ q('#newChat').onclick=async()=>{await request('/api/chat/new',{method:'POST'});a
 q('#renameChat').onclick=async()=>{const title=await askText('Rename chat',state.active_chat_title);if(title){await post('/api/chat/rename',{title});await refresh()}};
 q('#pinChat').onclick=async()=>{await post('/api/chat/pin',{});await refresh()};q('#archiveChat').onclick=async()=>{await post('/api/chat/archive',{});await refresh()};
 q('#duplicateChat').onclick=async()=>{await post('/api/chat/duplicate',{});await refresh()};q('#exportChat').onclick=async()=>{await post('/api/chat/export',{});await refresh()};q('#exportBundle').onclick=async()=>{await post('/api/chat/export-bundle',{});await refresh()};
+q('#loadOlder').onclick=async()=>{const r=await request(`/api/chat/archived?offset=${archiveOffset}`),x=await r.json();const active=q('#messages').querySelector('.message:not(.archived)');for(const m of x.messages){const d=document.createElement('div');d.className='message archived '+m.role;d.textContent=(m.role==='user'?'You · archived: ':'AI · archived: ')+m.content;if(active)q('#messages').insertBefore(d,active);else q('#messages').append(d)}archiveOffset=x.next_offset;q('#loadOlder').disabled=x.eof;q('#loadOlder').textContent=x.eof?'Archive loaded':'Load more archived'};
+q('#clearChat').onclick=async()=>{if(await askConfirm('Clear messages','Remove active and archived messages while keeping this chat and its instructions?','Clear messages')){await post('/api/chat/clear',{});closeChatDetails();await refresh()}};
 q('#deleteChat').onclick=async()=>{if(await askConfirm('Delete chat',`"${state.active_chat_title}" and its history will be removed from microSD.`,'Delete')){await post('/api/chat/delete',{});await refresh()}};
 q('#saveInstructions').onclick=async()=>{await request('/api/chat/instructions',{method:'POST',body:new URLSearchParams({instructions:q('#instructions').value})});await refresh()};
 q('#savePermissions').onclick=async()=>{if(q('#sshToolsEnabled').checked&&!state.ssh_configured)throw new Error('Configure a complete SSH profile before granting model access');await post('/api/chat/permissions',{ssh_tools_enabled:q('#sshToolsEnabled').checked?'1':'0'});await refresh()};
 q('#openChatDetails').onclick=()=>{const open=!q('#chatDetails').classList.contains('open');q('#chatDetails').classList.toggle('open',open);q('#chatDetails').setAttribute('aria-hidden',open?'false':'true');q('#openChatDetails').setAttribute('aria-expanded',open?'true':'false')};q('#closeChatDetails').onclick=closeChatDetails;document.addEventListener('keydown',event=>{if(event.key==='Escape'&&q('#chatDetails').classList.contains('open'))closeChatDetails()});for(const button of document.querySelectorAll('.intent'))button.onclick=()=>{q('#prompt').value=button.dataset.intent;q('#prompt').focus()};
-q('#saveSettings').onclick=async()=>{await post('/api/settings',{api_base_url:q('#apiBaseUrl').value,model:q('#model').value});await refresh()};
+q('#saveSettings').onclick=async()=>{const secret=id=>changedSecrets.has(id)?q('#'+id).value:'';await post('/api/settings',{wifi_ssid:q('#wifiSsid').value,wifi_password:secret('wifiPassword'),api_base_url:q('#apiBaseUrl').value,api_key:secret('apiKey'),model:q('#model').value,stt_base_url:q('#sttBaseUrl').value,stt_model:q('#sttModel').value,stt_api_key:secret('sttApiKey'),clear_stt_key:q('#clearSttKey').checked?'1':'0',search_base_url:q('#searchBaseUrl').value,search_api_key:secret('searchApiKey'),clear_search_key:q('#clearSearchKey').checked?'1':'0',tts_base_url:q('#ttsBaseUrl').value,tts_model:q('#ttsModel').value,tts_voice:q('#ttsVoice').value,tts_api_key:secret('ttsApiKey'),clear_tts_key:q('#clearTtsKey').checked?'1':'0',tts_auto_play:q('#ttsAutoPlay').checked?'1':'0',tts_volume:q('#ttsVolume').value,display_brightness:q('#displayBrightness').value,screen_sleep_minutes:q('#screenSleep').value,keyboard_repeat_ms:q('#keyboardRepeat').value,power_profile:q('#powerProfile').value});for(const id of secretFields){q('#'+id).value='';changedSecrets.delete(id)}for(const id of ['clearSttKey','clearSearchKey','clearTtsKey'])q('#'+id).checked=false;await refresh()};
+q('#refreshModels').onclick=async()=>{showStatus('Checking model endpoint…');const r=await request('/api/models'),x=await r.json();q('#modelOptions').textContent='';for(const name of x.models){const o=document.createElement('option');o.value=name;q('#modelOptions').append(o)}showStatus(`Connection OK · ${x.models.length} models found`)};
+q('#startPython').onclick=async()=>{if(!await askConfirm('Start Python workspace','CardMind will restart and reopen the Python workspace automatically.','Restart into Python'))return;const r=await post('/api/python/start',{}),x=await r.json(),handoff=x.address+'handoff?token='+encodeURIComponent(x.handoff_token);document.body.innerHTML='<main style="padding:3rem;color:#eef1ff;background:#0a0c12;min-height:100vh"><h1>Restarting into Python workspace…</h1><p id="pythonHandoff">Waiting for '+x.address+'</p></main>';let attempts=0;const enter=async()=>{attempts++;try{const next=await fetch(handoff,{cache:'no-store'});if(next.ok){location=x.address;return}}catch(error){q('#pythonHandoff').textContent='Waiting for '+x.address+' · '+error.message}if(attempts>=30){q('#pythonHandoff').textContent='Python workspace did not answer at '+x.address+'. Restart CardMind and try again.';return}setTimeout(enter,1000)};setTimeout(enter,1500)};
+q('#exportDiagnostics').onclick=()=>{location='/api/diagnostics'};
 q('#saveSsh').onclick=async()=>{const password=q('#sshPassword').value,passphrase=q('#sshPassphrase').value;await post('/api/ssh/settings',{name:q('#sshName').value,host:q('#sshHost').value,port:q('#sshPort').value,username:q('#sshUser').value,auth_mode:q('#sshAuth').value,password,replace_password:password?'1':'0',key_passphrase:passphrase,replace_key_passphrase:passphrase?'1':'0',create:sshCreating?'1':'0'});sshCreating=false;q('#sshPassword').value='';q('#sshPassphrase').value='';await refresh()};
 q('#sshProfiles').onchange=async()=>{sshCreating=false;await post('/api/ssh/select',{index:q('#sshProfiles').value});await refresh()};
 q('#newSsh').onclick=()=>{sshCreating=true;q('#sshName').value='Server';q('#sshHost').value='';q('#sshPort').value=22;q('#sshUser').value='';q('#sshPassword').value='';q('#sshPassphrase').value=''};
@@ -368,6 +395,8 @@ try{const r=await request('/api/prompt',{method:'POST',body:new URLSearchParams(
 while(true){const x=await reader.read();if(x.done)break;buffer+=decoder.decode(x.value,{stream:true});const events=buffer.split('\n\n');buffer=events.pop();for(const e of events){if(!e.startsWith('data:'))continue;const v=JSON.parse(e.slice(5));if(v.delta)d.textContent+=v.delta;if(v.error)q('#status').textContent=v.error}}
 q('#prompt').value=''}catch(e){if(e.name==='AbortError')q('#status').textContent='Canceled';else throw e}finally{activeRequest=null;q('#send').disabled=false;await refresh()}}
 q('#send').onclick=sendPrompt;q('#stop').onclick=()=>{if(activeRequest)activeRequest.abort()};q('#retry').onclick=()=>{if(lastPrompt){q('#prompt').value=lastPrompt;sendPrompt()}};
+const prefIds=['surfaceStyle','compactDensity','reduceMotion','keepAwake'];function applyPreferences(){const style=q('#surfaceStyle').value;document.body.classList.toggle('surface-solid',style==='solid');document.body.classList.toggle('surface-contrast',style==='contrast');document.body.classList.toggle('compact',q('#compactDensity').checked);document.body.classList.toggle('reduce-motion',q('#reduceMotion').checked);for(const id of prefIds)localStorage.setItem('cardmind_'+id,q('#'+id).type==='checkbox'?(q('#'+id).checked?'1':'0'):q('#'+id).value);updateWakeLock()}async function updateWakeLock(){const wanted=q('#keepAwake').checked&&sshConnected&&document.visibilityState==='visible';if(wanted&&!wakeLock&&navigator.wakeLock){try{wakeLock=await navigator.wakeLock.request('screen');wakeLock.addEventListener('release',()=>wakeLock=null)}catch(e){showStatus(`Wake lock unavailable: ${e.message}`)}}else if(!wanted&&wakeLock){await wakeLock.release();wakeLock=null}}for(const id of prefIds){const element=q('#'+id),saved=localStorage.getItem('cardmind_'+id);if(saved!==null){if(element.type==='checkbox')element.checked=saved==='1';else element.value=saved}element.onchange=applyPreferences}document.addEventListener('visibilitychange',updateWakeLock);applyPreferences();
+q('#endConsole').onclick=async()=>{if(!await askConfirm('End Web Console','Browser and SSH sessions will close. Saved Wi-Fi and device changes will then be applied.','End session'))return;await post('/api/console/close',{});document.body.innerHTML='<main style="padding:3rem;color:#eef1ff;background:#0a0c12;min-height:100vh"><h1>Web Console closed</h1><p>You may close this browser tab. CardMind is applying saved settings.</p></main>'};
 q('#logout').onclick=async()=>{await request('/logout',{method:'POST'});location='/'};refresh();
 </script></body></html>)HTML";
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -436,6 +465,19 @@ void handleLogout()
     sendJson(200, document);
 }
 
+void handleCloseConsole()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["message"] = "Web Console is closing";
+    sendJson(200, document);
+    exitRequested = true;
+}
+
 void handleState()
 {
     if (!sessionIsActive()) {
@@ -455,11 +497,46 @@ void handleState()
     document["active_chat_title"] = activeChat.summary.title;
     document["active_context_messages"] = activeChat.summary.messageCount;
     document["archived_messages"] = activeChat.summary.archivedMessageCount;
+    std::size_t activeContextBytes = 0;
+    for (const auto& message : activeChat.messages) {
+        activeContextBytes += message.content.size();
+    }
+    document["active_context_bytes"] = activeContextBytes;
+    document["maximum_context_messages"] = kMaximumStoredMessages;
+    document["maximum_context_bytes"] = kMaximumStoredHistoryBytes;
     document["instructions"] = activeChat.instructions;
     document["ssh_tools_enabled"] = activeChat.sshToolsEnabled;
     document["status"] = consoleStatus;
+    document["firmware_version"] = firmwareVersion;
+    document["uptime_ms"] = millis();
+    document["minimum_heap"] = ESP.getMinFreeHeap();
+    document["stack_free"] = uxTaskGetStackHighWaterMark(nullptr);
+    document["cpu_mhz"] = getCpuFrequencyMhz();
+    document["reset_reason"] = static_cast<int>(esp_reset_reason());
+    document["wifi_ssid"] = consoleSettings.wifiSsid;
     document["model"] = consoleSettings.model;
     document["api_base_url"] = consoleSettings.apiBaseUrl;
+    document["api_key_configured"] = consoleSettings.apiKey.length() >= 8;
+    document["stt_base_url"] = consoleSettings.sttBaseUrl;
+    document["stt_model"] = consoleSettings.sttModel;
+    document["stt_key_configured"] = consoleSettings.sttApiKey.length() >= 8;
+    document["search_base_url"] = consoleSettings.webSearchBaseUrl;
+    document["search_key_configured"] = consoleSettings.webSearchApiKey.length() >= 8;
+    document["tts_base_url"] = consoleSettings.ttsBaseUrl;
+    document["tts_model"] = consoleSettings.ttsModel;
+    document["tts_voice"] = consoleSettings.ttsVoice;
+    document["tts_key_configured"] = consoleSettings.ttsApiKey.length() >= 8;
+    document["tts_auto_play"] = consoleSettings.ttsAutoPlay;
+    document["tts_volume"] = consoleSettings.ttsVolume;
+    document["display_brightness"] = consoleSettings.displayBrightness;
+    document["screen_sleep_minutes"] = consoleSettings.screenSleepMinutes;
+    document["keyboard_repeat_ms"] = consoleSettings.keyboardRepeatMs;
+    document["power_profile"] = consoleSettings.powerProfile;
+    const PythonModeStatus python = inspectPythonMode();
+    document["python_layout_ready"] = python.partitionLayoutReady;
+    document["python_image_ready"] = python.pythonImageReady;
+    document["python_error"] = python.error;
+    document["python_runtime_error"] = python.lastRuntimeError;
     std::vector<SshProfile> sshProfiles;
     std::size_t sshSelected = 0;
     const OperationResult sshProfileResult = loadSshProfiles(sshProfiles, sshSelected);
@@ -994,22 +1071,234 @@ void handleSettings()
         return;
     }
     Settings updated = consoleSettings;
-    updated.apiBaseUrl = server.arg("api_base_url");
-    updated.apiBaseUrl.trim();
-    while (updated.apiBaseUrl.endsWith("/")) {
-        updated.apiBaseUrl.remove(updated.apiBaseUrl.length() - 1);
+    const String wifiSsid = server.arg("wifi_ssid");
+    const String wifiPassword = server.arg("wifi_password");
+    if (wifiSsid.isEmpty() || wifiSsid.length() > 32 || wifiPassword.length() > 63) {
+        sendJsonError(400, "Wi-Fi SSID must contain 1-32 bytes and password at most 63 bytes");
+        return;
     }
+    if (wifiSsid != updated.wifiSsid) {
+        updated.wifiSsid = wifiSsid;
+        updated.wifiPassword = wifiPassword;
+    } else if (!wifiPassword.isEmpty()) {
+        updated.wifiPassword = wifiPassword;
+    }
+    String apiKey = server.arg("api_key");
+    apiKey.trim();
+    if (!apiKey.isEmpty()) {
+        updated.apiKey = apiKey;
+    }
+    updated.apiBaseUrl = normalizedBaseUrl(server.arg("api_base_url"));
     updated.model = server.arg("model");
+    updated.model.trim();
+    if (updated.model.length() > 120) {
+        sendJsonError(400, "Model id must not exceed 120 characters");
+        return;
+    }
+    String sttKey = server.arg("stt_api_key");
+    sttKey.trim();
+    if (server.arg("clear_stt_key") == "1") {
+        updated.sttApiKey = "";
+    } else if (!sttKey.isEmpty()) {
+        updated.sttApiKey = sttKey;
+    }
+    updated.sttBaseUrl = normalizedBaseUrl(server.arg("stt_base_url"));
+    updated.sttModel = server.arg("stt_model");
+    String searchKey = server.arg("search_api_key");
+    searchKey.trim();
+    if (server.arg("clear_search_key") == "1") {
+        updated.webSearchApiKey = "";
+    } else if (!searchKey.isEmpty()) {
+        updated.webSearchApiKey = searchKey;
+    }
+    updated.webSearchBaseUrl = normalizedBaseUrl(server.arg("search_base_url"));
+    String ttsKey = server.arg("tts_api_key");
+    ttsKey.trim();
+    if (server.arg("clear_tts_key") == "1") {
+        updated.ttsApiKey = "";
+    } else if (!ttsKey.isEmpty()) {
+        updated.ttsApiKey = ttsKey;
+    }
+    updated.ttsBaseUrl = normalizedBaseUrl(server.arg("tts_base_url"));
+    updated.ttsModel = server.arg("tts_model");
+    updated.ttsVoice = server.arg("tts_voice");
+    updated.ttsAutoPlay = server.arg("tts_auto_play") == "1";
+    std::uint32_t volume = 0;
+    std::uint32_t brightness = 0;
+    std::uint32_t sleepMinutes = 0;
+    std::uint32_t repeatMs = 0;
+    std::uint32_t powerProfile = 0;
+    if (!parseUnsignedArgument(server.arg("tts_volume"), volume) || volume > 255 ||
+        !parseUnsignedArgument(server.arg("display_brightness"), brightness) ||
+        brightness < 32 || brightness > 255 ||
+        !parseUnsignedArgument(server.arg("screen_sleep_minutes"), sleepMinutes) ||
+        sleepMinutes > UINT16_MAX ||
+        !parseUnsignedArgument(server.arg("keyboard_repeat_ms"), repeatMs) ||
+        repeatMs > UINT16_MAX ||
+        !parseUnsignedArgument(server.arg("power_profile"), powerProfile) ||
+        powerProfile > 2) {
+        sendJsonError(400, "Device preference values are outside their supported ranges");
+        return;
+    }
+    updated.ttsVolume = static_cast<std::uint8_t>(volume);
+    updated.displayBrightness = static_cast<std::uint8_t>(brightness);
+    updated.screenSleepMinutes = static_cast<std::uint16_t>(sleepMinutes);
+    updated.keyboardRepeatMs = static_cast<std::uint16_t>(repeatMs);
+    updated.powerProfile = static_cast<std::uint8_t>(powerProfile);
     const OperationResult result = saveSettings(updated);
     if (!result.success) {
         sendJsonError(400, result.error);
         return;
     }
     consoleSettings = updated;
-    consoleStatus = "Connection settings saved";
+    consoleStatus = "Settings saved; Wi-Fi changes apply after closing the console";
     JsonDocument document;
     document["ok"] = true;
     sendJson(200, document);
+}
+
+void handleClearChat()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    OperationResult result = clearChatHistory(activeChat.summary.id);
+    if (result.success) {
+        result = loadActiveChat(activeChat.summary.id);
+    }
+    if (result.success) {
+        result = refreshChats();
+    }
+    if (!result.success) {
+        sendJsonError(500, result.error);
+        return;
+    }
+    consoleStatus = "Chat messages cleared";
+    renderConsoleChat();
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleArchivedMessages()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    std::uint32_t offset = 0;
+    if (!parseUnsignedArgument(server.arg("offset"), offset)) {
+        sendJsonError(400, "Archive offset must be an unsigned integer");
+        return;
+    }
+    const ArchivedMessagesPageResult result = readArchivedChatMessages(
+        activeChat.summary.id, offset, 8, 12000);
+    if (!result.success) {
+        sendJsonError(500, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["next_offset"] = result.nextOffset;
+    document["eof"] = result.eof;
+    JsonArray messages = document["messages"].to<JsonArray>();
+    for (const auto& message : result.messages) {
+        JsonObject item = messages.add<JsonObject>();
+        item["role"] = message.role;
+        item["content"] = message.content;
+    }
+    sendJson(200, document);
+}
+
+void handleModels()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const ModelsResult result = fetchModels(consoleSettings);
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    JsonArray models = document["models"].to<JsonArray>();
+    for (const auto& model : result.models) {
+        models.add(model);
+    }
+    sendJson(200, document);
+}
+
+void handleDiagnosticsDownload()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    String report;
+    report.reserve(640);
+    report += "CardMind diagnostics\n";
+    report += "firmware=" + firmwareVersion + "\n";
+    report += "uptime_ms=" + String(millis()) + "\n";
+    report += "reset_reason=" + String(static_cast<int>(esp_reset_reason())) + "\n";
+    report += "cpu_mhz=" + String(getCpuFrequencyMhz()) + "\n";
+    report += "free_heap=" + String(ESP.getFreeHeap()) + "\n";
+    report += "minimum_heap=" + String(ESP.getMinFreeHeap()) + "\n";
+    report += "largest_heap=" + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) + "\n";
+    report += "stack_free=" + String(uxTaskGetStackHighWaterMark(nullptr)) + "\n";
+    report += "wifi_rssi=" + String(WiFi.RSSI()) + "\n";
+    report += "sd_total_bytes=" + String(static_cast<unsigned long long>(SD.totalBytes())) + "\n";
+    report += "sd_used_bytes=" + String(static_cast<unsigned long long>(SD.usedBytes())) + "\n";
+    report += "chat_configured=" + String(settingsAreComplete(consoleSettings) ? "yes" : "no") + "\n";
+    report += "stt_configured=" + String(voiceSettingsAreComplete(consoleSettings) ? "yes" : "no") + "\n";
+    report += "search_configured=" + String(webSearchSettingsAreComplete(consoleSettings) ? "yes" : "no") + "\n";
+    report += "tts_configured=" + String(ttsSettingsAreComplete(consoleSettings) ? "yes" : "no") + "\n";
+    const PythonModeStatus python = inspectPythonMode();
+    report += "python_ready=" + String(
+        python.partitionLayoutReady && python.pythonImageReady ? "yes" : "no") + "\n";
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("Content-Disposition", "attachment; filename=cardmind-diagnostics.txt");
+    server.send(200, "text/plain; charset=utf-8", report);
+}
+
+void handlePythonStart()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const PythonModeStatus status = inspectPythonMode();
+    if (!status.partitionLayoutReady || !status.pythonImageReady) {
+        sendJsonError(409, status.error);
+        return;
+    }
+    String password;
+    String handoffToken = randomHexToken();
+    OperationResult result = loadSetupAccessPointPassword(password);
+    if (result.success && password.isEmpty()) {
+        result = {false, "Installation password is missing; run device setup first"};
+    }
+    if (result.success) {
+        result = synchronizePythonModeSettings(consoleSettings, password, handoffToken);
+    }
+    password = "";
+    if (result.success) {
+        result = activatePythonMode();
+    }
+    if (!result.success) {
+        sendJsonError(409, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["restarting"] = true;
+    document["address"] = "http://" + WiFi.localIP().toString() + "/";
+    document["handoff_token"] = handoffToken;
+    sendJson(200, document);
+    handoffToken = "";
+    pythonRestartRequested = true;
 }
 
 void handleSshSettings()
@@ -1727,7 +2016,8 @@ void updateConsoleSerial()
 
 }  // namespace
 
-WebConsoleResult runWebConsole(const Settings& settings, const String& initialChatId)
+WebConsoleResult runWebConsole(const Settings& settings, const String& initialChatId,
+                               const String& version)
 {
     if (WiFi.status() != WL_CONNECTED) {
         return {false, initialChatId, "Web console requires an active Wi-Fi connection"};
@@ -1735,6 +2025,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     Serial.println("WEB_CONSOLE stage=load_password");
     Serial.flush();
     consoleSettings = settings;
+    firmwareVersion = version;
     OperationResult result = loadSetupAccessPointPassword(accessPassword);
     if (!result.success || accessPassword.isEmpty()) {
         clearConsoleSecrets();
@@ -1771,6 +2062,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     csrfToken = "";
     consoleStatus = "";
     exitRequested = false;
+    pythonRestartRequested = false;
     consoleEscapeConsumed = false;
     loginFailures = 0;
     loginLockedUntil = 0;
@@ -1780,6 +2072,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/", HTTP_GET, sendRoot);
         server.on("/login", HTTP_POST, handleLogin);
         server.on("/logout", HTTP_POST, handleLogout);
+        server.on("/api/console/close", HTTP_POST, handleCloseConsole);
         server.on("/api/state", HTTP_GET, handleState);
         server.on("/api/prompt", HTTP_POST, handlePrompt);
         server.on("/api/chat/select", HTTP_POST, handleSelectChat);
@@ -1794,7 +2087,12 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/chat/export-bundle", HTTP_POST, handleExportChatBundle);
         server.on("/api/chat/import", HTTP_POST, handleImportChatBundle);
         server.on("/api/chat/delete", HTTP_POST, handleDeleteChat);
+        server.on("/api/chat/clear", HTTP_POST, handleClearChat);
+        server.on("/api/chat/archived", HTTP_GET, handleArchivedMessages);
         server.on("/api/settings", HTTP_POST, handleSettings);
+        server.on("/api/models", HTTP_GET, handleModels);
+        server.on("/api/diagnostics", HTTP_GET, handleDiagnosticsDownload);
+        server.on("/api/python/start", HTTP_POST, handlePythonStart);
         server.on("/api/ssh/settings", HTTP_POST, handleSshSettings);
         server.on("/api/ssh/select", HTTP_POST, handleSshSelect);
         server.on("/api/ssh/delete", HTTP_POST, handleSshDelete);
@@ -1830,6 +2128,11 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     bool escapeHeld = false;
     while (!exitRequested) {
         server.handleClient();
+        if (pythonRestartRequested) {
+            showBusyScreen("PYTHON WORKSPACE", "Restarting into MicroPython...");
+            delay(500);
+            ESP.restart();
+        }
         updateConsoleSerial();
         M5Cardputer.update();
         const bool escapePressed = consoleEscapePressed();

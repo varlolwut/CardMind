@@ -33,3 +33,8 @@ per installation and remains stable until NVS is erased.
 
 The Web console has a separate installation password shown on-device. See
 [Web console](web-console.md) and [Security](security.md).
+
+The protected Web console can replace write-only credentials and all provider
+settings. Leave a secret field blank to preserve it. Optional STT, search, and TTS
+keys also have explicit remove controls. A changed Wi-Fi network is applied after
+**End session** closes the local console; reopen it at the address shown afterward.

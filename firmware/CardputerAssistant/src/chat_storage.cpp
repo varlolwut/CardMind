@@ -243,6 +243,94 @@ OperationResult initializeChatStorage()
     return {true, ""};
 }
 
+ArchivedMessagesPageResult readArchivedChatMessages(const String& id,
+                                                     std::uint32_t offset,
+                                                     std::size_t maximumMessages,
+                                                     std::size_t maximumBytes)
+{
+    if (!isValidChatId(id.c_str())) {
+        return {false, {}, offset, false, "Cannot read archive for an invalid chat id"};
+    }
+    if (maximumMessages == 0 || maximumBytes == 0) {
+        return {false, {}, offset, false, "Archive page limits must be greater than zero"};
+    }
+    const String path = chatArchivePath(id);
+    if (!SD.exists(path)) {
+        return {true, {}, 0, true, ""};
+    }
+    File file = SD.open(path, FILE_READ);
+    if (!file) {
+        return {false, {}, offset, false, "Failed to open archived chat messages"};
+    }
+    const std::size_t totalBytes = file.size();
+    if (offset > totalBytes || !file.seek(offset)) {
+        file.close();
+        return {false, {}, offset, false, "Archived chat offset is outside the file"};
+    }
+    std::vector<Message> messages;
+    std::size_t includedBytes = 0;
+    std::uint32_t nextOffset = offset;
+    while (file.available() && messages.size() < maximumMessages) {
+        const std::uint32_t lineOffset = file.position();
+        const String line = file.readStringUntil('\n');
+        if (line.isEmpty()) {
+            nextOffset = file.position();
+            continue;
+        }
+        JsonDocument item;
+        const DeserializationError error = deserializeJson(item, line);
+        if (error || !item["role"].is<const char*>() ||
+            !item["content"].is<const char*>()) {
+            file.close();
+            return {false, {}, lineOffset, false,
+                    "Archived chat contains an invalid JSON line"};
+        }
+        const Message message = {
+            item["role"].as<const char*>(),
+            item["content"].as<const char*>(),
+        };
+        if ((message.role != "user" && message.role != "assistant") ||
+            message.content.empty() || !isValidUtf8(message.content)) {
+            file.close();
+            return {false, {}, lineOffset, false,
+                    "Archived chat contains an invalid message"};
+        }
+        if (!messages.empty() && includedBytes + message.content.size() > maximumBytes) {
+            nextOffset = lineOffset;
+            break;
+        }
+        includedBytes += message.content.size();
+        messages.push_back(message);
+        nextOffset = file.position();
+    }
+    const bool eof = nextOffset >= totalBytes;
+    file.close();
+    return {true, std::move(messages), nextOffset, eof, ""};
+}
+
+OperationResult clearChatHistory(const String& id)
+{
+    const ChatDocumentResult loaded = loadChat(id);
+    if (!loaded.success) {
+        return {false, loaded.error};
+    }
+    ChatDocument cleared = loaded.chat;
+    cleared.messages.clear();
+    cleared.draft.clear();
+    cleared.summary.messageCount = 0;
+    cleared.summary.archivedMessageCount = 0;
+    cleared.summary.updatedAt = currentTimestamp();
+    OperationResult result = saveChat(cleared);
+    if (!result.success) {
+        return result;
+    }
+    result = removeIfPresent(chatArchivePath(id));
+    return result.success
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Chat was cleared, but its stale archive could not be removed: " +
+                                  result.error};
+}
+
 ChatsResult listChats()
 {
     File directory = SD.open(kChatsDirectory);
