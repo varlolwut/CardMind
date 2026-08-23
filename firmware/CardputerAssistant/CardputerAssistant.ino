@@ -16,6 +16,7 @@
 #include "src/stt_client.h"
 #include "src/storage.h"
 #include "src/ssh_client.h"
+#include "src/ssh_terminal.h"
 #include "src/text_utils.h"
 #include "src/tts_client.h"
 #include "src/ui.h"
@@ -153,6 +154,8 @@ bool startupInProgress = true;
 wl_status_t lastWifiStatus = WL_IDLE_STATUS;
 bool crashJournalReady = false;
 String crashJournalError;
+bool sshStorageReady = false;
+String sshStorageError;
 
 void ensureNetworkReady();
 void render();
@@ -175,6 +178,7 @@ void renderWifiPassword();
 void renderWifiPicker();
 void renderWorkspaceFileList();
 void openWebConsole();
+cardputer::OperationResult runSshTerminal();
 void submitPrompt();
 void runUiSearchEndToEndTest();
 
@@ -1379,6 +1383,7 @@ std::vector<String> deviceMenuItems()
     return {
         "API and services setup",
         "Web console",
+        "SSH terminal",
         "Diagnostics",
         "Back to carousel",
     };
@@ -1404,6 +1409,7 @@ std::vector<String> diagnosticsItems()
         "Chats: " + String(chats.size()),
         "Free heap: " + String(ESP.getFreeHeap()) + " B",
         "Crash journal: " + String(crashJournalReady ? "ready" : "unavailable"),
+        "SSH storage: " + String(sshStorageReady ? "ready" : "unavailable"),
         "Previous op: " + cardputer::previousOperation(),
         "Reset reason: " + String(static_cast<int>(esp_reset_reason())),
     };
@@ -1582,6 +1588,217 @@ void openWebConsole()
     }
     currentScreen = Screen::DeviceMenu;
     renderDeviceMenu();
+}
+
+bool keyboardWordContains(const Keyboard_Class::KeysState& keys, char expected)
+{
+    return std::find(keys.word.begin(), keys.word.end(), expected) != keys.word.end();
+}
+
+bool confirmSshFingerprint(const cardputer::SshProfile& profile,
+                           const String& keyType,
+                           const String& fingerprint,
+                           bool changed)
+{
+    std::vector<std::string> lines;
+    lines.push_back(changed ? "WARNING: HOST KEY CHANGED" : "First connection to host");
+    lines.push_back(std::string(profile.host.c_str()) + ":" +
+                    std::to_string(profile.port));
+    lines.push_back(std::string("Type: ") + keyType.c_str());
+    const std::vector<std::string> fingerprintLines = cardputer::wrapUtf8Text(
+        std::string(fingerprint.c_str()), 38);
+    lines.insert(lines.end(), fingerprintLines.begin(), fingerprintLines.end());
+    cardputer::showTextViewer("SSH HOST KEY", lines, 0,
+                             "ENTER trust  ESC cancel");
+    while (true) {
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+            const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+            if (keys.esc || keyboardWordContains(keys, '`')) {
+                return false;
+            }
+            if (keys.enter) {
+                return true;
+            }
+        }
+        delay(5);
+    }
+}
+
+cardputer::OperationResult runSshTerminal()
+{
+    cardputer::SshProfile profile;
+    const cardputer::OperationResult loaded = cardputer::loadSshProfile(profile);
+    if (!loaded.success) {
+        return loaded;
+    }
+    if (!cardputer::sshProfileIsComplete(profile)) {
+        return {false, "Configure SSH in the protected Web console first"};
+    }
+    ensureNetworkReady();
+    if (WiFi.status() != WL_CONNECTED) {
+        return {false, statusMessage.isEmpty() ? String("Wi-Fi is not connected") : statusMessage};
+    }
+
+    cardputer::showBusyScreen("SSH", "Connecting and checking host key...");
+    cardputer::markOperation("ssh_handshake");
+    cardputer::SshClient client;
+    const cardputer::OperationResult connected = client.connect(profile, 60000);
+    if (!connected.success) {
+        cardputer::markOperation("idle");
+        return connected;
+    }
+    const cardputer::SshTrustResult trust = cardputer::checkTrustedSshHost(
+        profile.host, profile.port, client.fingerprint());
+    if (!trust.success) {
+        client.close();
+        cardputer::markOperation("idle");
+        return {false, trust.error};
+    }
+    if (!trust.found || !trust.matches) {
+        const bool confirmed = confirmSshFingerprint(
+            profile, client.hostKeyType(), client.fingerprint(), trust.found && !trust.matches);
+        if (!confirmed) {
+            client.close();
+            cardputer::markOperation("idle");
+            return {false, "SSH connection cancelled before trusting the host key"};
+        }
+        const cardputer::OperationResult trusted = cardputer::trustSshHost(
+            profile.host, profile.port, client.fingerprint());
+        if (!trusted.success) {
+            client.close();
+            cardputer::markOperation("idle");
+            return trusted;
+        }
+    }
+
+    cardputer::showBusyScreen("SSH", "Authenticating...");
+    cardputer::markOperation("ssh_auth");
+    const cardputer::OperationResult authenticated = client.authenticate(profile, 60000);
+    if (!authenticated.success) {
+        client.close();
+        cardputer::markOperation("idle");
+        return authenticated;
+    }
+    const cardputer::OperationResult terminalOpened = client.openTerminal(40, 8, 30000);
+    if (!terminalOpened.success) {
+        client.close();
+        cardputer::markOperation("idle");
+        return terminalOpened;
+    }
+
+    constexpr const char* scrollbackPath = "/assistant/ssh/terminal.log";
+    constexpr const char* oldScrollbackPath = "/assistant/ssh/terminal.old.log";
+    File existing = SD.open(scrollbackPath, FILE_READ);
+    if (existing && existing.size() > 512U * 1024U) {
+        existing.close();
+        SD.remove(oldScrollbackPath);
+        if (!SD.rename(scrollbackPath, oldScrollbackPath)) {
+            client.close();
+            cardputer::markOperation("idle");
+            return {false, "Failed to rotate SSH terminal scrollback on microSD"};
+        }
+    } else if (existing) {
+        existing.close();
+    }
+    File scrollback = SD.open(scrollbackPath, FILE_APPEND);
+    if (!scrollback) {
+        client.close();
+        cardputer::markOperation("idle");
+        return {false, "Failed to open SSH terminal scrollback on microSD"};
+    }
+    scrollback.println();
+    scrollback.println(String("--- SSH session ") + profile.host + ":" + profile.port + " ---");
+    scrollback.flush();
+
+    cardputer::SshTerminalText terminal = {"", "", false};
+    String terminalStatus = "ESC disconnect  SD scrollback";
+    bool redraw = true;
+    cardputer::markOperation("ssh_terminal");
+    while (client.isOpen()) {
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+            const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+            if (keys.esc || keyboardWordContains(keys, '`')) {
+                terminalStatus = "Disconnected by user";
+                break;
+            }
+            std::vector<std::uint8_t> outbound;
+            if (keys.ctrl && !keys.word.empty()) {
+                const unsigned char character = static_cast<unsigned char>(keys.word.front());
+                if (character >= '@' && character <= '_') {
+                    outbound.push_back(static_cast<std::uint8_t>(character & 0x1F));
+                } else if (character >= 'a' && character <= 'z') {
+                    outbound.push_back(static_cast<std::uint8_t>(character - 'a' + 1));
+                }
+            } else {
+                for (const char character : keys.word) {
+                    outbound.push_back(static_cast<std::uint8_t>(character));
+                }
+            }
+            if (keys.enter) {
+                outbound.push_back('\r');
+            }
+            if (keys.backspace || keys.del) {
+                outbound.push_back(0x7F);
+            }
+            if (keys.tab) {
+                outbound.push_back('\t');
+            }
+            const char* arrow = keys.up ? "\x1B[A" : (keys.down ? "\x1B[B" :
+                (keys.right ? "\x1B[C" : (keys.left ? "\x1B[D" : nullptr)));
+            if (arrow != nullptr) {
+                outbound.insert(outbound.end(), arrow, arrow + 3);
+            }
+            if (!outbound.empty()) {
+                const cardputer::OperationResult written = client.write(
+                    outbound.data(), outbound.size(), 5000);
+                if (!written.success) {
+                    terminalStatus = written.error;
+                    break;
+                }
+            }
+        }
+
+        std::uint8_t incoming[256] = {};
+        const int readBytes = client.read(incoming, sizeof(incoming));
+        if (readBytes < 0) {
+            terminalStatus = "SSH terminal read failed with code " + String(readBytes);
+            break;
+        }
+        if (readBytes > 0) {
+            const std::string previousText = terminal.text;
+            terminal = cardputer::appendSshTerminalBytes(
+                std::move(terminal), incoming, static_cast<std::size_t>(readBytes), 16384);
+            if (terminal.text.size() >= previousText.size() &&
+                terminal.text.compare(0, previousText.size(), previousText) == 0) {
+                const std::string appended = terminal.text.substr(previousText.size());
+                if (!appended.empty() &&
+                    scrollback.write(reinterpret_cast<const std::uint8_t*>(appended.data()),
+                                     appended.size()) != appended.size()) {
+                    terminalStatus = "SSH scrollback write failed";
+                    break;
+                }
+                scrollback.flush();
+            }
+            redraw = true;
+        }
+        if (redraw) {
+            cardputer::showTextViewer(
+                "SSH " + profile.host,
+                cardputer::sshTerminalVisibleLines(terminal, 38, 8),
+                0, terminalStatus);
+            redraw = false;
+        }
+        delay(5);
+    }
+    scrollback.println();
+    scrollback.println("--- session closed ---");
+    scrollback.flush();
+    scrollback.close();
+    client.close();
+    cardputer::markOperation("idle");
+    return {true, terminalStatus};
 }
 
 void renderFilesMenu()
@@ -2448,6 +2665,11 @@ void handleKeyboard()
             } else if (deviceMenuIndex == 1) {
                 openWebConsole();
             } else if (deviceMenuIndex == 2) {
+                const cardputer::OperationResult result = runSshTerminal();
+                menuStatus = result.error;
+                currentScreen = Screen::DeviceMenu;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 3) {
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
                 renderDiagnostics();
@@ -3063,10 +3285,18 @@ void setup()
     crashJournalError = journalResult.success ? String() : journalResult.error;
     Serial.printf("CRASH_JOURNAL result=%s\n", crashJournalReady ? "ready" : "failed");
 
+    const cardputer::OperationResult sshStorageResult = fileWorkspaceReady
+        ? cardputer::initializeSshStorage()
+        : cardputer::OperationResult{false, fileWorkspaceError};
+    sshStorageReady = sshStorageResult.success;
+    sshStorageError = sshStorageResult.success ? String() : sshStorageResult.error;
+    Serial.printf("SSH_STORAGE result=%s\n", sshStorageReady ? "ready" : "failed");
+
     carouselIndex = 0;
     menuStatus = !fileWorkspaceReady
         ? fileWorkspaceError
-        : (crashJournalReady ? String() : crashJournalError);
+        : (!crashJournalReady ? crashJournalError
+                              : (sshStorageReady ? String() : sshStorageError));
     statusMessage = "";
     startupInProgress = false;
     currentScreen = Screen::MainCarousel;

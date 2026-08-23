@@ -5,6 +5,7 @@
 #include "crash_journal.h"
 #include "file_workspace.h"
 #include "storage.h"
+#include "ssh_client.h"
 #include "text_utils.h"
 #include "ui.h"
 #include "web_search_client.h"
@@ -53,6 +54,10 @@ String uploadName;
 String uploadError;
 std::size_t uploadBytes = 0;
 bool uploadCreated = false;
+File sshKeyUploadFile;
+String sshKeyUploadError;
+std::size_t sshKeyUploadBytes = 0;
+constexpr const char* kSshKeyUploadPath = "/assistant/ssh/upload.tmp";
 
 bool parseUnsignedArgument(const String& value, std::uint32_t& result)
 {
@@ -76,6 +81,12 @@ bool parseUnsignedArgument(const String& value, std::uint32_t& result)
 
 void clearConsoleSecrets()
 {
+    if (sshKeyUploadFile) {
+        sshKeyUploadFile.close();
+    }
+    SD.remove(kSshKeyUploadPath);
+    sshKeyUploadError = "";
+    sshKeyUploadBytes = 0;
     accessPassword = "";
     sessionToken = "";
     csrfToken = "";
@@ -283,6 +294,11 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 <section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section>
 <section class="card"><h2>Connection</h2><label>OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180">
 <label>Model</label><input id="model" maxlength="120"><button id="saveSettings">Save non-secret settings</button><small>API keys remain write-only and are never sent to this page.</small></section>
+<section class="card"><h2>SSH terminal</h2><div class="row"><input id="sshHost" maxlength="253" placeholder="Host"><input id="sshPort" type="number" min="1" max="65535" placeholder="Port"></div>
+<input id="sshUser" maxlength="64" placeholder="Username"><select id="sshAuth"><option value="password">Password</option><option value="key">Private key</option></select>
+<input id="sshPassword" type="password" maxlength="192" placeholder="New password (leave blank to keep)"><input id="sshPassphrase" type="password" maxlength="192" placeholder="New key passphrase (leave blank to keep)">
+<button id="saveSsh">Save SSH profile</button><div class="row"><input id="sshKeyInput" type="file" accept=".pem,.key"><button id="uploadSshKey">Install private key</button></div>
+<small>Passwords are write-only. Host fingerprints must be confirmed on the Cardputer before authentication. Private keys are stored outside the downloadable workspace.</small></section>
 <section class="card"><h2>Device diagnostics</h2><p id="diagnostics"></p></section>
 <section class="card"><h2>microSD files</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button id="downloadFile">Download</button></div>
 <div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.csv,.html,.svg"><button id="uploadFile">Upload new file</button></div>
@@ -298,6 +314,7 @@ function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;q
 q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=c.title;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
 q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}
 q('#instructions').value=s.instructions||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
+q('#sshHost').value=s.ssh_host||'';q('#sshPort').value=s.ssh_port||22;q('#sshUser').value=s.ssh_username||'';q('#sshAuth').value=s.ssh_auth_mode||'password';
 q('#diagnostics').textContent=`Wi-Fi ${s.wifi_rssi} dBm · heap ${s.free_heap} B · largest ${s.largest_heap} B · SD ${s.sd_used_bytes}/${s.sd_total_bytes} B`;
 const selected=q('#files').value;q('#files').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#files').append(o)}q('#messages').scrollTop=q('#messages').scrollHeight}
 async function refresh(){const r=await request('/api/state');render(await r.json())}
@@ -309,6 +326,8 @@ q('#renameChat').onclick=async()=>{const title=prompt('Chat title',state.active_
 q('#deleteChat').onclick=async()=>{if(confirm(`Delete chat "${state.active_chat_title}"?`)){await post('/api/chat/delete',{});await refresh()}};
 q('#saveInstructions').onclick=async()=>{await request('/api/chat/instructions',{method:'POST',body:new URLSearchParams({instructions:q('#instructions').value})});await refresh()};
 q('#saveSettings').onclick=async()=>{await post('/api/settings',{api_base_url:q('#apiBaseUrl').value,model:q('#model').value});await refresh()};
+q('#saveSsh').onclick=async()=>{const password=q('#sshPassword').value,passphrase=q('#sshPassphrase').value;await post('/api/ssh/settings',{host:q('#sshHost').value,port:q('#sshPort').value,username:q('#sshUser').value,auth_mode:q('#sshAuth').value,password,replace_password:password?'1':'0',key_passphrase:passphrase,replace_key_passphrase:passphrase?'1':'0'});q('#sshPassword').value='';q('#sshPassphrase').value='';await refresh()};
+q('#uploadSshKey').onclick=async()=>{const file=q('#sshKeyInput').files[0];if(!file)return;const data=new FormData();data.append('file',file,file.name);await request('/api/ssh/key',{method:'POST',body:data});q('#sshKeyInput').value='';await refresh()};
 q('#openFile').onclick=()=>openFile(0,false);q('#nextFilePage').onclick=()=>{if(!fileEof)openFile(fileNextOffset,true)};
 q('#previousFilePage').onclick=()=>{if(fileBack.length)openFile(fileBack.pop(),false)};
 q('#saveFile').onclick=async()=>{if(!fileName)return;await post('/api/file/save',{name:fileName,offset:String(fileOffset),original_bytes:String(fileOriginalBytes),content:q('#fileContent').value});await refresh();await openFile(fileOffset,false)};
@@ -405,6 +424,19 @@ void handleState()
     document["status"] = consoleStatus;
     document["model"] = consoleSettings.model;
     document["api_base_url"] = consoleSettings.apiBaseUrl;
+    SshProfile sshProfile;
+    const OperationResult sshProfileResult = loadSshProfile(sshProfile);
+    if (!sshProfileResult.success) {
+        sendJsonError(500, sshProfileResult.error);
+        return;
+    }
+    document["ssh_host"] = sshProfile.host;
+    document["ssh_port"] = sshProfile.port;
+    document["ssh_username"] = sshProfile.username;
+    document["ssh_auth_mode"] = sshProfile.authMode == SshAuthMode::PrivateKey
+        ? "key" : "password";
+    document["ssh_key_installed"] = sshPrivateKeyIsInstalled();
+    document["ssh_configured"] = sshProfileIsComplete(sshProfile);
     JsonArray chats = document["chats"].to<JsonArray>();
     for (const auto& chat : consoleChats) {
         JsonObject item = chats.add<JsonObject>();
@@ -705,6 +737,137 @@ void handleSettings()
     sendJson(200, document);
 }
 
+void handleSshSettings()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    std::uint32_t port = 0;
+    if (!parseUnsignedArgument(server.arg("port"), port) || port == 0 || port > 65535) {
+        sendJsonError(400, "SSH port must be between 1 and 65535");
+        return;
+    }
+    SshProfile profile;
+    const OperationResult loaded = loadSshProfile(profile);
+    if (!loaded.success) {
+        sendJsonError(500, loaded.error);
+        return;
+    }
+    profile.host = server.arg("host");
+    profile.port = static_cast<std::uint16_t>(port);
+    profile.username = server.arg("username");
+    const String authMode = server.arg("auth_mode");
+    if (authMode == "password") {
+        profile.authMode = SshAuthMode::Password;
+    } else if (authMode == "key") {
+        profile.authMode = SshAuthMode::PrivateKey;
+    } else {
+        sendJsonError(400, "SSH auth mode must be 'password' or 'key'");
+        return;
+    }
+    if (server.arg("replace_password") == "1") {
+        profile.password = server.arg("password");
+    }
+    if (server.arg("replace_key_passphrase") == "1") {
+        profile.privateKeyPassphrase = server.arg("key_passphrase");
+    }
+    const OperationResult saved = saveSshProfile(profile);
+    profile.password = "";
+    profile.privateKeyPassphrase = "";
+    if (!saved.success) {
+        sendJsonError(400, saved.error);
+        return;
+    }
+    consoleStatus = "SSH profile saved";
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleSshKeyUploadData()
+{
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        sshKeyUploadError = "";
+        sshKeyUploadBytes = 0;
+        if (!requestHasValidCsrf()) {
+            sshKeyUploadError = "Authentication required";
+            return;
+        }
+        const OperationResult initialized = initializeSshStorage();
+        if (!initialized.success) {
+            sshKeyUploadError = initialized.error;
+            return;
+        }
+        SD.remove(kSshKeyUploadPath);
+        sshKeyUploadFile = SD.open(kSshKeyUploadPath, FILE_WRITE);
+        if (!sshKeyUploadFile) {
+            sshKeyUploadError = "Failed to create temporary SSH private-key upload";
+        }
+        return;
+    }
+    if (upload.status == UPLOAD_FILE_WRITE) {
+        if (!sshKeyUploadError.isEmpty()) {
+            return;
+        }
+        if (!sshKeyUploadFile || upload.currentSize > 16384 - sshKeyUploadBytes) {
+            sshKeyUploadError = "SSH private key exceeds 16384 bytes";
+            if (sshKeyUploadFile) {
+                sshKeyUploadFile.close();
+            }
+            SD.remove(kSshKeyUploadPath);
+            return;
+        }
+        const std::size_t written = sshKeyUploadFile.write(upload.buf, upload.currentSize);
+        if (written != upload.currentSize) {
+            sshKeyUploadError = "microSD did not accept the complete SSH key chunk";
+            sshKeyUploadFile.close();
+            SD.remove(kSshKeyUploadPath);
+            return;
+        }
+        sshKeyUploadBytes += written;
+        return;
+    }
+    if (upload.status == UPLOAD_FILE_END) {
+        if (!sshKeyUploadError.isEmpty()) {
+            return;
+        }
+        sshKeyUploadFile.flush();
+        sshKeyUploadFile.close();
+        const OperationResult installed = installSshPrivateKey(kSshKeyUploadPath);
+        SD.remove(kSshKeyUploadPath);
+        if (!installed.success) {
+            sshKeyUploadError = installed.error;
+        }
+        return;
+    }
+    if (upload.status == UPLOAD_FILE_ABORTED) {
+        if (sshKeyUploadFile) {
+            sshKeyUploadFile.close();
+        }
+        SD.remove(kSshKeyUploadPath);
+        sshKeyUploadError = "SSH private-key upload was aborted";
+    }
+}
+
+void handleSshKeyUploadComplete()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    if (!sshKeyUploadError.isEmpty()) {
+        sendJsonError(400, sshKeyUploadError);
+        return;
+    }
+    consoleStatus = "SSH private key installed";
+    JsonDocument document;
+    document["ok"] = true;
+    document["bytes"] = sshKeyUploadBytes;
+    sendJson(200, document);
+}
+
 void handleFileRead()
 {
     if (!sessionIsActive()) {
@@ -976,6 +1139,9 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/chat/rename", HTTP_POST, handleRenameChat);
         server.on("/api/chat/delete", HTTP_POST, handleDeleteChat);
         server.on("/api/settings", HTTP_POST, handleSettings);
+        server.on("/api/ssh/settings", HTTP_POST, handleSshSettings);
+        server.on("/api/ssh/key", HTTP_POST,
+                  handleSshKeyUploadComplete, handleSshKeyUploadData);
         server.on("/api/file", HTTP_GET, handleFileRead);
         server.on("/api/file/save", HTTP_POST, handleFileSave);
         server.on("/api/file/rename", HTTP_POST, handleFileRename);

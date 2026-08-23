@@ -28,6 +28,7 @@ jobs:
             tests/host_tests.cpp \
             firmware/CardputerAssistant/src/text_utils.cpp \
             firmware/CardputerAssistant/src/audio_utils.cpp \
+            firmware/CardputerAssistant/src/ssh_terminal.cpp \
             -o build/host-tests
           ./build/host-tests
 
