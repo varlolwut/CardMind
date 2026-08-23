@@ -58,6 +58,10 @@ File sshKeyUploadFile;
 String sshKeyUploadError;
 std::size_t sshKeyUploadBytes = 0;
 constexpr const char* kSshKeyUploadPath = "/assistant/ssh/upload.tmp";
+SshClient webSshClient;
+SshProfile webSshProfile = {"", "", 22, "", "", SshAuthMode::Password, ""};
+bool webSshAwaitingTrust = false;
+bool webSshTerminalOpen = false;
 
 bool parseUnsignedArgument(const String& value, std::uint32_t& result)
 {
@@ -81,6 +85,11 @@ bool parseUnsignedArgument(const String& value, std::uint32_t& result)
 
 void clearConsoleSecrets()
 {
+    webSshClient.close();
+    webSshProfile.password = "";
+    webSshProfile.privateKeyPassphrase = "";
+    webSshAwaitingTrust = false;
+    webSshTerminalOpen = false;
     if (sshKeyUploadFile) {
         sshKeyUploadFile.close();
     }
@@ -294,6 +303,7 @@ header strong{flex:1;color:#67e8f9}.layout{max-width:900px;margin:auto;padding:1
 textarea,input,select,button{box-sizing:border-box;background:#081524;color:#fff;border:1px solid #405b7d;border-radius:8px;padding:10px}
 textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;background:#5eead4;color:#06201c;border:0;font-weight:800}
 .danger{background:#fb7185;color:#300}.file-editor{min-height:260px;font:14px ui-monospace,monospace}
+.terminal{background:#020617;color:#d1fae5;border:1px solid #405b7d;border-radius:8px;padding:10px;min-height:280px;max-height:65vh;overflow:auto;white-space:pre-wrap;font:14px ui-monospace,monospace;outline:none}
 .row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}small{color:#9fb3ca}#status{color:#fde68a}</style></head><body>
 <header><strong>CardMind</strong><span id="device"></span><button id="logout">Logout</button></header>
 <main class="layout"><section class="card"><div class="row"><select id="chats"></select><button id="newChat">New chat</button></div>
@@ -303,11 +313,16 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 <section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section>
 <section class="card"><h2>Connection</h2><label>OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180">
 <label>Model</label><input id="model" maxlength="120"><button id="saveSettings">Save non-secret settings</button><small>API keys remain write-only and are never sent to this page.</small></section>
-<section class="card"><h2>SSH terminal</h2><div class="row"><input id="sshHost" maxlength="253" placeholder="Host"><input id="sshPort" type="number" min="1" max="65535" placeholder="Port"></div>
+<section class="card"><h2>SSH terminal and SFTP</h2><div class="row"><select id="sshProfiles"></select><input id="sshName" maxlength="32" placeholder="Profile name"><button id="newSsh">New</button><button class="danger" id="deleteSsh">Delete</button></div><div class="row"><input id="sshHost" maxlength="253" placeholder="Host"><input id="sshPort" type="number" min="1" max="65535" placeholder="Port"></div>
 <input id="sshUser" maxlength="64" placeholder="Username"><select id="sshAuth"><option value="password">Password</option><option value="key">Private key</option></select>
 <input id="sshPassword" type="password" maxlength="192" placeholder="New password (leave blank to keep)"><input id="sshPassphrase" type="password" maxlength="192" placeholder="New key passphrase (leave blank to keep)">
 <button id="saveSsh">Save SSH profile</button><div class="row"><input id="sshKeyInput" type="file" accept=".pem,.key"><button id="uploadSshKey">Install private key</button></div>
-<small>Passwords are write-only. Host fingerprints must be confirmed on the Cardputer before authentication. Private keys are stored outside the downloadable workspace.</small></section>
+<div class="row"><button id="connectSsh">Connect</button><button id="disconnectSsh" class="danger">Disconnect</button><button id="clearSsh">Clear display</button><button id="fullSsh">Fullscreen</button></div>
+<pre id="sshTerminal" class="terminal" tabindex="0">Click Connect, then focus this terminal and type.</pre>
+<div class="row"><input id="sshInput" maxlength="512" placeholder="Command (Enter sends)"><button id="sendSshInput">Send</button></div>
+<div class="row"><input id="sftpPath" value="/" maxlength="511"><button id="listSftp">List SFTP</button><select id="sftpEntries"></select></div>
+<div class="row"><button id="sftpOpen">Open directory</button><button id="sftpDownload">Download to SD workspace</button><select id="sftpLocal"></select><button id="sftpUpload">Upload to current path</button></div>
+<small>Passwords are write-only. A new or changed host fingerprint must be explicitly confirmed. Transferred files stay on the device microSD; browser terminal output is held in this page.</small></section>
 <section class="card"><h2>Device diagnostics</h2><p id="diagnostics"></p></section>
 <section class="card"><h2>microSD files</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button id="downloadFile">Download</button></div>
 <div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.jsonl,.csv,.html,.svg"><button id="uploadFile">Upload new file</button><button id="importChat">Import selected chat bundle</button></div>
@@ -317,15 +332,16 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 <script>)HTML";
     page += "const csrf='" + csrfToken + "';\n";
     page += R"HTML(
-const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[],activeRequest=null,lastPrompt='';
+const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[],activeRequest=null,lastPrompt='',sshConnected=false,sshPoll=null,sftpState=[],sshCreating=false;
 async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}if(!r.ok){let message=`HTTP ${r.status}`;try{message=(await r.json()).error||message}catch{}throw new Error(message)}return r}
 function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;q('#status').textContent=s.status||'';
 q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=`${c.pinned?'📌 ':c.archived?'📦 ':''}${c.title} · ${c.total_messages}`;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
 q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}
 q('#instructions').value=s.instructions||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
-q('#sshHost').value=s.ssh_host||'';q('#sshPort').value=s.ssh_port||22;q('#sshUser').value=s.ssh_username||'';q('#sshAuth').value=s.ssh_auth_mode||'password';
+q('#sshProfiles').innerHTML='';for(const [i,p] of (s.ssh_profiles||[]).entries()){const o=document.createElement('option');o.value=i;o.textContent=`${i===s.ssh_selected?'★ ':''}${p.name} · ${p.username}@${p.host}`;o.selected=i===s.ssh_selected;q('#sshProfiles').append(o)}
+q('#sshName').value=s.ssh_name||'';q('#sshHost').value=s.ssh_host||'';q('#sshPort').value=s.ssh_port||22;q('#sshUser').value=s.ssh_username||'';q('#sshAuth').value=s.ssh_auth_mode||'password';sshConnected=!!s.ssh_terminal_open;
 q('#diagnostics').textContent=`Wi-Fi ${s.wifi_rssi} dBm · heap ${s.free_heap} B · largest ${s.largest_heap} B · SD ${s.sd_used_bytes}/${s.sd_total_bytes} B`;
-const selected=q('#files').value;q('#files').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#files').append(o)}q('#messages').scrollTop=q('#messages').scrollHeight}
+const selected=q('#files').value;q('#files').innerHTML='';q('#sftpLocal').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#files').append(o);q('#sftpLocal').append(o.cloneNode(true))}q('#messages').scrollTop=q('#messages').scrollHeight}
 async function refresh(){const r=await request('/api/state');render(await r.json())}
 async function post(path,values){return request(path,{method:'POST',body:new URLSearchParams(values)})}
 async function openFile(offset,pushBack){const selected=q('#files').value;if(!selected)return;if(pushBack&&fileName===selected)fileBack.push(fileOffset);else if(fileName!==selected)fileBack=[];const r=await request(`/api/file?name=${encodeURIComponent(selected)}&offset=${offset}`);const f=await r.json();fileName=selected;fileOffset=f.offset;fileNextOffset=f.next_offset;fileOriginalBytes=f.next_offset-f.offset;fileEof=f.eof;q('#fileContent').value=f.content;q('#filePosition').textContent=`${fileOffset}-${fileNextOffset} / ${f.total_bytes} bytes`}
@@ -337,8 +353,22 @@ q('#duplicateChat').onclick=async()=>{await post('/api/chat/duplicate',{});await
 q('#deleteChat').onclick=async()=>{if(confirm(`Delete chat "${state.active_chat_title}"?`)){await post('/api/chat/delete',{});await refresh()}};
 q('#saveInstructions').onclick=async()=>{await request('/api/chat/instructions',{method:'POST',body:new URLSearchParams({instructions:q('#instructions').value})});await refresh()};
 q('#saveSettings').onclick=async()=>{await post('/api/settings',{api_base_url:q('#apiBaseUrl').value,model:q('#model').value});await refresh()};
-q('#saveSsh').onclick=async()=>{const password=q('#sshPassword').value,passphrase=q('#sshPassphrase').value;await post('/api/ssh/settings',{host:q('#sshHost').value,port:q('#sshPort').value,username:q('#sshUser').value,auth_mode:q('#sshAuth').value,password,replace_password:password?'1':'0',key_passphrase:passphrase,replace_key_passphrase:passphrase?'1':'0'});q('#sshPassword').value='';q('#sshPassphrase').value='';await refresh()};
+q('#saveSsh').onclick=async()=>{const password=q('#sshPassword').value,passphrase=q('#sshPassphrase').value;await post('/api/ssh/settings',{name:q('#sshName').value,host:q('#sshHost').value,port:q('#sshPort').value,username:q('#sshUser').value,auth_mode:q('#sshAuth').value,password,replace_password:password?'1':'0',key_passphrase:passphrase,replace_key_passphrase:passphrase?'1':'0',create:sshCreating?'1':'0'});sshCreating=false;q('#sshPassword').value='';q('#sshPassphrase').value='';await refresh()};
+q('#sshProfiles').onchange=async()=>{sshCreating=false;await post('/api/ssh/select',{index:q('#sshProfiles').value});await refresh()};
+q('#newSsh').onclick=()=>{sshCreating=true;q('#sshName').value='Server';q('#sshHost').value='';q('#sshPort').value=22;q('#sshUser').value='';q('#sshPassword').value='';q('#sshPassphrase').value=''};
+q('#deleteSsh').onclick=async()=>{if(confirm('Delete selected SSH profile?')){await post('/api/ssh/delete',{index:q('#sshProfiles').value});await refresh()}};
 q('#uploadSshKey').onclick=async()=>{const file=q('#sshKeyInput').files[0];if(!file)return;const data=new FormData();data.append('file',file,file.name);await request('/api/ssh/key',{method:'POST',body:data});q('#sshKeyInput').value='';await refresh()};
+function cleanSsh(v){return v.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g,'').replace(/\r(?!\n)/g,'')}
+async function sendTerminal(data){if(!sshConnected)return;await post('/api/ssh/input',{data})}
+async function pollSsh(){if(!sshConnected)return;try{const r=await request('/api/ssh/output');const x=await r.json();if(x.output){const t=q('#sshTerminal');t.textContent+=cleanSsh(x.output);if(t.textContent.length>131072)t.textContent=t.textContent.slice(-98304);t.scrollTop=t.scrollHeight}sshConnected=x.open;if(!x.open)await refresh()}catch(e){sshConnected=false;q('#status').textContent=e.message}}
+q('#connectSsh').onclick=async()=>{const r=await request('/api/ssh/start',{method:'POST'}),x=await r.json();if(x.trust_required){if(!confirm(`Trust ${x.host}:${x.port}\n${x.key_type}\n${x.fingerprint}?`))return;const t=await post('/api/ssh/trust',{fingerprint:x.fingerprint}),y=await t.json();sshConnected=y.open}else sshConnected=x.open;q('#sshTerminal').textContent='';q('#sshTerminal').focus();if(!sshPoll)sshPoll=setInterval(pollSsh,150);await refresh()};
+q('#disconnectSsh').onclick=async()=>{await post('/api/ssh/stop',{});sshConnected=false;await refresh()};q('#clearSsh').onclick=()=>q('#sshTerminal').textContent='';q('#fullSsh').onclick=()=>q('#sshTerminal').requestFullscreen();
+q('#sendSshInput').onclick=async()=>{const v=q('#sshInput').value;if(v){await sendTerminal(v+'\r');q('#sshInput').value='';q('#sshTerminal').focus()}};q('#sshInput').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();q('#sendSshInput').click()}};
+q('#sshTerminal').onkeydown=async e=>{let d='';if(e.ctrlKey&&e.key.length===1)d=String.fromCharCode(e.key.toUpperCase().charCodeAt(0)&31);else if(e.key==='Enter')d='\r';else if(e.key==='Backspace')d='\x7f';else if(e.key==='Tab')d='\t';else if(e.key==='ArrowUp')d='\x1b[A';else if(e.key==='ArrowDown')d='\x1b[B';else if(e.key==='ArrowRight')d='\x1b[C';else if(e.key==='ArrowLeft')d='\x1b[D';else if(e.key.length===1&&!e.metaKey&&!e.altKey)d=e.key;if(d){e.preventDefault();await sendTerminal(d)}};
+q('#listSftp').onclick=async()=>{const r=await request(`/api/ssh/sftp/list?path=${encodeURIComponent(q('#sftpPath').value)}`),x=await r.json();sftpState=x.entries;q('#sftpEntries').innerHTML='';for(const [i,e] of x.entries.entries()){const o=document.createElement('option');o.value=i;o.textContent=`${e.directory?'📁':'📄'} ${e.name}${e.directory?'':` · ${e.size} B`}`;q('#sftpEntries').append(o)}};
+q('#sftpOpen').onclick=()=>{const e=sftpState[Number(q('#sftpEntries').value)];if(e&&e.directory){const p=q('#sftpPath').value;q('#sftpPath').value=(p==='/'?'':p)+'/'+e.name;q('#listSftp').click()}};
+q('#sftpDownload').onclick=async()=>{const e=sftpState[Number(q('#sftpEntries').value)];if(!e||e.directory)return;const name=prompt('Workspace filename',e.name);if(name){await post('/api/ssh/sftp/download',{path:(q('#sftpPath').value==='/'?'':q('#sftpPath').value)+'/'+e.name,name});await refresh()}};
+q('#sftpUpload').onclick=async()=>{const name=q('#sftpLocal').value;if(name){const remote=prompt('Remote filename',name);if(remote){await post('/api/ssh/sftp/upload',{name,path:(q('#sftpPath').value==='/'?'':q('#sftpPath').value)+'/'+remote});q('#listSftp').click()}}};
 q('#openFile').onclick=()=>openFile(0,false);q('#nextFilePage').onclick=()=>{if(!fileEof)openFile(fileNextOffset,true)};
 q('#previousFilePage').onclick=()=>{if(fileBack.length)openFile(fileBack.pop(),false)};
 q('#saveFile').onclick=async()=>{if(!fileName)return;await post('/api/file/save',{name:fileName,offset:String(fileOffset),original_bytes:String(fileOriginalBytes),content:q('#fileContent').value});await refresh();await openFile(fileOffset,false)};
@@ -438,17 +468,32 @@ void handleState()
     document["status"] = consoleStatus;
     document["model"] = consoleSettings.model;
     document["api_base_url"] = consoleSettings.apiBaseUrl;
-    SshProfile sshProfile;
-    const OperationResult sshProfileResult = loadSshProfile(sshProfile);
+    std::vector<SshProfile> sshProfiles;
+    std::size_t sshSelected = 0;
+    const OperationResult sshProfileResult = loadSshProfiles(sshProfiles, sshSelected);
     if (!sshProfileResult.success) {
         sendJsonError(500, sshProfileResult.error);
         return;
     }
+    const SshProfile sshProfile = sshProfiles.empty()
+        ? SshProfile{"", "", 22, "", "", SshAuthMode::Password, ""}
+        : sshProfiles[sshSelected];
+    document["ssh_name"] = sshProfile.name;
     document["ssh_host"] = sshProfile.host;
     document["ssh_port"] = sshProfile.port;
     document["ssh_username"] = sshProfile.username;
-    document["ssh_auth_mode"] = sshProfile.authMode == SshAuthMode::PrivateKey
-        ? "key" : "password";
+    document["ssh_auth_mode"] = sshProfile.authMode == SshAuthMode::PrivateKey ? "key" : "password";
+    document["ssh_selected"] = sshSelected;
+    document["ssh_terminal_open"] = webSshTerminalOpen && webSshClient.isOpen();
+    JsonArray sshProfileItems = document["ssh_profiles"].to<JsonArray>();
+    for (const auto& item : sshProfiles) {
+        JsonObject profileItem = sshProfileItems.add<JsonObject>();
+        profileItem["name"] = item.name;
+        profileItem["host"] = item.host;
+        profileItem["port"] = item.port;
+        profileItem["username"] = item.username;
+        profileItem["auth_mode"] = item.authMode == SshAuthMode::PrivateKey ? "key" : "password";
+    }
     document["ssh_key_installed"] = sshPrivateKeyIsInstalled();
     document["ssh_configured"] = sshProfileIsComplete(sshProfile);
     JsonArray chats = document["chats"].to<JsonArray>();
@@ -931,12 +976,14 @@ void handleSshSettings()
         sendJsonError(400, "SSH port must be between 1 and 65535");
         return;
     }
-    SshProfile profile;
-    const OperationResult loaded = loadSshProfile(profile);
+    const bool create = server.arg("create") == "1";
+    SshProfile profile = {"", "", 22, "", "", SshAuthMode::Password, ""};
+    const OperationResult loaded = create ? OperationResult{true, ""} : loadSshProfile(profile);
     if (!loaded.success) {
         sendJsonError(500, loaded.error);
         return;
     }
+    profile.name = server.arg("name");
     profile.host = server.arg("host");
     profile.port = static_cast<std::uint16_t>(port);
     profile.username = server.arg("username");
@@ -955,7 +1002,15 @@ void handleSshSettings()
     if (server.arg("replace_key_passphrase") == "1") {
         profile.privateKeyPassphrase = server.arg("key_passphrase");
     }
-    const OperationResult saved = saveSshProfile(profile);
+    OperationResult saved;
+    if (create) {
+        std::vector<SshProfile> profiles;
+        std::size_t selectedIndex = 0;
+        saved = loadSshProfiles(profiles, selectedIndex);
+        if (saved.success) saved = saveSshProfileAt(profile, profiles.size());
+    } else {
+        saved = saveSshProfile(profile);
+    }
     profile.password = "";
     profile.privateKeyPassphrase = "";
     if (!saved.success) {
@@ -963,6 +1018,276 @@ void handleSshSettings()
         return;
     }
     consoleStatus = "SSH profile saved";
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleSshSelect()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    std::uint32_t index = 0;
+    if (!parseUnsignedArgument(server.arg("index"), index)) {
+        sendJsonError(400, "SSH profile index must be an unsigned integer");
+        return;
+    }
+    const OperationResult result = selectSshProfile(index);
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleSshDelete()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    std::uint32_t index = 0;
+    if (!parseUnsignedArgument(server.arg("index"), index)) {
+        sendJsonError(400, "SSH profile index must be an unsigned integer");
+        return;
+    }
+    const OperationResult result = deleteSshProfile(index);
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+OperationResult finishWebSshStart()
+{
+    OperationResult result = webSshClient.authenticate(webSshProfile, 60000);
+    if (result.success) result = webSshClient.openTerminal(120, 36, 30000);
+    if (!result.success) {
+        webSshClient.close();
+        webSshProfile.password = "";
+        webSshProfile.privateKeyPassphrase = "";
+        webSshTerminalOpen = false;
+        return result;
+    }
+    webSshAwaitingTrust = false;
+    webSshTerminalOpen = true;
+    return {true, ""};
+}
+
+void handleSshStart()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    webSshClient.close();
+    webSshTerminalOpen = false;
+    webSshAwaitingTrust = false;
+    const OperationResult loaded = loadSshProfile(webSshProfile);
+    if (!loaded.success || !sshProfileIsComplete(webSshProfile)) {
+        sendJsonError(400, loaded.success ? String("Selected SSH profile is incomplete") : loaded.error);
+        return;
+    }
+    OperationResult result = webSshClient.connect(webSshProfile, 60000);
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
+    const SshTrustResult trust = checkTrustedSshHost(
+        webSshProfile.host, webSshProfile.port, webSshClient.fingerprint());
+    if (!trust.success) {
+        webSshClient.close();
+        sendJsonError(500, trust.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    if (!trust.found || !trust.matches) {
+        webSshAwaitingTrust = true;
+        document["trust_required"] = true;
+        document["changed"] = trust.found && !trust.matches;
+        document["host"] = webSshProfile.host;
+        document["port"] = webSshProfile.port;
+        document["key_type"] = webSshClient.hostKeyType();
+        document["fingerprint"] = webSshClient.fingerprint();
+        document["open"] = false;
+        sendJson(200, document);
+        return;
+    }
+    result = finishWebSshStart();
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
+    document["open"] = true;
+    sendJson(200, document);
+}
+
+void handleSshTrust()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    if (!webSshAwaitingTrust || server.arg("fingerprint") != webSshClient.fingerprint()) {
+        sendJsonError(409, "SSH trust request does not match the pending connection");
+        return;
+    }
+    OperationResult result = trustSshHost(webSshProfile.host, webSshProfile.port,
+                                          webSshClient.fingerprint());
+    if (result.success) result = finishWebSshStart();
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["open"] = true;
+    sendJson(200, document);
+}
+
+void handleSshInput()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const String data = server.arg("data");
+    if (!webSshTerminalOpen || !webSshClient.isOpen() || data.isEmpty() || data.length() > 512) {
+        sendJsonError(409, "SSH terminal is closed or input is outside the 1-512 byte limit");
+        return;
+    }
+    const OperationResult result = webSshClient.write(
+        reinterpret_cast<const std::uint8_t*>(data.c_str()), data.length(), 5000);
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleSshOutput()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    std::uint8_t buffer[2048] = {};
+    const int readBytes = webSshTerminalOpen ? webSshClient.read(buffer, sizeof(buffer)) : 0;
+    if (readBytes < 0) {
+        webSshClient.close();
+        webSshTerminalOpen = false;
+        sendJsonError(502, "SSH terminal read failed with code " + String(readBytes));
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    const bool open = webSshTerminalOpen && webSshClient.isOpen();
+    document["open"] = open;
+    if (readBytes > 0) {
+        document["output"] = String(reinterpret_cast<const char*>(buffer), readBytes);
+    }
+    if (!open) {
+        webSshClient.close();
+        webSshTerminalOpen = false;
+        webSshProfile.password = "";
+        webSshProfile.privateKeyPassphrase = "";
+    }
+    sendJson(200, document);
+}
+
+void handleSshStop()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    webSshClient.close();
+    webSshTerminalOpen = false;
+    webSshAwaitingTrust = false;
+    webSshProfile.password = "";
+    webSshProfile.privateKeyPassphrase = "";
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+OperationResult ensureWebSftp()
+{
+    if (!webSshTerminalOpen || !webSshClient.isOpen()) {
+        return {false, "Connect the SSH terminal before using SFTP"};
+    }
+    return webSshClient.openSftp(30000);
+}
+
+void handleSftpList()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const OperationResult opened = ensureWebSftp();
+    if (!opened.success) {
+        sendJsonError(409, opened.error);
+        return;
+    }
+    const SftpEntriesResult result = webSshClient.listSftpDirectory(server.arg("path"), 30000);
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    JsonArray entries = document["entries"].to<JsonArray>();
+    for (const auto& entry : result.entries) {
+        JsonObject item = entries.add<JsonObject>();
+        item["name"] = entry.name;
+        item["directory"] = entry.directory;
+        item["size"] = entry.size;
+    }
+    sendJson(200, document);
+}
+
+void handleSftpDownload()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    OperationResult result = ensureWebSftp();
+    if (result.success) result = webSshClient.downloadSftpFile(
+        server.arg("path"), server.arg("name"), 60000);
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleSftpUpload()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    OperationResult result = ensureWebSftp();
+    if (result.success) result = webSshClient.uploadSftpFile(
+        server.arg("name"), server.arg("path"), 60000);
+    if (!result.success) {
+        sendJsonError(502, result.error);
+        return;
+    }
     JsonDocument document;
     document["ok"] = true;
     sendJson(200, document);
@@ -1329,6 +1654,16 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/chat/delete", HTTP_POST, handleDeleteChat);
         server.on("/api/settings", HTTP_POST, handleSettings);
         server.on("/api/ssh/settings", HTTP_POST, handleSshSettings);
+        server.on("/api/ssh/select", HTTP_POST, handleSshSelect);
+        server.on("/api/ssh/delete", HTTP_POST, handleSshDelete);
+        server.on("/api/ssh/start", HTTP_POST, handleSshStart);
+        server.on("/api/ssh/trust", HTTP_POST, handleSshTrust);
+        server.on("/api/ssh/input", HTTP_POST, handleSshInput);
+        server.on("/api/ssh/output", HTTP_GET, handleSshOutput);
+        server.on("/api/ssh/stop", HTTP_POST, handleSshStop);
+        server.on("/api/ssh/sftp/list", HTTP_GET, handleSftpList);
+        server.on("/api/ssh/sftp/download", HTTP_POST, handleSftpDownload);
+        server.on("/api/ssh/sftp/upload", HTTP_POST, handleSftpUpload);
         server.on("/api/ssh/key", HTTP_POST,
                   handleSshKeyUploadComplete, handleSshKeyUploadData);
         server.on("/api/file", HTTP_GET, handleFileRead);

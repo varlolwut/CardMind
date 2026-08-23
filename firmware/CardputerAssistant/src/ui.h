@@ -91,6 +91,9 @@ void showFilenameEntry(const String& title,
                        const std::string& input,
                        const String& status);
 void showPasswordEntry(const String& ssid, std::size_t passwordLength, const String& status);
+void showSecretEntry(const String& title, const String& label,
+                     std::size_t secretLength, const String& status,
+                     const String& footer);
 void showBusyScreen(const String& title, const String& message);
 void showConfirmation(const String& title, const String& message, const String& footer);
 void showVoiceRecording(std::uint32_t elapsedMs,

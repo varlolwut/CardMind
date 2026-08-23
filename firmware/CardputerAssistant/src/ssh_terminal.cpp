@@ -80,9 +80,24 @@ std::vector<std::string> sshTerminalVisibleLines(const SshTerminalText& terminal
                                                  std::size_t columns,
                                                  std::size_t rows)
 {
+    return sshTerminalLinesFromBottom(terminal, columns, rows, 0);
+}
+
+std::vector<std::string> sshTerminalLinesFromBottom(const SshTerminalText& terminal,
+                                                    std::size_t columns,
+                                                    std::size_t rows,
+                                                    std::size_t lineOffset)
+{
     std::vector<std::string> lines = wrapUtf8Text(terminal.text, columns);
-    if (lines.size() > rows) {
-        lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(rows));
+    const std::size_t boundedOffset = std::min(
+        lineOffset, lines.size() > rows ? lines.size() - rows : 0);
+    const std::size_t end = lines.size() - boundedOffset;
+    const std::size_t begin = end > rows ? end - rows : 0;
+    if (end < lines.size()) {
+        lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(end), lines.end());
+    }
+    if (begin > 0) {
+        lines.erase(lines.begin(), lines.begin() + static_cast<std::ptrdiff_t>(begin));
     }
     while (lines.size() < rows) {
         lines.insert(lines.begin(), "");
