@@ -48,6 +48,11 @@ std::uint32_t loginLockedUntil = 0;
 std::size_t loginFailures = 0;
 bool exitRequested = false;
 bool routesConfigured = false;
+File uploadFile;
+String uploadName;
+String uploadError;
+std::size_t uploadBytes = 0;
+bool uploadCreated = false;
 
 bool parseUnsignedArgument(const String& value, std::uint32_t& result)
 {
@@ -79,6 +84,18 @@ void clearConsoleSecrets()
     consoleSettings.sttApiKey = "";
     consoleSettings.webSearchApiKey = "";
     consoleSettings.ttsApiKey = "";
+}
+
+void failUpload(const String& error)
+{
+    if (uploadFile) {
+        uploadFile.close();
+    }
+    if (uploadCreated && !uploadName.isEmpty()) {
+        SD.remove(workspaceFilePath(uploadName));
+    }
+    uploadCreated = false;
+    uploadError = error;
 }
 
 String htmlEscape(const String& value)
@@ -267,6 +284,7 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 <section class="card"><h2>Connection</h2><label>OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180">
 <label>Model</label><input id="model" maxlength="120"><button id="saveSettings">Save non-secret settings</button><small>API keys remain write-only and are never sent to this page.</small></section>
 <section class="card"><h2>microSD files</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button id="downloadFile">Download</button></div>
+<div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.csv,.html,.svg"><button id="uploadFile">Upload new file</button></div>
 <textarea class="file-editor" id="fileContent" maxlength="12288" placeholder="Select a workspace file"></textarea><p id="filePosition"></p>
 <div class="row"><button id="previousFilePage">Previous</button><button id="nextFilePage">Next</button><button id="saveFile">Save chunk</button></div>
 <div class="row"><button id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></section></main>
@@ -293,6 +311,7 @@ q('#openFile').onclick=()=>openFile(0,false);q('#nextFilePage').onclick=()=>{if(
 q('#previousFilePage').onclick=()=>{if(fileBack.length)openFile(fileBack.pop(),false)};
 q('#saveFile').onclick=async()=>{if(!fileName)return;await post('/api/file/save',{name:fileName,offset:String(fileOffset),original_bytes:String(fileOriginalBytes),content:q('#fileContent').value});await refresh();await openFile(fileOffset,false)};
 q('#downloadFile').onclick=()=>{const name=q('#files').value;if(name)location=`/api/file/download?name=${encodeURIComponent(name)}`};
+q('#uploadFile').onclick=async()=>{const file=q('#uploadInput').files[0];if(!file)return;const data=new FormData();data.append('file',file,file.name);await request('/api/file/upload',{method:'POST',body:data});q('#uploadInput').value='';await refresh()};
 q('#renameFile').onclick=async()=>{const name=q('#files').value,newName=prompt('New filename',name);if(newName&&newName!==name){await post('/api/file/rename',{name,new_name:newName});fileName='';await refresh()}};
 q('#deleteFile').onclick=async()=>{const name=q('#files').value;if(name&&confirm(`Delete ${name}?`)){await post('/api/file/delete',{name});fileName='';q('#fileContent').value='';q('#filePosition').textContent='';await refresh()}};
 q('#send').onclick=async()=>{const prompt=q('#prompt').value.trim();if(!prompt)return;q('#send').disabled=true;q('#status').textContent='Streaming...';
@@ -787,6 +806,84 @@ void handleFileDownload()
     file.close();
 }
 
+void handleFileUploadData()
+{
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        uploadName = upload.filename;
+        uploadError = "";
+        uploadBytes = 0;
+        uploadCreated = false;
+        if (!requestHasValidCsrf()) {
+            uploadError = "Authentication required";
+            return;
+        }
+        const OperationResult created = createWorkspaceFile(uploadName);
+        if (!created.success) {
+            uploadError = created.error;
+            return;
+        }
+        uploadCreated = true;
+        uploadFile = SD.open(workspaceFilePath(uploadName), FILE_APPEND);
+        if (!uploadFile) {
+            failUpload("Failed to open the new workspace file for upload");
+        }
+        return;
+    }
+    if (upload.status == UPLOAD_FILE_WRITE) {
+        if (!uploadError.isEmpty()) {
+            return;
+        }
+        if (!uploadFile || upload.currentSize > kMaximumWorkspaceFileBytes - uploadBytes) {
+            failUpload("Uploaded file exceeds the 491520-byte size limit");
+            return;
+        }
+        const std::size_t written = uploadFile.write(upload.buf, upload.currentSize);
+        if (written != upload.currentSize) {
+            failUpload("microSD did not accept the complete upload chunk");
+            return;
+        }
+        uploadBytes += written;
+        return;
+    }
+    if (upload.status == UPLOAD_FILE_END) {
+        if (!uploadError.isEmpty()) {
+            return;
+        }
+        uploadFile.flush();
+        uploadFile.close();
+        const OperationResult valid = validateWorkspaceFileUtf8(uploadName);
+        if (!valid.success) {
+            failUpload(valid.error);
+            return;
+        }
+        uploadCreated = false;
+        return;
+    }
+    if (upload.status == UPLOAD_FILE_ABORTED) {
+        failUpload("File upload was aborted before completion");
+    }
+}
+
+void handleFileUploadComplete()
+{
+    if (!requestHasValidCsrf()) {
+        failUpload("Authentication required");
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    if (!uploadError.isEmpty()) {
+        sendJsonError(400, uploadError);
+        return;
+    }
+    consoleStatus = "File uploaded";
+    JsonDocument document;
+    document["ok"] = true;
+    document["name"] = uploadName;
+    document["bytes"] = uploadBytes;
+    sendJson(200, document);
+}
+
 void updateConsoleSerial()
 {
     while (Serial.available() > 0) {
@@ -873,6 +970,8 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/file/rename", HTTP_POST, handleFileRename);
         server.on("/api/file/delete", HTTP_POST, handleFileDelete);
         server.on("/api/file/download", HTTP_GET, handleFileDownload);
+        server.on("/api/file/upload", HTTP_POST,
+                  handleFileUploadComplete, handleFileUploadData);
         server.onNotFound([]() { sendJsonError(404, "Not found"); });
         routesConfigured = true;
     }
