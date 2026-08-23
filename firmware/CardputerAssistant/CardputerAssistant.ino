@@ -9,6 +9,7 @@
 #include "src/api_client.h"
 #include "src/app_types.h"
 #include "src/audio_utils.h"
+#include "src/backup_manager.h"
 #include "src/chat_storage.h"
 #include "src/crash_journal.h"
 #include "src/document_reader.h"
@@ -52,6 +53,7 @@ enum class Screen {
     MainCarousel,
     VoiceMenu,
     DeviceMenu,
+    RestoreBackupConfirm,
     FilesMenu,
     WorkspaceFileList,
     FileActions,
@@ -489,6 +491,10 @@ void render()
         return;
     case Screen::DeviceMenu:
         renderDeviceMenu();
+        return;
+    case Screen::RestoreBackupConfirm:
+        cardputer::showConfirmation("RESTORE BACKUP", "Replace chats and non-secret settings?",
+                                    "ENTER restore  ESC cancel");
         return;
     case Screen::FilesMenu:
         renderFilesMenu();
@@ -972,6 +978,31 @@ void runDeviceSettingsTest()
                   result.success ? "none" : result.error.c_str());
 }
 
+void runBackupTest()
+{
+    cardputer::OperationResult result = saveCurrentChat();
+    if (result.success) {
+        result = cardputer::createLocalBackup(settings, activeChatId);
+    }
+    String summary;
+    if (result.success) {
+        result = cardputer::localBackupSummary(summary);
+    }
+    String restoredId;
+    if (result.success) {
+        result = cardputer::restoreLocalBackup(settings, restoredId);
+    }
+    if (result.success) {
+        result = refreshChatList();
+    }
+    if (result.success) {
+        result = activateChat(restoredId);
+    }
+    Serial.printf("BACKUPTEST result=%s error=%s\n",
+                  result.success ? "pass" : "failed",
+                  result.success ? "none" : result.error.c_str());
+}
+
 void runToolApiTest()
 {
     ensureNetworkReady();
@@ -1041,6 +1072,10 @@ void handleSerialCommand(const String& command)
     }
     if (command == "DEVICESETTINGSTEST") {
         runDeviceSettingsTest();
+        return;
+    }
+    if (command == "BACKUPTEST") {
+        runBackupTest();
         return;
     }
     if (command == "SSHCHECK") {
@@ -1796,6 +1831,9 @@ std::vector<String> deviceMenuItems()
         "Keyboard repeat: " + keyboardRepeatSettingLabel(settings.keyboardRepeatMs),
         "Power: " + powerProfileLabel(settings.powerProfile),
         "Speaker volume: " + String(volumePercent) + "%",
+        "Create local backup",
+        "Restore local backup...",
+        "Backup information",
         "API and services setup",
         "Web console",
         "SSH terminal",
@@ -3155,6 +3193,37 @@ void handleKeyboard()
         return;
     }
 
+    if (currentScreen == Screen::RestoreBackupConfirm) {
+        if (cancelPressed) {
+            currentScreen = Screen::DeviceMenu;
+            menuStatus = "Restore canceled";
+            renderDeviceMenu();
+        } else if (enterPressed) {
+            cardputer::showBusyScreen("RESTORE BACKUP", "Validating and restoring...");
+            cardputer::markOperation("backup_restore");
+            String restoredActiveChatId;
+            cardputer::OperationResult result = cardputer::restoreLocalBackup(
+                settings, restoredActiveChatId);
+            if (result.success) {
+                result = refreshChatList();
+            }
+            if (result.success) {
+                result = activateChat(restoredActiveChatId);
+            }
+            if (result.success) {
+                result = applyDisplayAndCpuSettings(settings);
+            }
+            if (result.success) {
+                result = applyWifiPowerSetting(settings);
+            }
+            cardputer::markOperation("idle");
+            menuStatus = result.success ? String("Backup restored") : result.error;
+            currentScreen = Screen::DeviceMenu;
+            renderDeviceMenu();
+        }
+        return;
+    }
+
     if (currentScreen == Screen::VoiceMenu) {
         const std::size_t itemCount = voiceMenuItems().size();
         if (cancelPressed) {
@@ -3267,20 +3336,38 @@ void handleKeyboard()
                     : result.error;
                 renderDeviceMenu();
             } else if (deviceMenuIndex == 5) {
+                cardputer::OperationResult result = saveCurrentChat();
+                if (result.success) {
+                    cardputer::showBusyScreen("BACKUP", "Copying chats and metadata...");
+                    cardputer::markOperation("backup_create");
+                    result = cardputer::createLocalBackup(settings, activeChatId);
+                    cardputer::markOperation("idle");
+                }
+                menuStatus = result.success ? String("Local backup updated") : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 6) {
+                currentScreen = Screen::RestoreBackupConfirm;
+                render();
+            } else if (deviceMenuIndex == 7) {
+                String summary;
+                const cardputer::OperationResult result = cardputer::localBackupSummary(summary);
+                menuStatus = result.success ? summary : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 8) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
                 cardputer::markOperation("idle");
                 const cardputer::OperationResult result = applyDisplayAndCpuSettings(settings);
                 menuStatus = result.success ? String("Settings portal closed") : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 6) {
+            } else if (deviceMenuIndex == 9) {
                 openWebConsole();
-            } else if (deviceMenuIndex == 7) {
+            } else if (deviceMenuIndex == 10) {
                 const cardputer::OperationResult result = runSshTerminal();
                 menuStatus = result.error;
                 currentScreen = Screen::DeviceMenu;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 8) {
+            } else if (deviceMenuIndex == 11) {
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
                 renderDiagnostics();
