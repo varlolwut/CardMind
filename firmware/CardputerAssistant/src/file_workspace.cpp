@@ -592,12 +592,65 @@ OperationResult createWorkspaceFile(const String& name)
     if (SD.exists(path)) {
         return {false, "Workspace file already exists: " + name};
     }
+    const WorkspaceFilesResult existing = listWorkspaceFiles();
+    if (!existing.success) {
+        return {false, existing.error};
+    }
+    if (existing.files.size() >= kMaximumWorkspaceFiles) {
+        return {false, "Workspace already contains the maximum of 40 files"};
+    }
     File file = SD.open(path, FILE_WRITE);
     if (!file) {
         return {false, "Failed to create workspace file: " + name};
     }
     file.close();
     return {true, ""};
+}
+
+OperationResult validateWorkspaceFileUtf8(const String& name)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, "Invalid workspace filename"};
+    }
+    File file = SD.open(workspaceFilePath(name), FILE_READ);
+    if (!file) {
+        return {false, "Workspace file does not exist: " + name};
+    }
+    if (file.size() > kMaximumWorkspaceFileBytes) {
+        file.close();
+        return {false, "Workspace file exceeds the 491520-byte size limit"};
+    }
+    constexpr std::size_t blockBytes = 4096;
+    std::vector<std::uint8_t> block(blockBytes);
+    std::string pending;
+    while (file.available()) {
+        const std::size_t readBytes = file.read(block.data(), block.size());
+        if (readBytes == 0) {
+            file.close();
+            return {false, "microSD read stopped while validating UTF-8"};
+        }
+        pending.append(reinterpret_cast<const char*>(block.data()), readBytes);
+        if (!file.available()) {
+            break;
+        }
+        bool prefixValid = false;
+        for (std::size_t retained = 0; retained <= 3 && retained <= pending.size(); ++retained) {
+            const std::size_t prefixBytes = pending.size() - retained;
+            if (isValidUtf8(pending.substr(0, prefixBytes))) {
+                pending = pending.substr(prefixBytes);
+                prefixValid = true;
+                break;
+            }
+        }
+        if (!prefixValid) {
+            file.close();
+            return {false, "Workspace file contains invalid UTF-8"};
+        }
+    }
+    file.close();
+    return isValidUtf8(pending)
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Workspace file contains incomplete or invalid UTF-8"};
 }
 
 OperationResult replaceWorkspaceFileRange(const String& name,

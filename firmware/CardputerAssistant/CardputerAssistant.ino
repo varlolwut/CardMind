@@ -739,6 +739,9 @@ void runFileWorkspaceEditTest()
                            read.totalBytes != cardputer::kMaximumWorkspaceFileBytes)) {
         result = {false, "Workspace editor content verification failed"};
     }
+    if (result.success) {
+        result = cardputer::validateWorkspaceFileUtf8(sourceName);
+    }
     const cardputer::WorkspaceFindResult found = result.success
         ? cardputer::findWorkspaceText(sourceName, replacement, 0)
         : cardputer::WorkspaceFindResult{false, false, 0, result.error};
@@ -1345,7 +1348,7 @@ std::vector<String> filesMenuItems()
 {
     return {
         "Browse SD workspace",
-        "Download portal (restart)",
+        "Web file manager",
         "Back to carousel",
     };
 }
@@ -2433,8 +2436,7 @@ void handleKeyboard()
             if (filesMenuIndex == 0) {
                 openWorkspaceFileList();
             } else if (filesMenuIndex == 1) {
-                cardputer::markOperation("file_portal");
-                cardputer::runFilePortal();
+                openWebConsole();
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";

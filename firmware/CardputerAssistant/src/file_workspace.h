@@ -20,6 +20,7 @@ WorkspaceBookmarkResult loadWorkspaceBookmark(const String& name);
 OperationResult saveWorkspaceBookmark(const String& name, std::uint32_t offset);
 OperationResult clearWorkspaceBookmark(const String& name);
 OperationResult createWorkspaceFile(const String& name);
+OperationResult validateWorkspaceFileUtf8(const String& name);
 OperationResult replaceWorkspaceFileRange(const String& name,
                                           std::uint32_t offset,
                                           std::uint32_t originalBytes,
