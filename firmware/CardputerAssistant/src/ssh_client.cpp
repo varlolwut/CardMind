@@ -1,6 +1,9 @@
 #include "ssh_client.h"
 
+#include "file_workspace.h"
+
 #include <libssh2.h>
+#include <libssh2_sftp.h>
 #define public public_key
 #include <libssh2_priv.h>
 #undef public
@@ -76,6 +79,122 @@ bool isValidSshUsername(const String& username)
            username.indexOf('\r') < 0 && username.indexOf('\n') < 0;
 }
 
+bool isValidSshProfileName(const String& name)
+{
+    return !name.isEmpty() && name.length() <= 32 &&
+           name.indexOf('\r') < 0 && name.indexOf('\n') < 0;
+}
+
+OperationResult validateSshProfile(const SshProfile& profile)
+{
+    if (!isValidSshProfileName(profile.name)) {
+        return {false, "SSH profile name must contain 1 to 32 characters"};
+    }
+    if (!isValidSshHost(profile.host)) {
+        return {false, "SSH host must contain 1 to 253 characters without whitespace"};
+    }
+    if (profile.port == 0) {
+        return {false, "SSH port must be between 1 and 65535"};
+    }
+    if (!isValidSshUsername(profile.username)) {
+        return {false, "SSH username must contain 1 to 64 characters"};
+    }
+    if (profile.password.length() > 192 || profile.privateKeyPassphrase.length() > 192) {
+        return {false, "SSH password and key passphrase must not exceed 192 characters"};
+    }
+    if (profile.authMode == SshAuthMode::Password && profile.password.isEmpty()) {
+        return {false, "SSH password authentication requires a password"};
+    }
+    if (profile.authMode == SshAuthMode::PrivateKey && !sshPrivateKeyIsInstalled()) {
+        return {false, "SSH private-key authentication requires an installed key"};
+    }
+    return {true, ""};
+}
+
+SshProfile readIndexedProfile(Preferences& preferences, std::size_t index)
+{
+    const String suffix(index);
+    return {
+        preferences.getString((String("n") + suffix).c_str(), ""),
+        preferences.getString((String("h") + suffix).c_str(), ""),
+        preferences.getUShort((String("p") + suffix).c_str(), 22),
+        preferences.getString((String("u") + suffix).c_str(), ""),
+        preferences.getString((String("w") + suffix).c_str(), ""),
+        preferences.getUChar((String("a") + suffix).c_str(), 0) == 1
+            ? SshAuthMode::PrivateKey : SshAuthMode::Password,
+        preferences.getString((String("k") + suffix).c_str(), ""),
+    };
+}
+
+bool writeIndexedProfile(Preferences& preferences, const SshProfile& profile,
+                         std::size_t index)
+{
+    const String suffix(index);
+    return preferences.putString((String("n") + suffix).c_str(), profile.name) == profile.name.length() &&
+           preferences.putString((String("h") + suffix).c_str(), profile.host) == profile.host.length() &&
+           preferences.putUShort((String("p") + suffix).c_str(), profile.port) == sizeof(std::uint16_t) &&
+           preferences.putString((String("u") + suffix).c_str(), profile.username) == profile.username.length() &&
+           preferences.putString((String("w") + suffix).c_str(), profile.password) == profile.password.length() &&
+           preferences.putUChar((String("a") + suffix).c_str(),
+                                profile.authMode == SshAuthMode::PrivateKey ? 1 : 0) == sizeof(std::uint8_t) &&
+           preferences.putString((String("k") + suffix).c_str(), profile.privateKeyPassphrase) ==
+               profile.privateKeyPassphrase.length();
+}
+
+void removeIndexedProfile(Preferences& preferences, std::size_t index)
+{
+    const String suffix(index);
+    preferences.remove((String("n") + suffix).c_str());
+    preferences.remove((String("h") + suffix).c_str());
+    preferences.remove((String("p") + suffix).c_str());
+    preferences.remove((String("u") + suffix).c_str());
+    preferences.remove((String("w") + suffix).c_str());
+    preferences.remove((String("a") + suffix).c_str());
+    preferences.remove((String("k") + suffix).c_str());
+}
+
+OperationResult writeProfiles(const std::vector<SshProfile>& profiles,
+                              std::size_t selectedIndex)
+{
+    if (profiles.size() > kMaximumSshProfiles ||
+        (!profiles.empty() && selectedIndex >= profiles.size())) {
+        return {false, "SSH profile collection is invalid"};
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {false, "Failed to open SSH settings in NVS for writing"};
+    }
+    bool written = true;
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        written = writeIndexedProfile(preferences, profiles[index], index) && written;
+    }
+    for (std::size_t index = profiles.size(); index < kMaximumSshProfiles; ++index) {
+        removeIndexedProfile(preferences, index);
+    }
+    written = preferences.putUChar("cnt", static_cast<std::uint8_t>(profiles.size())) ==
+                  sizeof(std::uint8_t) && written;
+    written = preferences.putUChar("sel", profiles.empty() ? 0 :
+                  static_cast<std::uint8_t>(selectedIndex)) == sizeof(std::uint8_t) && written;
+    preferences.remove("host");
+    preferences.remove("port");
+    preferences.remove("user");
+    preferences.remove("password");
+    preferences.remove("auth_mode");
+    preferences.remove("key_pass");
+    preferences.end();
+    if (!written) {
+        return {false, "Failed to write the complete SSH profile collection to NVS"};
+    }
+    std::vector<SshProfile> verified;
+    std::size_t verifiedSelected = 0;
+    const OperationResult loaded = loadSshProfiles(verified, verifiedSelected);
+    if (!loaded.success || verified.size() != profiles.size() ||
+        (!profiles.empty() && verifiedSelected != selectedIndex)) {
+        return {false, "Failed to verify SSH profiles after NVS write"};
+    }
+    return {true, ""};
+}
+
 bool isValidSshFingerprint(const String& fingerprint)
 {
     if (fingerprint.length() != 95) {
@@ -96,6 +215,12 @@ bool isValidSshFingerprint(const String& fingerprint)
 String knownHostPrefix(const String& host, std::uint16_t port)
 {
     return host + "\t" + String(port) + "\t";
+}
+
+bool isValidRemotePath(const String& path)
+{
+    return !path.isEmpty() && path.length() <= 511 && path[0] == '/' &&
+           path.indexOf('\r') < 0 && path.indexOf('\n') < 0;
 }
 
 OperationResult ensureSshDirectory()
@@ -185,15 +310,57 @@ int runUntilComplete(Attempt attempt, std::uint32_t timeoutMs)
     return result == LIBSSH2_ERROR_EAGAIN ? LIBSSH2_ERROR_TIMEOUT : result;
 }
 
+void closeSftpHandle(LIBSSH2_SFTP_HANDLE* handle)
+{
+    if (handle == nullptr) return;
+    runUntilComplete([handle]() { return libssh2_sftp_close_handle(handle); }, 5000);
+}
+
 }  // namespace
 
 OperationResult loadSshProfile(SshProfile& profile)
 {
+    std::vector<SshProfile> profiles;
+    std::size_t selectedIndex = 0;
+    const OperationResult result = loadSshProfiles(profiles, selectedIndex);
+    if (!result.success) {
+        return result;
+    }
+    if (profiles.empty()) {
+        profile = {"", "", 22, "", "", SshAuthMode::Password, ""};
+        return {true, ""};
+    }
+    profile = profiles[selectedIndex];
+    return {true, ""};
+}
+
+OperationResult loadSshProfiles(std::vector<SshProfile>& profiles,
+                                std::size_t& selectedIndex)
+{
     Preferences preferences;
-    if (!preferences.begin(kSshNamespace, true)) {
+    if (!preferences.begin(kSshNamespace, false)) {
         return {false, "Failed to open SSH settings in NVS"};
     }
-    const SshProfile loaded = {
+    const std::size_t count = preferences.getUChar("cnt", 0);
+    if (count > kMaximumSshProfiles) {
+        preferences.end();
+        return {false, "Stored SSH profile count exceeds the supported limit"};
+    }
+    std::vector<SshProfile> loaded;
+    loaded.reserve(count == 0 ? 1 : count);
+    for (std::size_t index = 0; index < count; ++index) {
+        SshProfile item = readIndexedProfile(preferences, index);
+        if (!isValidSshProfileName(item.name) || !isValidSshHost(item.host) ||
+            item.port == 0 || !isValidSshUsername(item.username)) {
+            preferences.end();
+            return {false, "Stored SSH profile " + String(index + 1) + " is invalid"};
+        }
+        loaded.push_back(std::move(item));
+    }
+    std::size_t selected = count == 0 ? 0 : preferences.getUChar("sel", 0);
+    if (count == 0) {
+        const SshProfile legacy = {
+        preferences.getString("host", ""),
         preferences.getString("host", ""),
         preferences.getUShort("port", 22),
         preferences.getString("user", ""),
@@ -201,53 +368,95 @@ OperationResult loadSshProfile(SshProfile& profile)
         preferences.getUChar("auth_mode", 0) == 1
             ? SshAuthMode::PrivateKey : SshAuthMode::Password,
         preferences.getString("key_pass", ""),
-    };
+        };
+        if (!legacy.host.isEmpty()) {
+            SshProfile migrated = legacy;
+            migrated.name = legacy.host.substring(0, 32);
+            loaded.push_back(std::move(migrated));
+        }
+    } else if (selected >= count) {
+        preferences.end();
+        return {false, "Stored selected SSH profile index is invalid"};
+    }
     preferences.end();
-    profile = loaded;
+    profiles = std::move(loaded);
+    selectedIndex = selected;
     return {true, ""};
 }
 
 OperationResult saveSshProfile(const SshProfile& profile)
 {
-    if (!isValidSshHost(profile.host)) {
-        return {false, "SSH host must contain 1 to 253 characters without whitespace"};
+    std::vector<SshProfile> profiles;
+    std::size_t selectedIndex = 0;
+    const OperationResult loaded = loadSshProfiles(profiles, selectedIndex);
+    if (!loaded.success) {
+        return loaded;
     }
-    if (profile.port == 0) {
-        return {false, "SSH port must be between 1 and 65535"};
+    SshProfile named = profile;
+    if (named.name.isEmpty()) {
+        named.name = named.host.substring(0, 32);
     }
-    if (!isValidSshUsername(profile.username)) {
-        return {false, "SSH username must contain 1 to 64 characters"};
-    }
-    if (profile.password.length() > 192 || profile.privateKeyPassphrase.length() > 192) {
-        return {false, "SSH password and key passphrase must not exceed 192 characters"};
-    }
-    if (profile.authMode == SshAuthMode::Password && profile.password.isEmpty()) {
-        return {false, "SSH password authentication requires a password"};
-    }
-    if (profile.authMode == SshAuthMode::PrivateKey && !sshPrivateKeyIsInstalled()) {
-        return {false, "SSH private-key authentication requires an installed key"};
-    }
+    return saveSshProfileAt(named, profiles.empty() ? 0 : selectedIndex);
+}
 
-    Preferences preferences;
-    if (!preferences.begin(kSshNamespace, false)) {
-        return {false, "Failed to open SSH settings in NVS for writing"};
+OperationResult saveSshProfileAt(const SshProfile& profile, std::size_t index)
+{
+    const OperationResult valid = validateSshProfile(profile);
+    if (!valid.success) {
+        return valid;
     }
-    preferences.putString("host", profile.host);
-    preferences.putUShort("port", profile.port);
-    preferences.putString("user", profile.username);
-    preferences.putString("password", profile.password);
-    preferences.putUChar("auth_mode", profile.authMode == SshAuthMode::PrivateKey ? 1 : 0);
-    preferences.putString("key_pass", profile.privateKeyPassphrase);
-    const bool verified = preferences.getString("host", "") == profile.host &&
-        preferences.getUShort("port", 0) == profile.port &&
-        preferences.getString("user", "") == profile.username &&
-        preferences.getString("password", "__missing__") == profile.password &&
-        preferences.getUChar("auth_mode", 2) ==
-            (profile.authMode == SshAuthMode::PrivateKey ? 1 : 0) &&
-        preferences.getString("key_pass", "__missing__") == profile.privateKeyPassphrase;
-    preferences.end();
-    return verified ? OperationResult{true, ""}
-                    : OperationResult{false, "Failed to verify SSH settings after NVS write"};
+    std::vector<SshProfile> profiles;
+    std::size_t selectedIndex = 0;
+    const OperationResult loaded = loadSshProfiles(profiles, selectedIndex);
+    if (!loaded.success) {
+        return loaded;
+    }
+    if (index > profiles.size() || index >= kMaximumSshProfiles) {
+        return {false, "SSH profile index is outside the supported range"};
+    }
+    if (index == profiles.size()) {
+        profiles.push_back(profile);
+        selectedIndex = index;
+    } else {
+        profiles[index] = profile;
+    }
+    return writeProfiles(profiles, selectedIndex);
+}
+
+OperationResult selectSshProfile(std::size_t index)
+{
+    std::vector<SshProfile> profiles;
+    std::size_t selectedIndex = 0;
+    const OperationResult loaded = loadSshProfiles(profiles, selectedIndex);
+    if (!loaded.success) {
+        return loaded;
+    }
+    if (index >= profiles.size()) {
+        return {false, "SSH profile selection is outside the stored range"};
+    }
+    return writeProfiles(profiles, index);
+}
+
+OperationResult deleteSshProfile(std::size_t index)
+{
+    std::vector<SshProfile> profiles;
+    std::size_t selectedIndex = 0;
+    const OperationResult loaded = loadSshProfiles(profiles, selectedIndex);
+    if (!loaded.success) {
+        return loaded;
+    }
+    if (index >= profiles.size()) {
+        return {false, "SSH profile deletion is outside the stored range"};
+    }
+    profiles.erase(profiles.begin() + static_cast<std::ptrdiff_t>(index));
+    if (profiles.empty()) {
+        selectedIndex = 0;
+    } else if (selectedIndex > index) {
+        --selectedIndex;
+    } else if (selectedIndex >= profiles.size()) {
+        selectedIndex = profiles.size() - 1;
+    }
+    return writeProfiles(profiles, selectedIndex);
 }
 
 bool sshProfileIsComplete(const SshProfile& profile)
@@ -433,6 +642,47 @@ OperationResult trustSshHost(const String& host, std::uint16_t port,
     return {true, ""};
 }
 
+OperationResult forgetTrustedSshHost(const String& host, std::uint16_t port)
+{
+    if (!isValidSshHost(host) || port == 0) {
+        return {false, "Cannot forget an invalid SSH host"};
+    }
+    File source = SD.open(kSshKnownHostsPath, FILE_READ);
+    if (!source) {
+        return {true, ""};
+    }
+    if (source.isDirectory() || source.size() > kMaximumKnownHostsBytes) {
+        source.close();
+        return {false, "SSH known-hosts file is invalid or too large"};
+    }
+    SD.remove(kSshKnownHostsTemporaryPath);
+    File output = SD.open(kSshKnownHostsTemporaryPath, FILE_WRITE);
+    if (!output) {
+        source.close();
+        return {false, "Failed to create temporary SSH known-hosts file"};
+    }
+    const String prefix = knownHostPrefix(host, port);
+    while (source.available()) {
+        String line = source.readStringUntil('\n');
+        line.trim();
+        if (!line.isEmpty() && !line.startsWith(prefix) && output.println(line) == 0) {
+            source.close();
+            output.close();
+            SD.remove(kSshKnownHostsTemporaryPath);
+            return {false, "Failed while removing an SSH trusted host"};
+        }
+    }
+    source.close();
+    output.flush();
+    output.close();
+    if (!SD.remove(kSshKnownHostsPath) ||
+        !SD.rename(kSshKnownHostsTemporaryPath, kSshKnownHostsPath)) {
+        SD.remove(kSshKnownHostsTemporaryPath);
+        return {false, "Failed to activate the updated SSH known-hosts file"};
+    }
+    return {true, ""};
+}
+
 SshRuntimeProbeResult probeSshRuntime()
 {
     const int initialization = libssh2_init(0);
@@ -582,6 +832,7 @@ struct SshClient::Implementation {
     NetworkClient network;
     LIBSSH2_SESSION* session;
     LIBSSH2_CHANNEL* channel;
+    LIBSSH2_SFTP* sftp;
     bool runtimeInitialized;
     String hostFingerprint;
     String hostKeyType;
@@ -590,6 +841,7 @@ struct SshClient::Implementation {
         : allocator{0, static_cast<std::uint32_t>(MALLOC_CAP_8BIT)},
           session(nullptr),
           channel(nullptr),
+          sftp(nullptr),
           runtimeInitialized(false)
     {
     }
@@ -798,10 +1050,312 @@ OperationResult SshClient::write(const std::uint8_t* data, std::size_t bytes,
                                  String(written) + " of " + String(bytes) + " bytes"};
 }
 
+OperationResult SshClient::openSftp(std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->session == nullptr) {
+        return {false, "SSH session is not connected"};
+    }
+    if (implementation_->sftp != nullptr) {
+        return {true, ""};
+    }
+    const std::uint32_t deadline = millis() + timeoutMs;
+    while (implementation_->sftp == nullptr &&
+           static_cast<std::int32_t>(deadline - millis()) > 0) {
+        implementation_->sftp = libssh2_sftp_init(implementation_->session);
+        if (implementation_->sftp == nullptr &&
+            libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) {
+            const int errorCode = libssh2_session_last_errno(implementation_->session);
+            return {false, sessionError(implementation_->session,
+                                        "SFTP initialization", errorCode)};
+        }
+        delay(5);
+    }
+    return implementation_->sftp != nullptr
+        ? OperationResult{true, ""}
+        : OperationResult{false, "SFTP initialization timed out"};
+}
+
+SftpEntriesResult SshClient::listSftpDirectory(const String& path,
+                                               std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr) {
+        return {false, {}, "SFTP session is not open"};
+    }
+    if (!isValidRemotePath(path)) {
+        return {false, {}, "SFTP directory path must be absolute and at most 511 bytes"};
+    }
+    LIBSSH2_SFTP_HANDLE* directory = nullptr;
+    const std::uint32_t openDeadline = millis() + timeoutMs;
+    while (directory == nullptr && static_cast<std::int32_t>(openDeadline - millis()) > 0) {
+        directory = libssh2_sftp_opendir(implementation_->sftp, path.c_str());
+        if (directory == nullptr &&
+            libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) {
+            return {false, {}, sessionError(implementation_->session,
+                                             "SFTP directory open", libssh2_session_last_errno(
+                                                 implementation_->session))};
+        }
+        delay(5);
+    }
+    if (directory == nullptr) {
+        return {false, {}, "SFTP directory open timed out"};
+    }
+    std::vector<SftpEntry> entries;
+    const std::uint32_t deadline = millis() + timeoutMs;
+    bool completed = false;
+    while (static_cast<std::int32_t>(deadline - millis()) > 0) {
+        char name[256] = {};
+        LIBSSH2_SFTP_ATTRIBUTES attributes = {};
+        const ssize_t result = libssh2_sftp_readdir_ex(
+            directory, name, sizeof(name) - 1, nullptr, 0, &attributes);
+        if (result > 0) {
+            const String entryName = String(name).substring(0, static_cast<unsigned int>(result));
+            if (entryName != "." && entryName != ".." &&
+                entryName.indexOf('/') < 0 && entryName.indexOf('\r') < 0 &&
+                entryName.indexOf('\n') < 0) {
+                const bool directoryEntry =
+                    (attributes.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0 &&
+                    LIBSSH2_SFTP_S_ISDIR(attributes.permissions);
+                entries.push_back({entryName, directoryEntry,
+                                   static_cast<std::uint64_t>(attributes.filesize)});
+            }
+            continue;
+        }
+        if (result == LIBSSH2_ERROR_EAGAIN) {
+            delay(5);
+            continue;
+        }
+        if (result < 0) {
+            closeSftpHandle(directory);
+            return {false, {}, sessionError(implementation_->session,
+                                             "SFTP directory read", static_cast<int>(result))};
+        }
+        completed = true;
+        break;
+    }
+    closeSftpHandle(directory);
+    if (!completed) {
+        return {false, {}, "SFTP directory listing timed out before end-of-list"};
+    }
+    std::sort(entries.begin(), entries.end(), [](const SftpEntry& left,
+                                                  const SftpEntry& right) {
+        if (left.directory != right.directory) {
+            return left.directory;
+        }
+        return left.name.compareTo(right.name) < 0;
+    });
+    return {true, std::move(entries), ""};
+}
+
+OperationResult SshClient::downloadSftpFile(const String& remotePath,
+                                            const String& workspaceName,
+                                            std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr) {
+        return {false, "SFTP session is not open"};
+    }
+    if (!isValidRemotePath(remotePath)) {
+        return {false, "SFTP remote file path is invalid"};
+    }
+    const String localPath = workspaceFilePath(workspaceName);
+    if (localPath.isEmpty()) {
+        return {false, "SFTP download destination filename is invalid"};
+    }
+    LIBSSH2_SFTP_HANDLE* remote = nullptr;
+    const std::uint32_t openDeadline = millis() + timeoutMs;
+    while (remote == nullptr && static_cast<std::int32_t>(openDeadline - millis()) > 0) {
+        remote = libssh2_sftp_open(implementation_->sftp, remotePath.c_str(),
+                                   LIBSSH2_FXF_READ, 0);
+        if (remote == nullptr &&
+            libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) break;
+        delay(5);
+    }
+    if (remote == nullptr) {
+        return {false, sessionError(implementation_->session, "SFTP remote file open",
+                                    libssh2_session_last_errno(implementation_->session))};
+    }
+    const String temporaryPath = localPath + ".sftp-part";
+    SD.remove(temporaryPath);
+    File local = SD.open(temporaryPath, FILE_WRITE);
+    if (!local) {
+        closeSftpHandle(remote);
+        return {false, "Failed to create the SFTP download file on microSD"};
+    }
+    std::size_t total = 0;
+    std::uint8_t buffer[1024] = {};
+    std::uint32_t deadline = millis() + timeoutMs;
+    bool completed = false;
+    while (static_cast<std::int32_t>(deadline - millis()) > 0) {
+        const ssize_t readBytes = libssh2_sftp_read(
+            remote, reinterpret_cast<char*>(buffer), sizeof(buffer));
+        if (readBytes > 0) {
+            total += static_cast<std::size_t>(readBytes);
+            if (total > kMaximumWorkspaceFileBytes ||
+                local.write(buffer, static_cast<std::size_t>(readBytes)) !=
+                    static_cast<std::size_t>(readBytes)) {
+                local.close();
+                closeSftpHandle(remote);
+                SD.remove(temporaryPath);
+                return {false, total > kMaximumWorkspaceFileBytes
+                    ? String("SFTP file exceeds the 491520-byte workspace limit")
+                    : String("microSD rejected SFTP download data")};
+            }
+            deadline = millis() + timeoutMs;
+        } else if (readBytes == LIBSSH2_ERROR_EAGAIN) {
+            delay(5);
+        } else if (readBytes == 0) {
+            completed = true;
+            break;
+        } else {
+            local.close();
+            closeSftpHandle(remote);
+            SD.remove(temporaryPath);
+            return {false, sessionError(implementation_->session, "SFTP file read",
+                                        static_cast<int>(readBytes))};
+        }
+    }
+    local.flush();
+    local.close();
+    closeSftpHandle(remote);
+    if (!completed) {
+        SD.remove(temporaryPath);
+        return {false, "SFTP download timed out before remote end-of-file"};
+    }
+    if (SD.exists(localPath) && !SD.remove(localPath)) {
+        SD.remove(temporaryPath);
+        return {false, "Failed to replace the existing workspace file"};
+    }
+    if (!SD.rename(temporaryPath, localPath)) {
+        SD.remove(temporaryPath);
+        return {false, "Failed to activate the downloaded workspace file"};
+    }
+    return {true, ""};
+}
+
+OperationResult SshClient::uploadSftpFile(const String& workspaceName,
+                                          const String& remotePath,
+                                          std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr) {
+        return {false, "SFTP session is not open"};
+    }
+    if (!isValidRemotePath(remotePath)) {
+        return {false, "SFTP remote file path is invalid"};
+    }
+    const String localPath = workspaceFilePath(workspaceName);
+    File local = SD.open(localPath, FILE_READ);
+    if (!local || local.isDirectory()) {
+        if (local) local.close();
+        return {false, "SFTP upload source could not be opened from the workspace"};
+    }
+    LIBSSH2_SFTP_HANDLE* remote = nullptr;
+    const std::uint32_t openDeadline = millis() + timeoutMs;
+    while (remote == nullptr && static_cast<std::int32_t>(openDeadline - millis()) > 0) {
+        remote = libssh2_sftp_open(
+            implementation_->sftp, remotePath.c_str(),
+            LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
+            LIBSSH2_SFTP_S_IRUSR | LIBSSH2_SFTP_S_IWUSR);
+        if (remote == nullptr &&
+            libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) break;
+        delay(5);
+    }
+    if (remote == nullptr) {
+        local.close();
+        return {false, sessionError(implementation_->session, "SFTP remote file create",
+                                    libssh2_session_last_errno(implementation_->session))};
+    }
+    std::uint8_t buffer[1024] = {};
+    while (local.available()) {
+        const std::size_t readBytes = local.read(buffer, sizeof(buffer));
+        if (readBytes == 0) {
+            local.close();
+            closeSftpHandle(remote);
+            libssh2_sftp_unlink(implementation_->sftp, remotePath.c_str());
+            return {false, "microSD returned no data before the SFTP upload reached end-of-file"};
+        }
+        std::size_t written = 0;
+        const std::uint32_t deadline = millis() + timeoutMs;
+        while (written < readBytes && static_cast<std::int32_t>(deadline - millis()) > 0) {
+            const ssize_t result = libssh2_sftp_write(
+                remote, reinterpret_cast<const char*>(buffer + written), readBytes - written);
+            if (result > 0) written += static_cast<std::size_t>(result);
+            else if (result != LIBSSH2_ERROR_EAGAIN) {
+                local.close();
+                closeSftpHandle(remote);
+                libssh2_sftp_unlink(implementation_->sftp, remotePath.c_str());
+                return {false, sessionError(implementation_->session, "SFTP file write",
+                                            static_cast<int>(result))};
+            }
+            delay(2);
+        }
+        if (written != readBytes) {
+            local.close();
+            closeSftpHandle(remote);
+            libssh2_sftp_unlink(implementation_->sftp, remotePath.c_str());
+            return {false, "SFTP upload timed out"};
+        }
+    }
+    local.close();
+    closeSftpHandle(remote);
+    return {true, ""};
+}
+
+OperationResult SshClient::createSftpDirectory(const String& path,
+                                               std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr ||
+        !isValidRemotePath(path)) {
+        return {false, "SFTP directory path or session is invalid"};
+    }
+    const int result = runUntilComplete([this, &path]() {
+        return libssh2_sftp_mkdir(implementation_->sftp, path.c_str(), 0700);
+    }, timeoutMs);
+    return result == 0 ? OperationResult{true, ""}
+        : OperationResult{false, sessionError(implementation_->session,
+                                              "SFTP directory create", result)};
+}
+
+OperationResult SshClient::removeSftpPath(const String& path, bool directory,
+                                          std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr ||
+        !isValidRemotePath(path)) {
+        return {false, "SFTP removal path or session is invalid"};
+    }
+    const int result = runUntilComplete([this, &path, directory]() {
+        return directory ? libssh2_sftp_rmdir(implementation_->sftp, path.c_str())
+                         : libssh2_sftp_unlink(implementation_->sftp, path.c_str());
+    }, timeoutMs);
+    return result == 0 ? OperationResult{true, ""}
+        : OperationResult{false, sessionError(implementation_->session,
+                                              "SFTP remove", result)};
+}
+
+OperationResult SshClient::renameSftpPath(const String& sourcePath,
+                                          const String& destinationPath,
+                                          std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr ||
+        !isValidRemotePath(sourcePath) || !isValidRemotePath(destinationPath)) {
+        return {false, "SFTP rename paths or session are invalid"};
+    }
+    const int result = runUntilComplete([this, &sourcePath, &destinationPath]() {
+        return libssh2_sftp_rename(implementation_->sftp, sourcePath.c_str(),
+                                   destinationPath.c_str());
+    }, timeoutMs);
+    return result == 0 ? OperationResult{true, ""}
+        : OperationResult{false, sessionError(implementation_->session,
+                                              "SFTP rename", result)};
+}
+
 bool SshClient::isOpen() const
 {
     return implementation_ != nullptr && implementation_->channel != nullptr &&
            libssh2_channel_eof(implementation_->channel) == 0;
+}
+
+bool SshClient::isSftpOpen() const
+{
+    return implementation_ != nullptr && implementation_->sftp != nullptr;
 }
 
 String SshClient::fingerprint() const
@@ -820,11 +1374,18 @@ void SshClient::close()
         return;
     }
     if (implementation_->channel != nullptr) {
-        libssh2_channel_free(implementation_->channel);
+        LIBSSH2_CHANNEL* channel = implementation_->channel;
+        runUntilComplete([channel]() { return libssh2_channel_free(channel); }, 5000);
         implementation_->channel = nullptr;
     }
+    if (implementation_->sftp != nullptr) {
+        LIBSSH2_SFTP* sftp = implementation_->sftp;
+        runUntilComplete([sftp]() { return libssh2_sftp_shutdown(sftp); }, 5000);
+        implementation_->sftp = nullptr;
+    }
     if (implementation_->session != nullptr) {
-        libssh2_session_free(implementation_->session);
+        LIBSSH2_SESSION* session = implementation_->session;
+        runUntilComplete([session]() { return libssh2_session_free(session); }, 5000);
         implementation_->session = nullptr;
     }
     implementation_->network.stop();

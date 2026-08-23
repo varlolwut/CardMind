@@ -175,6 +175,14 @@ void testSshTerminalFiltering()
     const auto lines = cardputer::sshTerminalVisibleLines(state, 10, 3);
     require(lines.size() == 3 && lines.back() == "clean",
             "SSH terminal viewport failed");
+    const std::string history = "one\ntwo\nthree\nfour\nfive";
+    state = {history, "", false};
+    const auto scrolled = cardputer::sshTerminalLinesFromBottom(state, 10, 2, 2);
+    require(scrolled.size() == 2 && scrolled[0] == "two" && scrolled[1] == "three",
+            "SSH terminal scrollback offset failed");
+    const auto bounded = cardputer::sshTerminalLinesFromBottom(state, 10, 2, 99);
+    require(bounded.size() == 2 && bounded[0] == "one" && bounded[1] == "two",
+            "SSH terminal scrollback bound failed");
 }
 
 void testDocumentReader()

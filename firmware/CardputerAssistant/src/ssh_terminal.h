@@ -20,5 +20,9 @@ SshTerminalText appendSshTerminalBytes(SshTerminalText current,
 std::vector<std::string> sshTerminalVisibleLines(const SshTerminalText& terminal,
                                                  std::size_t columns,
                                                  std::size_t rows);
+std::vector<std::string> sshTerminalLinesFromBottom(const SshTerminalText& terminal,
+                                                    std::size_t columns,
+                                                    std::size_t rows,
+                                                    std::size_t lineOffset);
 
 }  // namespace cardputer

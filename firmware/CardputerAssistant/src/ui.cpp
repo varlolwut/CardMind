@@ -796,31 +796,39 @@ void showFilenameEntry(const String& title,
 
 void showPasswordEntry(const String& ssid, std::size_t passwordLength, const String& status)
 {
+    showSecretEntry("WI-FI PASSWORD", ssid, passwordLength, status,
+                    "ENTER connect   ESC cancel");
+}
+
+void showSecretEntry(const String& title, const String& label,
+                     std::size_t secretLength, const String& status,
+                     const String& footer)
+{
     canvas->fillScreen(TFT_BLACK);
     canvas->setFont(&fonts::efontCN_14);
     canvas->fillRect(0, 0, 240, 17, TFT_NAVY);
     canvas->drawBitmap(4, 4, kWifiIcon, 8, 8, TFT_CYAN);
     canvas->setTextColor(TFT_WHITE, TFT_NAVY);
     canvas->setCursor(16, 1);
-    canvas->print("WI-FI PASSWORD");
+    canvas->print(clippedLine(title, 26));
     canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     canvas->setCursor(5, 25);
-    canvas->print(clippedLine(ssid, 29));
+    canvas->print(clippedLine(label, 29));
     canvas->drawRoundRect(4, 48, 232, 25, 4, TFT_DARKGREY);
     canvas->setTextColor(TFT_YELLOW, TFT_BLACK);
     canvas->setCursor(9, 52);
     String mask;
-    const std::size_t visibleCharacters = std::min<std::size_t>(passwordLength, 25);
+    const std::size_t visibleCharacters = std::min<std::size_t>(secretLength, 25);
     for (std::size_t index = 0; index < visibleCharacters; ++index) {
         mask += '*';
     }
-    if (passwordLength > visibleCharacters) {
+    if (secretLength > visibleCharacters) {
         mask += "...";
     }
     canvas->print(mask + "_");
     canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     canvas->setCursor(5, 80);
-    canvas->print("Length: " + String(passwordLength));
+    canvas->print("Length: " + String(secretLength));
     canvas->setTextColor(isErrorStatus(status) ? TFT_RED : TFT_CYAN, TFT_BLACK);
     canvas->setCursor(5, 98);
     canvas->print(clippedLine(status, 34));
@@ -828,7 +836,7 @@ void showPasswordEntry(const String& ssid, std::size_t passwordLength, const Str
     canvas->setFont(&fonts::efontCN_10);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
-    canvas->print("ENTER connect   ESC cancel");
+    canvas->print(clippedLine(footer, 42));
     canvas->pushSprite(0, 0);
 }
 
