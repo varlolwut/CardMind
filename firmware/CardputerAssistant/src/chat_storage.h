@@ -19,6 +19,14 @@ struct HistoryFitResult {
     std::vector<Message> archived;
 };
 
+struct ArchivedMessagesPageResult {
+    bool success;
+    std::vector<Message> messages;
+    std::uint32_t nextOffset;
+    bool eof;
+    String error;
+};
+
 OperationResult initializeChatStorage();
 ChatsResult listChats();
 ChatDocumentResult createChat(const String& title);
@@ -27,6 +35,11 @@ OperationResult saveChat(const ChatDocument& chat);
 OperationResult deleteChat(const String& id);
 OperationResult archiveChatMessages(const String& id,
                                     const std::vector<Message>& messages);
+ArchivedMessagesPageResult readArchivedChatMessages(const String& id,
+                                                     std::uint32_t offset,
+                                                     std::size_t maximumMessages,
+                                                     std::size_t maximumBytes);
+OperationResult clearChatHistory(const String& id);
 OperationResult exportChatToWorkspace(const String& id, const String& filename);
 OperationResult exportChatBundleToWorkspace(const String& id, const String& filename);
 ChatDocumentResult importChatBundleFromWorkspace(const String& filename);

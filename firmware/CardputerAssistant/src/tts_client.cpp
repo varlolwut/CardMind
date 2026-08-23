@@ -305,6 +305,7 @@ OperationResult downloadSpeech(const Settings& settings,
         client.setCACert(kGtsRootR1);
         client.setHandshakeTimeout(15);
         HTTPClient http;
+        http.setReuse(false);
         http.setConnectTimeout(kConnectTimeoutMs);
         http.setTimeout(kHttpTimeoutMs);
         if (!http.begin(client, url)) {
@@ -389,6 +390,7 @@ OperationResult requestUserEndpoint(const String& apiKey, bool requireAuthentica
     client.setCACert(kGtsRootR1);
     client.setHandshakeTimeout(15);
     HTTPClient http;
+    http.setReuse(false);
     http.setConnectTimeout(kConnectTimeoutMs);
     http.setTimeout(kHttpTimeoutMs);
     const String url = String(kDefaultTtsBaseUrl) + "/v1/user";
@@ -471,6 +473,13 @@ OperationResult probeDefaultTtsTls()
 
 OperationResult playTtsHardwareTest(std::uint8_t volume)
 {
+    return playTtsHardwareTestControlled(
+        volume, []() { return SpeechPlaybackCommand::Continue; });
+}
+
+OperationResult playTtsHardwareTestControlled(std::uint8_t volume,
+                                              const SpeechPlaybackControl& control)
+{
     static std::array<std::int16_t, 1600> samples;
     for (std::size_t index = 0; index < samples.size(); ++index) {
         samples[index] = (index / 20) % 2 == 0 ? 3500 : -3500;
@@ -484,11 +493,12 @@ OperationResult playTtsHardwareTest(std::uint8_t volume)
         M5Cardputer.Speaker.end();
         return {false, "Cardputer speaker rejected the hardware test PCM"};
     }
-    const SpeakerWaitResult drained = waitForSpeakerIdle(
-        []() { return SpeechPlaybackCommand::Continue; }, kSpeakerDrainTimeoutMs);
+    const SpeakerWaitResult drained = waitForSpeakerIdle(control, kSpeakerDrainTimeoutMs);
     M5Cardputer.Speaker.end();
-    return drained.success ? OperationResult{true, ""}
-                           : OperationResult{false, drained.error};
+    if (!drained.success) {
+        return {false, drained.error};
+    }
+    return {true, drained.stopped ? String("Speech playback stopped") : String()};
 }
 
 }  // namespace cardputer

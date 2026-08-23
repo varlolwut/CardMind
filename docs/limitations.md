@@ -39,8 +39,9 @@ compatible. STT, TTS, and search are separate optional APIs.
 The full image includes MicroPython as a separate mode. Scripts live in the shared
 `/assistant/files` microSD workspace and are limited to 65,536 bytes each. CardMind,
 the model's file tools, the normal Web console, and MicroPython all see the same
-files. Open **Web Console → Start Python workspace**, then use the browser editor at
-the address shown before restart.
+files. Open **Web Console → Start Python workspace**. Browser launches hand off the
+current authenticated session automatically; launches from the Cardputer show the IP
+address and installation password before restart.
 
 This is MicroPython, not desktop CPython. Native CPython wheels, large data-science
 packages, subprocesses, and operating-system APIs are unavailable. Only one user

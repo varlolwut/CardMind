@@ -416,6 +416,34 @@ void showWebConsoleAccess(const String& address, const String& accessPassword)
     canvas->pushSprite(0, 0);
 }
 
+void showPythonWorkspaceAccess(const String& address, const String& accessPassword)
+{
+    canvas->fillScreen(TFT_BLACK);
+    canvas->setFont(&fonts::efontCN_14);
+    canvas->fillRect(0, 0, 240, 18, TFT_NAVY);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(6, 1);
+    canvas->print("PYTHON WORKSPACE");
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->setCursor(6, 27);
+    canvas->print("Address after restart:");
+    canvas->setTextColor(TFT_CYAN, TFT_BLACK);
+    canvas->setCursor(6, 45);
+    canvas->print(clippedLine(address, 29));
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->setCursor(6, 68);
+    canvas->print("Installation password:");
+    canvas->setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas->setCursor(6, 86);
+    canvas->print(clippedLine(accessPassword, 29));
+    canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(4, 120);
+    canvas->print("ENTER start   ESC cancel");
+    canvas->pushSprite(0, 0);
+}
+
 void showChat(const std::vector<Message>& history,
               const std::string& activeResponse,
               const std::string& input,
@@ -604,6 +632,86 @@ void showSelectionList(const String& title,
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
     canvas->print(clippedLine(footer, 44));
+    canvas->pushSprite(0, 0);
+}
+
+void showDeviceDiagnostics(const DeviceDiagnosticsView& diagnostics, std::size_t pageIndex)
+{
+    constexpr std::size_t pageCount = 2;
+    const std::size_t page = std::min(pageIndex, pageCount - 1);
+    constexpr std::uint16_t background = 0x0022;
+    constexpr std::uint16_t panel = 0x08C4;
+    constexpr std::uint16_t muted = 0x7BEF;
+    canvas->fillScreen(background);
+    canvas->fillRect(0, 0, 240, 18, TFT_NAVY);
+    drawCarouselIcon(CarouselIcon::Device, 4, -5, TFT_CYAN);
+    canvas->setFont(&fonts::efontCN_12);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(40, 2);
+    canvas->print(page == 0 ? "DEVICE STATUS" : "SYSTEM DETAILS");
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_CYAN, TFT_NAVY);
+    canvas->setCursor(207, 3);
+    canvas->print(String(page + 1) + "/" + String(pageCount));
+
+    const auto metric = [panel](int x, int y, const char* label, const String& value,
+                                std::uint16_t accent) {
+        canvas->fillRoundRect(x, y, 112, 38, 5, panel);
+        canvas->drawFastVLine(x, y + 5, 28, accent);
+        canvas->setFont(&fonts::efontCN_10);
+        canvas->setTextColor(muted, panel);
+        canvas->setCursor(x + 8, y + 4);
+        canvas->print(label);
+        canvas->setFont(&fonts::efontCN_12);
+        canvas->setTextColor(TFT_WHITE, panel);
+        canvas->setCursor(x + 8, y + 18);
+        canvas->print(clippedLine(value, 16));
+    };
+    const auto detail = [](int y, const char* label, const String& value,
+                           std::uint16_t valueColor) {
+        canvas->setFont(&fonts::efontCN_10);
+        canvas->setTextColor(muted, background);
+        canvas->setCursor(7, y);
+        canvas->print(label);
+        canvas->setTextColor(valueColor, background);
+        canvas->setCursor(79, y);
+        canvas->print(clippedLine(value, 27));
+    };
+
+    if (page == 0) {
+        metric(5, 23, "BATTERY", diagnostics.battery,
+               diagnostics.battery.startsWith("LOW") ? TFT_RED : TFT_GREENYELLOW);
+        metric(123, 23, "WI-FI", diagnostics.wifi,
+               diagnostics.wifiConnected ? TFT_CYAN : TFT_ORANGE);
+        metric(5, 66, "MICROSD", diagnostics.storage,
+               diagnostics.storageReady ? TFT_SKYBLUE : TFT_RED);
+        metric(123, 66, "FREE MEMORY", diagnostics.heap, TFT_MAGENTA);
+        canvas->setFont(&fonts::efontCN_10);
+        canvas->setTextColor(TFT_LIGHTGREY, background);
+        canvas->setCursor(7, 108);
+        canvas->print(clippedLine("v" + diagnostics.firmware + "  " + diagnostics.uptime,
+                                  38));
+    } else {
+        detail(25, "CPU", diagnostics.cpu, TFT_WHITE);
+        detail(39, "MEM BLOCK", diagnostics.largestHeap, TFT_WHITE);
+        detail(53, "STACK", diagnostics.stack, TFT_WHITE);
+        detail(67, "CHATS", diagnostics.chats, TFT_WHITE);
+        detail(81, "LAST TASK", diagnostics.previousOperation, TFT_CYAN);
+        detail(95, "RESET", diagnostics.resetReason, TFT_YELLOW);
+        const String services = String("JOURNAL ") +
+            (diagnostics.crashJournalReady ? "OK" : "--") + "   SSH " +
+            (diagnostics.sshStorageReady ? "OK" : "--");
+        detail(109, "SERVICES", services,
+               diagnostics.crashJournalReady && diagnostics.sshStorageReady
+                   ? TFT_GREENYELLOW
+                   : TFT_ORANGE);
+    }
+
+    canvas->fillRect(0, 119, 240, 16, TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(5, 120);
+    canvas->print("LEFT/RIGHT pages   ESC back");
     canvas->pushSprite(0, 0);
 }
 

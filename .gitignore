@@ -2,6 +2,7 @@ build/
 vendor/
 ROADMAP.md
 .repo-git/
+.secrets/
 toolchain/arduino-cli.yaml
 toolchain/data/
 toolchain/downloads/
@@ -13,3 +14,4 @@ toolchain/user/
 *.map
 *.hex
 *.uf2
+__pycache__/

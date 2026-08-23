@@ -300,9 +300,9 @@ String buildToolChatRequest(const Settings& settings,
     if (workspaceToolsAvailable) {
         systemPrompt +=
             "You can use tools to read and create downloadable files in the Cardputer microSD workspace. "
-            "Use a file tool only when the user asks to work with a file. Large files must be read and written "
-            "in chunks using next_offset and append_file. Never claim a file was saved unless a file tool "
-            "returned ok=true. ";
+            "The current request explicitly requires workspace access, so you must call an appropriate file "
+            "tool before answering. Handle multi-call file access internally without describing implementation "
+            "chunks to the user. Never claim a file was saved unless a file tool returned ok=true. ";
     }
     if (settings.webSearchApiKey.length() >= 8 &&
         settings.webSearchBaseUrl.startsWith("https://")) {
@@ -363,6 +363,14 @@ String buildToolChatRequest(const Settings& settings,
     }
     if (sshToolAvailable) {
         addSshTool(document);
+    }
+    if (workspaceToolsAvailable && rounds.empty()) {
+        if (requestsWorkspaceWrite(history.back().content)) {
+            document["tool_choice"]["type"] = "function";
+            document["tool_choice"]["function"]["name"] = "write_file";
+        } else {
+            document["tool_choice"] = "required";
+        }
     }
     String payload;
     serializeJson(document, payload);
@@ -527,6 +535,7 @@ void configureSecureClient(WiFiClientSecure& client)
 
 void configureHttp(HTTPClient& http, const Settings& settings)
 {
+    http.setReuse(false);
     http.setTimeout(kHttpTimeoutMs);
     http.addHeader("Authorization", authorizationHeader(settings));
     http.addHeader("Accept", "application/json");

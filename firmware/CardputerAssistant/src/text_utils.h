@@ -23,6 +23,7 @@ std::string makeChatTitle(const std::string& prompt, std::size_t maxCells);
 bool isValidChatId(const std::string& value);
 bool isValidWorkspaceFilename(const std::string& value);
 bool requestsWorkspaceAccess(const std::string& prompt);
+bool requestsWorkspaceWrite(const std::string& prompt);
 bool requestsWebSearch(const std::string& prompt);
 bool isWebSearchToolName(const std::string& name);
 bool isWebFetchToolName(const std::string& name);

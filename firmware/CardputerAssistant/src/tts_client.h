@@ -21,5 +21,7 @@ OperationResult synthesizeAndPlaySpeechControlled(const Settings& settings,
 OperationResult validateTtsCredentials(const Settings& settings);
 OperationResult probeDefaultTtsTls();
 OperationResult playTtsHardwareTest(std::uint8_t volume);
+OperationResult playTtsHardwareTestControlled(std::uint8_t volume,
+                                              const SpeechPlaybackControl& control);
 
 }  // namespace cardputer

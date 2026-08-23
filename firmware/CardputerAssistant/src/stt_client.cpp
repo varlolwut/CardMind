@@ -549,6 +549,7 @@ OperationResult probeDefaultSttTls()
     client.setCACert(kGtsRootR4);
     client.setHandshakeTimeout(20);
     HTTPClient http;
+    http.setReuse(false);
     http.setTimeout(20000);
     if (!http.begin(client, kDefaultModelsUrl)) {
         return {false, "Failed to initialize the Groq TLS probe"};
@@ -575,6 +576,7 @@ OperationResult validateSttCredentials(const Settings& settings)
         client.setCACert(kGtsRootR4);
         client.setHandshakeTimeout(20);
         HTTPClient http;
+        http.setReuse(false);
         http.setTimeout(20000);
         if (!http.begin(client, modelsUrl(settings))) {
             return {false, "Failed to initialize STT credential validation"};

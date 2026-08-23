@@ -2,8 +2,11 @@ import { readFileSync } from "node:fs";
 
 const sourcePath = new URL("../firmware/CardputerAssistant/src/web_console.cpp", import.meta.url);
 const source = readFileSync(sourcePath, "utf8");
-const functionStart = source.indexOf("void sendConsolePage()\n{");
-const functionEnd = source.indexOf("\nvoid sendLoginPage()", functionStart);
+const functionStartMatch = /void sendConsolePage\(\)\r?\n\{/.exec(source);
+const functionStart = functionStartMatch?.index ?? -1;
+const functionEndMatch = /\r?\nvoid sendLoginPage\(\)/g;
+functionEndMatch.lastIndex = Math.max(functionStart, 0);
+const functionEnd = functionEndMatch.exec(source)?.index ?? -1;
 
 if (functionStart < 0 || functionEnd < 0) {
     throw new Error("Could not locate sendConsolePage in web_console.cpp");
@@ -35,6 +38,16 @@ const requiredFragments = [
     'id="qrFromFile"',
     'id="sshToolsEnabled"',
     'id="savePermissions"',
+    'id="wifiSsid"',
+    'id="refreshModels"',
+    'id="startPython"',
+    'const changedSecrets=new Set()',
+    'data-1p-ignore',
+    'id="exportDiagnostics"',
+    'id="contextMeter"',
+    'id="loadOlder"',
+    'id="clearChat"',
+    'id="endConsole"',
     'class="mobile-nav"',
     'data-panel="chat"><span class="nav-glyph">01</span>Chat log</button>',
     'data-panel="files"><span class="nav-glyph">02</span>Workspace</button>',
@@ -46,6 +59,11 @@ const requiredFragments = [
     '/api/qr/show',
     '/api/qr/file?name=',
     '/api/chat/permissions',
+    '/api/chat/archived',
+    '/api/chat/clear',
+    '/api/console/close',
+    "x.address+'handoff?token='",
+    'handoff_token',
 ];
 
 for (const fragment of requiredFragments) {
@@ -62,6 +80,7 @@ const forbiddenFragments = [
     'maxlength="12288"',
     'data-panel="files"><span class="nav-glyph">02</span>Files</button>',
     "Open in Safari",
+    "Open the same device address and sign in again",
 ];
 
 for (const fragment of forbiddenFragments) {

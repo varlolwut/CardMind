@@ -126,13 +126,17 @@ PythonModeStatus inspectPythonMode()
 }
 
 OperationResult synchronizePythonModeSettings(const Settings& settings,
-                                              const String& consolePassword)
+                                              const String& consolePassword,
+                                              const String& handoffToken)
 {
     if (settings.wifiSsid.isEmpty()) {
         return {false, "Python mode requires a configured Wi-Fi SSID"};
     }
     if (consolePassword.length() < 8) {
         return {false, "Python mode requires an installation password of at least 8 characters"};
+    }
+    if (!handoffToken.isEmpty() && handoffToken.length() != 32) {
+        return {false, "Python mode handoff token must contain 32 characters"};
     }
     Preferences preferences;
     if (!preferences.begin(kPythonNamespace, false)) {
@@ -144,6 +148,11 @@ OperationResult synchronizePythonModeSettings(const Settings& settings,
     }
     if (result.success) {
         result = writeBlob(preferences, "console_pass", consolePassword, 97);
+    }
+    if (result.success) {
+        result = handoffToken.isEmpty()
+            ? removeKeyIfPresent(preferences, "handoff")
+            : writeBlob(preferences, "handoff", handoffToken, 33);
     }
     if (result.success) {
         result = removeKeyIfPresent(preferences, "mode_error");

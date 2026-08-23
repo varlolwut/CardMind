@@ -15,7 +15,8 @@ struct PythonModeStatus {
 
 PythonModeStatus inspectPythonMode();
 OperationResult synchronizePythonModeSettings(const Settings& settings,
-                                              const String& consolePassword);
+                                              const String& consolePassword,
+                                              const String& handoffToken);
 OperationResult activatePythonMode();
 OperationResult stageCardMindUpdateForPython(std::uint32_t firmwareBytes,
                                              const String& sha256);

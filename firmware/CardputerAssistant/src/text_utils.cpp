@@ -505,7 +505,7 @@ bool requestsWorkspaceAccess(const std::string& prompt)
     };
     const std::vector<std::string> objects = {
         " file", "files", "filename", "micro sd", "microsd", "sd card", "на sd",
-        "с sd", "файл", "заметк", "документ",
+        "с sd", "файл", "заметк", "документ", "script", "скрипт",
     };
     const std::vector<std::string> fileQueries = {
         "what files", "which files", "какие файл", "список файл", "что в файл",
@@ -513,6 +513,20 @@ bool requestsWorkspaceAccess(const std::string& prompt)
     const bool startsWithFile = value.rfind("file", 0) == 0;
     return containsAny(value, fileQueries) ||
         (containsAny(value, actions) && (startsWithFile || containsAny(value, objects)));
+}
+
+bool requestsWorkspaceWrite(const std::string& prompt)
+{
+    const std::string value = lowercaseIntentText(prompt);
+    const std::vector<std::string> actions = {
+        "save", "write", "create", "export", "edit", "update",
+        "сохран", "запиш", "созда", "экспорт", "измен", "обнов",
+    };
+    const std::vector<std::string> objects = {
+        " file", "files", "filename", "micro sd", "microsd", "sd card", "на sd",
+        "файл", "заметк", "документ", "script", "скрипт",
+    };
+    return containsAny(value, actions) && containsAny(value, objects);
 }
 
 bool requestsWebSearch(const std::string& prompt)
