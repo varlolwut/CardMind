@@ -509,12 +509,17 @@ void handlePrompt()
     };
     const bool useWorkspace = requestsWorkspaceAccess(prompt);
     const bool useSearch = webSearchSettingsAreComplete(consoleSettings);
+    const CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        return M5Cardputer.Keyboard.keysState().esc;
+    };
     markOperation(useWorkspace || useSearch ? "web_console_tools" : "web_console_chat");
     const ChatResult result = useWorkspace || useSearch
         ? streamChatCompletionWithTools(consoleSettings, activeChat.messages,
-                                        activeChat.instructions, onText, executeConsoleTool)
+                                        activeChat.instructions, onText, executeConsoleTool,
+                                        isCancelled)
         : streamChatCompletion(consoleSettings, activeChat.messages,
-                               activeChat.instructions, onText);
+                               activeChat.instructions, onText, isCancelled);
     markOperation("idle");
     if (!result.success) {
         consoleStatus = result.error;
