@@ -109,6 +109,7 @@ void testChatText()
     require(cardputer::isValidChatId("0123456789abcdef"), "Valid chat id rejected");
     require(!cardputer::isValidChatId("0123456789ABCDEF"), "Uppercase chat id accepted");
     require(cardputer::isValidWorkspaceFilename("notes_ru.md"), "Valid workspace filename rejected");
+    require(cardputer::isValidWorkspaceFilename("automation.py"), "Python workspace filename rejected");
     require(cardputer::isValidWorkspaceFilename("chat_export.chat.jsonl"),
             "Portable chat bundle filename rejected");
     require(!cardputer::isValidWorkspaceFilename("../secret.txt"), "Traversal filename accepted");

@@ -13,7 +13,7 @@ struct FirmwareUpdateInfo {
     String assetUrl;
     String sha256;
     std::uint32_t assetBytes;
-    bool rollbackPartitions;
+    bool pythonRecoveryReady;
     String error;
 };
 

@@ -1050,6 +1050,85 @@ OperationResult SshClient::write(const std::uint8_t* data, std::size_t bytes,
                                  String(written) + " of " + String(bytes) + " bytes"};
 }
 
+OperationResult SshClient::executeCommand(const String& command,
+                                          std::string& output,
+                                          int& exitStatus,
+                                          std::size_t maximumOutputBytes,
+                                          std::uint32_t timeoutMs)
+{
+    output.clear();
+    exitStatus = -1;
+    if (implementation_ == nullptr || implementation_->session == nullptr) {
+        return {false, "SSH session is not connected"};
+    }
+    if (implementation_->channel != nullptr) {
+        return {false, "SSH session already has an open channel"};
+    }
+    if (command.isEmpty() || command.length() > 1024 || command.indexOf('\0') >= 0) {
+        return {false, "SSH command must contain 1 to 1024 bytes without NUL characters"};
+    }
+    if (maximumOutputBytes == 0 || maximumOutputBytes > 16384) {
+        return {false, "SSH command output limit must be between 1 and 16384 bytes"};
+    }
+    if (timeoutMs < 1000 || timeoutMs > 120000) {
+        return {false, "SSH command timeout must be between 1000 and 120000 ms"};
+    }
+    const std::uint32_t deadline = millis() + timeoutMs;
+    while (implementation_->channel == nullptr &&
+           static_cast<std::int32_t>(deadline - millis()) > 0) {
+        implementation_->channel = libssh2_channel_open_session(implementation_->session);
+        if (implementation_->channel == nullptr &&
+            libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) {
+            const int errorCode = libssh2_session_last_errno(implementation_->session);
+            return {false, sessionError(implementation_->session,
+                                        "SSH command channel open", errorCode)};
+        }
+        delay(5);
+    }
+    if (implementation_->channel == nullptr) {
+        return {false, "SSH command channel open timed out"};
+    }
+    const int started = runUntilComplete(
+        [this, &command]() {
+            return libssh2_channel_exec(implementation_->channel, command.c_str());
+        }, timeoutMs);
+    if (started != 0) {
+        return {false, sessionError(implementation_->session,
+                                    "SSH command execution", started)};
+    }
+    std::uint8_t buffer[1024] = {};
+    const std::uint32_t readDeadline = millis() + timeoutMs;
+    while (static_cast<std::int32_t>(readDeadline - millis()) > 0) {
+        bool progressed = false;
+        for (int streamId = 0; streamId <= 1; ++streamId) {
+            const ssize_t bytes = libssh2_channel_read_ex(
+                implementation_->channel, streamId,
+                reinterpret_cast<char*>(buffer), sizeof(buffer));
+            if (bytes > 0) {
+                const std::size_t count = static_cast<std::size_t>(bytes);
+                if (count > maximumOutputBytes - output.size()) {
+                    return {false, "SSH command output exceeded the configured 16384-byte limit"};
+                }
+                output.append(reinterpret_cast<const char*>(buffer), count);
+                progressed = true;
+            } else if (bytes < 0 && bytes != LIBSSH2_ERROR_EAGAIN) {
+                return {false, sessionError(implementation_->session,
+                                            streamId == 0 ? "SSH command stdout read"
+                                                          : "SSH command stderr read",
+                                            static_cast<int>(bytes))};
+            }
+        }
+        if (libssh2_channel_eof(implementation_->channel) != 0) {
+            exitStatus = libssh2_channel_get_exit_status(implementation_->channel);
+            return {true, ""};
+        }
+        if (!progressed) {
+            delay(5);
+        }
+    }
+    return {false, "SSH command timed out before the remote channel closed"};
+}
+
 OperationResult SshClient::openSftp(std::uint32_t timeoutMs)
 {
     if (implementation_ == nullptr || implementation_->session == nullptr) {

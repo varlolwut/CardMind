@@ -128,6 +128,7 @@ struct ChatDocument {
     std::vector<Message> messages;
     std::string instructions;
     std::string draft;
+    bool sshToolsEnabled = false;
 };
 
 struct ChatsResult {

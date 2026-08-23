@@ -150,6 +150,14 @@ void drawCarouselIcon(CarouselIcon icon, int x, int y, std::uint16_t color)
             canvas->drawArc(x + 15, y + 25, 9, 8, 215, 325, color);
             canvas->drawArc(x + 15, y + 25, 16, 15, 215, 325, color);
             break;
+        case CarouselIcon::Web:
+            canvas->drawRoundRect(x, y + 3, 31, 24, 3, color);
+            canvas->drawFastHLine(x, y + 10, 31, color);
+            canvas->fillCircle(x + 5, y + 7, 1, color);
+            canvas->fillCircle(x + 9, y + 7, 1, color);
+            canvas->drawFastHLine(x + 6, y + 16, 19, color);
+            canvas->drawFastHLine(x + 6, y + 21, 13, color);
+            break;
         case CarouselIcon::Files:
             canvas->drawRoundRect(x, y + 5, 31, 23, 3, color);
             canvas->drawRect(x + 3, y + 1, 12, 7, color);
@@ -342,7 +350,7 @@ void showProvisioning(const String& accessPointName, const String& accessPointPa
     canvas->print(accessPointPassword);
     canvas->setTextColor(TFT_CYAN, TFT_BLACK);
     canvas->setCursor(5, 97);
-    canvas->print("Open in Safari:");
+    canvas->print("Open in browser:");
     canvas->setTextColor(TFT_WHITE, TFT_BLACK);
     canvas->setCursor(5, 115);
     canvas->print("192.168.4.1");
@@ -894,7 +902,9 @@ void showVoiceRecording(std::uint32_t elapsedMs,
     canvas->fillRect(117, 80, 6, 10, TFT_RED);
     canvas->fillRoundRect(108, 88, 24, 5, 2, TFT_RED);
 
-    const int meterWidth = static_cast<int>(std::min<std::uint16_t>(level, 1000) * 210U / 1000U);
+    const std::uint16_t visibleLevel = static_cast<std::uint16_t>(
+        std::min<std::uint32_t>(1000U, static_cast<std::uint32_t>(level) * 8U));
+    const int meterWidth = static_cast<int>(visibleLevel * 210U / 1000U);
     canvas->drawRoundRect(14, 99, 212, 9, 3, TFT_DARKGREY);
     canvas->fillRoundRect(15, 100, meterWidth, 7, 2, TFT_GREENYELLOW);
     const std::uint32_t boundedElapsed = std::min(elapsedMs, maximumMs);

@@ -7,7 +7,7 @@ browser is a local control surface and is not an API proxy hosted elsewhere.
 ## Start and sign in
 
 1. Connect CardMind to a 2.4 GHz Wi-Fi network.
-2. Open **Tools → Web console** on the Cardputer.
+2. Open the **Web Console** carousel card, then choose **Open Web Console**.
 3. Keep the access screen open. It shows the local HTTP address and the installation
    password for this device.
 4. Open the address from a device on the same local network and enter the password.
@@ -15,7 +15,7 @@ browser is a local control surface and is not an API proxy hosted elsewhere.
 The installation password is stable for one installation. It is stored in NVS,
 shown only on the Cardputer, and is never returned by the Web console API. Press the
 plain Esc-marked key on the Cardputer to close the console and all active browser and
-SSH sessions. The device returns to Tools without restarting.
+SSH sessions. The device returns to the Web Console menu without restarting.
 
 ## Interface
 
@@ -35,16 +35,22 @@ configuration and SFTP controls.
 - Chat history written by the browser is the same microSD-backed history shown on
   the Cardputer.
 
-### Files
+### Workspace
 
 - Browse the `/assistant/files` workspace on microSD.
 - Upload or download supported UTF-8 files.
-- Read and atomically edit files in 12,288-byte chunks without loading a complete
-  large document into ESP32 RAM.
+- Open, edit, and atomically save a complete file. Internal streaming keeps the
+  ESP32 memory use bounded but is not exposed in the interface.
 - Rename or delete files and import a selected CardMind chat bundle.
+- Render up to 320 UTF-8 bytes as a QR code on the Cardputer, either from the QR
+  editor or from the complete contents of a selected workspace file.
 
 Incomplete uploads are removed after an error. Existing files are not overwritten
 silently.
+
+The browser may hold the complete document while it is being edited. The Cardputer
+transfers it incrementally and commits it through a temporary file, so an interrupted
+save does not replace the last valid copy.
 
 ### SSH and SFTP
 
@@ -60,6 +66,11 @@ installed outside the downloadable workspace. Browser terminal output is retaine
 only in the current page; on-device terminal sessions also use the rotating microSD
 scrollback log.
 
+SSH access for the model is a separate, per-chat permission in **Chat → Details**.
+It is disabled by default. Enabling it requires a complete SSH profile; execution
+also requires a host fingerprint that was already reviewed and trusted. Portable
+chat bundles never carry this permission to another installation.
+
 Destructive actions and editable names use CardMind dialogs instead of browser-native
 prompts, so confirmation remains usable and visually consistent on desktop and mobile.
 
@@ -70,6 +81,23 @@ prompts, so confirmation remains usable and visually consistent on desktop and m
 
 API keys and Wi-Fi credentials are intentionally not returned to the browser. Use
 the on-device setup portal when a secret must be replaced.
+
+## Python workspace
+
+The **Web Console** device menu also starts an isolated MicroPython workspace. It
+reuses the configured 2.4 GHz Wi-Fi network and installation password, then restarts
+into the Python image. Open the displayed CardMind address again and sign in to:
+
+- create, open, edit, and save `.py` files in the shared `/assistant/files`
+  workspace on microSD;
+- run one script and inspect its captured output;
+- restart the Python environment;
+- return to the normal CardMind firmware.
+
+Normal chat, SSH, and Workspace pages are not active while the Python image is
+running. Returning to CardMind does not delete scripts. A model running in CardMind
+can create a `.py` file with its normal file tool; the same file can then be opened
+and executed after switching to MicroPython mode.
 
 ## Security model
 

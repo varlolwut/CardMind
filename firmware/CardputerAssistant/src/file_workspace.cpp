@@ -720,6 +720,44 @@ OperationResult replaceWorkspaceFileRange(const String& name,
     return commitTemporaryFile(target, temporary, backup);
 }
 
+OperationResult replaceWorkspaceFileWithTemporary(const String& name,
+                                                   const String& temporaryName)
+{
+    if (!isValidWorkspaceFilename(name.c_str()) ||
+        !isValidWorkspaceFilename(temporaryName.c_str())) {
+        return {false, "Invalid workspace filename"};
+    }
+    if (name == temporaryName) {
+        return {false, "Replacement file must differ from the destination"};
+    }
+    const String target = workspaceFilePath(name);
+    const String temporary = workspaceFilePath(temporaryName);
+    if (!SD.exists(target)) {
+        return {false, "Workspace file does not exist: " + name};
+    }
+    if (!SD.exists(temporary)) {
+        return {false, "Temporary replacement file does not exist"};
+    }
+    const OperationResult valid = validateWorkspaceFileUtf8(temporaryName);
+    if (!valid.success) {
+        return valid;
+    }
+    const String backup = target + ".bak";
+    const OperationResult prepared = removeIfPresent(backup);
+    if (!prepared.success) {
+        return prepared;
+    }
+    const OperationResult committed = commitTemporaryFile(target, temporary, backup);
+    if (!committed.success) {
+        return committed;
+    }
+    const OperationResult bookmark = clearWorkspaceBookmark(name);
+    return bookmark.success
+        ? OperationResult{true, ""}
+        : OperationResult{false, "File was replaced, but its old bookmark could not be cleared: " +
+                                    bookmark.error};
+}
+
 OperationResult copyWorkspaceFile(const String& sourceName, const String& destinationName)
 {
     if (!isValidWorkspaceFilename(sourceName.c_str()) ||

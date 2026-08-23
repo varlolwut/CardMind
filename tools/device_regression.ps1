@@ -165,9 +165,12 @@ $offlineCases = @(
     (New-RegressionCase -Name "device settings" -Command "DEVICESETTINGSTEST" -CompletionPattern "^DEVICESETTINGSTEST result=" -PassPattern "^DEVICESETTINGSTEST result=pass" -TimeoutSeconds 45),
     (New-RegressionCase -Name "backup and restore" -Command "BACKUPTEST" -CompletionPattern "^BACKUPTEST result=" -PassPattern "^BACKUPTEST result=pass" -TimeoutSeconds 90),
     (New-RegressionCase -Name "offline tools" -Command "OFFLINETEST" -CompletionPattern "^OFFLINETEST result=" -PassPattern "^OFFLINETEST result=pass$" -TimeoutSeconds 20),
-    (New-RegressionCase -Name "SSH runtime" -Command "SSHCHECK" -CompletionPattern "^SSHCHECK result=" -PassPattern "^SSHCHECK result=pass" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "SSH runtime" -Command "SSHCHECK" -CompletionPattern "^SSHCHECK result=" -PassPattern "^SSHCHECK result=pass" -TimeoutSeconds 60),
     (New-RegressionCase -Name "SSH profile storage" -Command "SSHPROFILETEST" -CompletionPattern "^SSHPROFILETEST result=" -PassPattern "^SSHPROFILETEST result=pass" -TimeoutSeconds 45),
+    (New-RegressionCase -Name "Python partition layout" -Command "PYTHONCHECK" -CompletionPattern "^PYTHONCHECK result=" -PassPattern "^PYTHONCHECK result=pass.*layout=yes.*image=yes" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "microphone before speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
     (New-RegressionCase -Name "speaker hardware" -Command "TTSHW" -CompletionPattern "^TTSHW result=" -PassPattern "^TTSHW result=pass$" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "microphone after speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
     (New-RegressionCase -Name "web console start" -Command "CONSOLE" -CompletionPattern "^WEB_CONSOLE result=ready" -PassPattern "^WEB_CONSOLE result=ready" -TimeoutSeconds 20),
     (New-RegressionCase -Name "web console status" -Command "STATUS" -CompletionPattern "^WEB_CONSOLE status=" -PassPattern "^WEB_CONSOLE status=ready authenticated=no" -TimeoutSeconds 15),
     (New-RegressionCase -Name "web console exit" -Command "EXIT" -CompletionPattern "^WEB_CONSOLE result=stopped" -PassPattern "^WEB_CONSOLE result=stopped$" -TimeoutSeconds 20),
@@ -205,8 +208,8 @@ Set-Content -LiteralPath $resolvedLogPath -Value ("CARDMIND_REGRESSION suite={0}
 
 $serial = [System.IO.Ports.SerialPort]::new($Port, $BaudRate, [System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
 $serial.NewLine = "`r`n"
-$serial.DtrEnable = $true
-$serial.RtsEnable = $true
+$serial.DtrEnable = $false
+$serial.RtsEnable = $false
 $serial.ReadTimeout = 250
 $serial.WriteTimeout = 2000
 

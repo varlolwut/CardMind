@@ -1,5 +1,6 @@
 #include "provisioning.h"
 
+#include "python_mode.h"
 #include "storage.h"
 #include "ui.h"
 #include "wifi_networks.h"
@@ -14,7 +15,7 @@ namespace cardputer {
 namespace {
 
 constexpr const char* kDefaultModel = "claude-sonnet-4-6";
-constexpr const char* kDefaultApiBaseUrl = "https://api.example.com";
+constexpr const char* kDefaultApiBaseUrl = "";
 constexpr const char* kDefaultSttBaseUrl = "https://api.groq.com/openai/v1";
 constexpr const char* kDefaultSttModel = "whisper-large-v3-turbo";
 constexpr const char* kDefaultWebSearchBaseUrl = "https://api.exa.ai";
@@ -102,7 +103,7 @@ String setupPage(const String& error)
         "input,select{box-sizing:border-box;width:100%;padding:12px;border:1px solid #52617d;border-radius:8px;background:#0c1220;color:#fff}"
         "button{margin-top:20px;padding:12px 18px;border:0;border-radius:8px;background:#55d6be;color:#08131a;font-weight:700}"
         ".error{background:#642a35;padding:10px;border-radius:8px}.note{color:#aebbd1;font-size:14px}</style></head><body>"
-        "<h1>Cardputer Assistant</h1><p class='note'>On iPhone, use Safari at 192.168.4.1 so password managers remain available.</p>";
+        "<h1>Cardputer Assistant</h1><p class='note'>Open 192.168.4.1 in a browser on the connected device.</p>";
     if (!error.isEmpty()) {
         page += "<p class='error'>" + htmlEscape(error) + "</p>";
     }
@@ -123,7 +124,7 @@ String setupPage(const String& error)
             "<input id='api_key' name='api_key' type='password' minlength='8' autocomplete='off' placeholder='Never displayed or logged'>"
             "<p class='note'>Leave blank to keep the saved key. The key is stored only in device NVS.</p>"
             "<label for='api_base_url'>API base URL</label>"
-            "<input id='api_base_url' name='api_base_url' type='url' required maxlength='180' value='" +
+            "<input id='api_base_url' name='api_base_url' type='url' required maxlength='180' placeholder='https://api.example.com' value='" +
             htmlEscape(apiBaseUrl) + "'>"
             "<label for='model'>Model id</label><input id='model' name='model' required maxlength='80' value='" +
             htmlEscape(model) + "'>"
@@ -271,6 +272,31 @@ void updateProvisioningSerial()
                               static_cast<unsigned int>(ESP.getFreeHeap()));
             } else if (serialCommand == "APITEST") {
                 Serial.println("APITEST result=blocked reason=setup_portal_active");
+            } else if (serialCommand == "PYTHONCHECK" ||
+                       serialCommand == "PYTHONBOOTTEST") {
+                const PythonModeStatus status = inspectPythonMode();
+                Serial.printf("PYTHONCHECK result=%s layout=%s image=%s cardmind_bytes=%u python_bytes=%u runtime_error=%s error=%s\n",
+                              status.partitionLayoutReady && status.pythonImageReady
+                                  ? "pass" : "failed",
+                              status.partitionLayoutReady ? "yes" : "no",
+                              status.pythonImageReady ? "yes" : "no",
+                              static_cast<unsigned int>(status.cardMindPartitionBytes),
+                              static_cast<unsigned int>(status.pythonPartitionBytes),
+                              status.lastRuntimeError.isEmpty()
+                                  ? "none" : status.lastRuntimeError.c_str(),
+                              status.error.isEmpty() ? "none" : status.error.c_str());
+                if (serialCommand == "PYTHONBOOTTEST" &&
+                    status.partitionLayoutReady && status.pythonImageReady) {
+                    const OperationResult activated = activatePythonMode();
+                    Serial.printf("PYTHONBOOTTEST result=%s error=%s\n",
+                                  activated.success ? "restarting" : "failed",
+                                  activated.success ? "none" : activated.error.c_str());
+                    Serial.flush();
+                    if (activated.success) {
+                        delay(200);
+                        ESP.restart();
+                    }
+                }
             } else if (!serialCommand.isEmpty()) {
                 Serial.println("ERROR event=serial_command reason=unsupported_command");
             }

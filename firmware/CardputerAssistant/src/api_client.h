@@ -21,6 +21,7 @@ ChatResult streamChatCompletion(const Settings& settings,
 ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const std::vector<Message>& history,
                                          const std::string& instructions,
+                                         bool sshToolAvailable,
                                          const ChatTextCallback& onText,
                                          const ToolExecutor& executeTool,
                                          const CancelCallback& isCancelled);

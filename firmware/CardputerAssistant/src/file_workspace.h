@@ -25,6 +25,8 @@ OperationResult replaceWorkspaceFileRange(const String& name,
                                           std::uint32_t offset,
                                           std::uint32_t originalBytes,
                                           const std::string& replacement);
+OperationResult replaceWorkspaceFileWithTemporary(const String& name,
+                                                   const String& temporaryName);
 OperationResult copyWorkspaceFile(const String& sourceName, const String& destinationName);
 OperationResult renameWorkspaceFile(const String& sourceName, const String& destinationName);
 OperationResult deleteWorkspaceFile(const String& name);

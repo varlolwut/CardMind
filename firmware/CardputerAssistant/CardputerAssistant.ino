@@ -18,10 +18,12 @@
 #include "src/offline_tools.h"
 #include "src/ota_update.h"
 #include "src/provisioning.h"
+#include "src/python_mode.h"
 #include "src/stt_client.h"
 #include "src/storage.h"
 #include "src/ssh_client.h"
 #include "src/ssh_terminal.h"
+#include "src/ssh_tool.h"
 #include "src/text_utils.h"
 #include "src/tts_client.h"
 #include "src/ui.h"
@@ -41,7 +43,7 @@ SET_LOOP_TASK_STACK_SIZE(16384);
 
 namespace {
 
-constexpr const char* kFirmwareVersion = "1.10.0";
+constexpr const char* kFirmwareVersion = "1.11.0";
 constexpr std::size_t kMaximumInputBytes = 1200;
 constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
@@ -55,6 +57,7 @@ enum class Screen {
     Chat,
     MainCarousel,
     VoiceMenu,
+    WebConsoleMenu,
     DeviceMenu,
     UtilitiesMenu,
     SystemMonitor,
@@ -122,6 +125,7 @@ std::string activeChatInstructions;
 bool activeChatPinned = false;
 bool activeChatArchived = false;
 std::uint32_t activeChatArchivedMessageCount = 0;
+bool activeChatSshToolsEnabled = false;
 bool chatStorageReady = false;
 String chatStorageError;
 bool fileWorkspaceReady = false;
@@ -135,12 +139,14 @@ std::vector<std::string> searchSourceViewerLines;
 std::size_t searchSourceViewerFirstLine = 0;
 String selectedChatId;
 String selectedChatTitle;
+bool selectedChatSshToolsEnabled = false;
 std::string instructionsInput;
 String instructionsStatus;
 String deleteChatId;
 String deleteChatTitle;
 Screen deleteChatReturnScreen = Screen::ChatList;
 std::size_t voiceMenuIndex = 0;
+std::size_t webConsoleMenuIndex = 0;
 std::size_t deviceMenuIndex = 0;
 std::size_t utilitiesMenuIndex = 0;
 std::size_t timerMenuIndex = 0;
@@ -223,6 +229,7 @@ void renderChatInstructions();
 void renderSearchSources();
 void renderChatList();
 void renderControlsHelp();
+void renderWebConsoleMenu();
 void renderDeviceMenu();
 void renderUtilitiesMenu();
 void renderSystemMonitor();
@@ -306,6 +313,7 @@ cardputer::OperationResult saveCurrentChat()
         history,
         activeChatInstructions,
         inputBuffer,
+        activeChatSshToolsEnabled,
     };
     const cardputer::OperationResult result = cardputer::saveChat(document);
     if (result.success) {
@@ -331,6 +339,7 @@ cardputer::OperationResult activateChat(const String& id)
     activeChatPinned = loaded.chat.summary.pinned;
     activeChatArchived = loaded.chat.summary.archived;
     activeChatArchivedMessageCount = loaded.chat.summary.archivedMessageCount;
+    activeChatSshToolsEnabled = loaded.chat.sshToolsEnabled;
     activeResponse.clear();
     inputBuffer = loaded.chat.draft;
     persistedDraft = inputBuffer;
@@ -355,6 +364,7 @@ cardputer::OperationResult createAndActivateChat()
     activeChatPinned = false;
     activeChatArchived = false;
     activeChatArchivedMessageCount = 0;
+    activeChatSshToolsEnabled = false;
     history.clear();
     activeResponse.clear();
     inputBuffer.clear();
@@ -426,6 +436,7 @@ std::vector<String> chatActionItems()
     return {
         "Open chat",
         "Chat instructions",
+        String("LLM SSH access: ") + (selectedChatSshToolsEnabled ? "ON" : "OFF"),
         "Context: " + String(selected.messageCount) + "/" +
             String(cardputer::kMaximumStoredMessages) + " + " +
             String(selected.archivedMessageCount) + " archived",
@@ -483,8 +494,10 @@ void openChatActions(const cardputer::ChatSummary& chat)
 {
     selectedChatId = chat.id;
     selectedChatTitle = chat.title;
+    const cardputer::ChatDocumentResult loaded = cardputer::loadChat(chat.id);
+    selectedChatSshToolsEnabled = loaded.success && loaded.chat.sshToolsEnabled;
     chatActionsIndex = 0;
-    menuStatus = "";
+    menuStatus = loaded.success ? String("") : loaded.error;
     currentScreen = Screen::ChatActions;
     renderChatActions();
 }
@@ -543,6 +556,9 @@ void render()
         return;
     case Screen::VoiceMenu:
         renderVoiceMenu();
+        return;
+    case Screen::WebConsoleMenu:
+        renderWebConsoleMenu();
         return;
     case Screen::DeviceMenu:
         renderDeviceMenu();
@@ -744,11 +760,29 @@ cardputer::ToolExecutionResult executeAvailableTool(
         call.name == "write_file" || call.name == "append_file") {
         return cardputer::executeWorkspaceTool(call);
     }
+    if (cardputer::isSshToolName(call.name)) {
+        if (!activeChatSshToolsEnabled) {
+            return {false, "{\"ok\":false,\"error\":\"permission denied\"}",
+                    "SSH tool access is disabled for this chat"};
+        }
+        return cardputer::executeSshTool(call, isCancelled);
+    }
     return {
         false,
         "{\"ok\":false,\"error\":\"unsupported tool\"}",
         "API requested unsupported tool '" + String(call.name.c_str()) + "'",
     };
+}
+
+String serialSafeError(const String& value, std::size_t maximumLength)
+{
+    String error = value;
+    error.replace("\r", " ");
+    error.replace("\n", " ");
+    if (error.length() > maximumLength) {
+        error = error.substring(0, maximumLength) + "...";
+    }
+    return error.isEmpty() ? String("none") : error;
 }
 
 void runWebSearchTest()
@@ -765,7 +799,9 @@ void runWebSearchTest()
     const cardputer::ToolExecutionResult result = cardputer::executeWebSearchTool(
         settings, {"web-test", "web_search", "{\"query\":\"M5Stack official website\"}"},
         []() { return false; });
-    Serial.printf("WEBTEST result=%s\n", result.success ? "pass" : "failed");
+    const String safeError = serialSafeError(result.error, 180);
+    Serial.printf("WEBTEST result=%s error=%s\n",
+                  result.success ? "pass" : "failed", safeError.c_str());
 }
 
 void runWebFetchTest()
@@ -782,7 +818,9 @@ void runWebFetchTest()
     const cardputer::ToolExecutionResult result = cardputer::executeWebFetchTool(
         settings, {"fetch-test", "web_fetch", "{\"url\":\"https://m5stack.com/\"}"},
         []() { return false; });
-    Serial.printf("FETCHTEST result=%s\n", result.success ? "pass" : "failed");
+    const String safeError = serialSafeError(result.error, 180);
+    Serial.printf("FETCHTEST result=%s error=%s\n",
+                  result.success ? "pass" : "failed", safeError.c_str());
 }
 
 void runWebSearchRoundTripTest()
@@ -801,7 +839,7 @@ void runWebSearchRoundTripTest()
         {"user", "/search cardputer zero"},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
-        settings, testHistory, "", [](const std::string&) {},
+        settings, testHistory, "", false, [](const std::string&) {},
         [&searchCalled](const cardputer::ToolCall& call) {
             if (cardputer::isWebSearchToolName(call.name)) {
                 searchCalled = true;
@@ -810,10 +848,11 @@ void runWebSearchRoundTripTest()
             }
             return executeAvailableTool(call, []() { return false; });
         }, []() { return false; });
-    Serial.printf("SEARCHTEST result=%s search_called=%s response_bytes=%u\n",
+    const String safeError = serialSafeError(result.error, 180);
+    Serial.printf("SEARCHTEST result=%s search_called=%s response_bytes=%u error=%s\n",
                   result.success && searchCalled ? "pass" : "failed",
                   searchCalled ? "yes" : "no",
-                  static_cast<unsigned int>(result.response.size()));
+                  static_cast<unsigned int>(result.response.size()), safeError.c_str());
 }
 
 void runApiTest()
@@ -853,6 +892,7 @@ void runStorageTest()
     cardputer::ChatDocument document = created.chat;
     document.messages = {{"user", "test"}, {"assistant", "OK"}};
     document.instructions = "Reply briefly.";
+    document.sshToolsEnabled = true;
     Serial.println("STORAGETEST stage=chat_save");
     const cardputer::OperationResult saved = cardputer::saveChat(document);
     Serial.println("STORAGETEST stage=chat_load");
@@ -861,7 +901,7 @@ void runStorageTest()
         : cardputer::ChatDocumentResult{false, {}, saved.error};
     const bool chatVerified = loaded.success && loaded.chat.messages.size() == 2 &&
         loaded.chat.messages[1].content == "OK" &&
-        loaded.chat.instructions == "Reply briefly.";
+        loaded.chat.instructions == "Reply briefly." && loaded.chat.sshToolsEnabled;
     Serial.println("STORAGETEST stage=chat_delete");
     const cardputer::OperationResult chatCleanup = cardputer::deleteChat(document.summary.id);
     if (!chatVerified || !chatCleanup.success) {
@@ -910,6 +950,7 @@ void runChatQolTest()
     source.instructions = "Be concise.";
     source.draft = "unfinished";
     source.summary.pinned = true;
+    source.sshToolsEnabled = true;
     const std::vector<cardputer::Message> archivedMessages = {
         {"user", "old"}, {"assistant", "reply"},
     };
@@ -924,14 +965,16 @@ void runChatQolTest()
         : cardputer::ChatDocumentResult{false, {}, result.error};
     if (result.success && (!loaded.success || !loaded.chat.summary.pinned ||
                            loaded.chat.summary.archivedMessageCount != 2 ||
-                           loaded.chat.draft != "unfinished")) {
-        result = {false, "Chat version-3 metadata round trip failed"};
+                           loaded.chat.draft != "unfinished" ||
+                           !loaded.chat.sshToolsEnabled)) {
+        result = {false, "Chat version-4 metadata round trip failed"};
     }
     const cardputer::ChatDocumentResult duplicated = result.success
         ? cardputer::duplicateChat(source.summary.id)
         : cardputer::ChatDocumentResult{false, {}, result.error};
     if (result.success && (!duplicated.success || duplicated.chat.messages.size() != 2 ||
-                           duplicated.chat.draft != "unfinished")) {
+                           duplicated.chat.draft != "unfinished" ||
+                           !duplicated.chat.sshToolsEnabled)) {
         result = {false, "Chat duplication verification failed"};
     }
     if (result.success) {
@@ -948,7 +991,8 @@ void runChatQolTest()
         : cardputer::ChatDocumentResult{false, {}, result.error};
     if (result.success && (!imported.success || imported.chat.messages.size() != 2 ||
                            imported.chat.summary.archivedMessageCount != 2 ||
-                           imported.chat.instructions != "Be concise.")) {
+                           imported.chat.instructions != "Be concise." ||
+                           imported.chat.sshToolsEnabled)) {
         result = {false, "Portable chat import verification failed"};
     }
     if (duplicated.success) {
@@ -985,9 +1029,11 @@ void runFileWorkspaceEditTest()
     const String sourceName = "firmware_editor_test.txt";
     const String copyName = "firmware_editor_copy.txt";
     const String renamedName = "firmware_editor_renamed.txt";
+    const String replacementName = "firmware_editor_upload.txt";
     const String sourcePath = cardputer::workspaceFilePath(sourceName);
     const String copyPath = cardputer::workspaceFilePath(copyName);
     const String renamedPath = cardputer::workspaceFilePath(renamedName);
+    const String replacementPath = cardputer::workspaceFilePath(replacementName);
     if (SD.exists(sourcePath)) {
         SD.remove(sourcePath);
     }
@@ -996,6 +1042,9 @@ void runFileWorkspaceEditTest()
     }
     if (SD.exists(renamedPath)) {
         SD.remove(renamedPath);
+    }
+    if (SD.exists(replacementPath)) {
+        SD.remove(replacementPath);
     }
     Serial.println("FILETEST stage=create");
     cardputer::OperationResult result = cardputer::createWorkspaceFile(sourceName);
@@ -1072,6 +1121,34 @@ void runFileWorkspaceEditTest()
         result = {false, "Copied and renamed bookmark verification failed"};
     }
     if (result.success) {
+        Serial.println("FILETEST stage=replace_complete_file");
+        result = cardputer::createWorkspaceFile(replacementName);
+    }
+    const std::string completeReplacement = "complete UTF-8 replacement: файл\n";
+    if (result.success) {
+        File replacementFile = SD.open(replacementPath, FILE_APPEND);
+        if (!replacementFile ||
+            replacementFile.write(
+                reinterpret_cast<const std::uint8_t*>(completeReplacement.data()),
+                completeReplacement.size()) != completeReplacement.size()) {
+            result = {false, "Failed to write complete replacement test file"};
+        }
+        if (replacementFile) {
+            replacementFile.flush();
+            replacementFile.close();
+        }
+    }
+    if (result.success) {
+        result = cardputer::replaceWorkspaceFileWithTemporary(sourceName, replacementName);
+    }
+    const cardputer::WorkspaceChunkResult completeRead = result.success
+        ? cardputer::readWorkspaceFileChunk(sourceName, 0, 128)
+        : cardputer::WorkspaceChunkResult{false, "", 0, 0, 0, true, result.error};
+    if (result.success && (!completeRead.success || !completeRead.eof ||
+                           completeRead.content != completeReplacement)) {
+        result = {false, "Complete workspace file replacement verification failed"};
+    }
+    if (result.success) {
         Serial.println("FILETEST stage=delete_source");
         result = cardputer::deleteWorkspaceFile(sourceName);
     }
@@ -1087,6 +1164,9 @@ void runFileWorkspaceEditTest()
     }
     if (SD.exists(renamedPath)) {
         SD.remove(renamedPath);
+    }
+    if (SD.exists(replacementPath)) {
+        SD.remove(replacementPath);
     }
     Serial.printf("FILETEST result=%s\n", result.success ? "pass" : "failed");
 }
@@ -1158,7 +1238,7 @@ void runToolApiTest()
         {"user", "Use write_file to save exactly OK in firmware_tool_test.txt, then confirm briefly."},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
-        settings, testHistory, "", [](const std::string&) {},
+        settings, testHistory, "", false, [](const std::string&) {},
         [&writeSucceeded](const cardputer::ToolCall& call) {
             const cardputer::ToolExecutionResult execution = cardputer::executeWorkspaceTool(call);
             if (call.name == "write_file" && execution.success) {
@@ -1177,6 +1257,40 @@ void runToolApiTest()
                   static_cast<unsigned int>(result.response.size()));
 }
 
+void runApiProbe()
+{
+    ensureNetworkReady();
+    String authority = settings.apiBaseUrl.substring(8);
+    const int pathStart = authority.indexOf('/');
+    if (pathStart >= 0) {
+        authority = authority.substring(0, pathStart);
+    }
+    String host = authority;
+    std::uint16_t port = 443;
+    const int portSeparator = authority.lastIndexOf(':');
+    if (portSeparator >= 0) {
+        const long parsedPort = authority.substring(portSeparator + 1).toInt();
+        if (parsedPort <= 0 || parsedPort > 65535) {
+            Serial.printf("APIPROBE result=failed base=%s error=invalid_port\n",
+                          settings.apiBaseUrl.c_str());
+            return;
+        }
+        host = authority.substring(0, portSeparator);
+        port = static_cast<std::uint16_t>(parsedPort);
+    }
+    IPAddress address;
+    const bool resolved = !host.isEmpty() && WiFi.hostByName(host.c_str(), address) == 1;
+    WiFiClient client;
+    const bool connected = resolved && client.connect(address, port, 10000);
+    client.stop();
+    Serial.printf("APIPROBE result=%s base=%s host=%s port=%u dns=%s address=%s tcp=%s\n",
+                  connected ? "pass" : "failed",
+                  settings.apiBaseUrl.c_str(), host.c_str(),
+                  static_cast<unsigned int>(port), resolved ? "pass" : "failed",
+                  resolved ? address.toString().c_str() : "unresolved",
+                  connected ? "pass" : "failed");
+}
+
 void handleSerialCommand(const String& command)
 {
     if (command == "PING") {
@@ -1193,6 +1307,50 @@ void handleSerialCommand(const String& command)
     }
     if (command == "APITEST") {
         runApiTest();
+        return;
+    }
+    if (command == "APIPROBE") {
+        runApiProbe();
+        return;
+    }
+    if (command.startsWith("APIBASEHEX")) {
+        const String encoded = command.substring(10);
+        if (encoded.isEmpty() || encoded.length() % 2 != 0 || encoded.length() > 360) {
+            Serial.println("APIBASE result=failed error=invalid_hex_length");
+            return;
+        }
+        String decoded;
+        decoded.reserve(encoded.length() / 2);
+        for (std::size_t index = 0; index < encoded.length(); index += 2) {
+            const auto hexValue = [](char character) -> int {
+                if (character >= '0' && character <= '9') {
+                    return character - '0';
+                }
+                if (character >= 'A' && character <= 'F') {
+                    return character - 'A' + 10;
+                }
+                return -1;
+            };
+            const int high = hexValue(encoded[index]);
+            const int low = hexValue(encoded[index + 1]);
+            if (high < 0 || low < 0) {
+                Serial.println("APIBASE result=failed error=invalid_hex_character");
+                return;
+            }
+            decoded += static_cast<char>((high << 4) | low);
+        }
+        while (decoded.endsWith("/")) {
+            decoded.remove(decoded.length() - 1);
+        }
+        cardputer::Settings updated = settings;
+        updated.apiBaseUrl = decoded;
+        const cardputer::OperationResult result = cardputer::saveSettings(updated);
+        if (result.success) {
+            settings = updated;
+        }
+        Serial.printf("APIBASE result=%s error=%s\n",
+                      result.success ? "pass" : "failed",
+                      result.success ? "none" : result.error.c_str());
         return;
     }
     if (command == "CANCELTEST") {
@@ -1271,15 +1429,15 @@ void handleSerialCommand(const String& command)
             return;
         }
         if (command == "OTACHECK") {
-            Serial.printf("OTACHECK result=pass latest=%s newer=%s bytes=%u rollback_partitions=%s\n",
+            Serial.printf("OTACHECK result=pass latest=%s newer=%s bytes=%u python_recovery=%s\n",
                           info.version.c_str(), info.newerAvailable ? "yes" : "no",
                           static_cast<unsigned int>(info.assetBytes),
-                          info.rollbackPartitions ? "yes" : "no");
+                          info.pythonRecoveryReady ? "yes" : "no");
             return;
         }
         if (command == "OTAINSTALLTEST" &&
-            (!info.newerAvailable || !info.rollbackPartitions)) {
-            Serial.println("OTAINSTALLTEST result=failed error=no_verified_newer_dual_partition_release");
+            (!info.newerAvailable || !info.pythonRecoveryReady)) {
+            Serial.println("OTAINSTALLTEST result=failed error=no_verified_newer_python_recovery_release");
             return;
         }
         if (command == "OTADOWNLOADTEST") {
@@ -1292,10 +1450,9 @@ void handleSerialCommand(const String& command)
         if (command == "OTAINSTALLTEST" && downloaded.success) {
             const cardputer::OperationResult installed = cardputer::installDownloadedFirmware(
                 info, [](std::uint32_t, std::uint32_t) {}, []() { return false; });
-            const cardputer::OperationResult removed = cardputer::removeDownloadedFirmware();
             cardputer::markOperation("idle");
-            const bool passed = installed.success && removed.success;
-            const String error = !installed.success ? installed.error : removed.error;
+            const bool passed = installed.success;
+            const String error = installed.error;
             Serial.printf("OTAINSTALLTEST result=%s target=%s error=%s\n",
                           passed ? "pass" : "failed", info.version.c_str(),
                           passed ? "none" : error.c_str());
@@ -1316,6 +1473,37 @@ void handleSerialCommand(const String& command)
                       passed ? "pass" : "failed",
                       static_cast<unsigned int>(info.assetBytes),
                       passed ? "none" : error.c_str());
+        return;
+    }
+    if (command == "PYTHONCHECK") {
+        const cardputer::PythonModeStatus status = cardputer::inspectPythonMode();
+        Serial.printf("PYTHONCHECK result=%s layout=%s image=%s cardmind_bytes=%u python_bytes=%u runtime_error=%s error=%s\n",
+                      status.partitionLayoutReady && status.pythonImageReady ? "pass" : "failed",
+                      status.partitionLayoutReady ? "yes" : "no",
+                      status.pythonImageReady ? "yes" : "no",
+                      static_cast<unsigned int>(status.cardMindPartitionBytes),
+                      static_cast<unsigned int>(status.pythonPartitionBytes),
+                      status.lastRuntimeError.isEmpty() ? "none" : status.lastRuntimeError.c_str(),
+                      status.error.isEmpty() ? "none" : status.error.c_str());
+        return;
+    }
+    if (command == "PYTHONBOOTTEST") {
+        String password;
+        cardputer::OperationResult result = cardputer::loadSetupAccessPointPassword(password);
+        if (result.success) {
+            result = cardputer::synchronizePythonModeSettings(settings, password);
+        }
+        if (result.success) {
+            result = cardputer::activatePythonMode();
+        }
+        Serial.printf("PYTHONBOOTTEST result=%s error=%s\n",
+                      result.success ? "restarting" : "failed",
+                      result.success ? "none" : result.error.c_str());
+        Serial.flush();
+        if (result.success) {
+            delay(200);
+            ESP.restart();
+        }
         return;
     }
     if (command == "SSHCHECK") {
@@ -1425,6 +1613,19 @@ void handleSerialCommand(const String& command)
         Serial.printf("TTSHW result=%s\n", result.success ? "pass" : "failed");
         return;
     }
+    if (command == "MICTEST") {
+        const cardputer::VoiceRecordingResult result = cardputer::probeMicrophone(2000);
+        String safeError = result.error;
+        safeError.replace("\r", " ");
+        safeError.replace("\n", " ");
+        Serial.printf("MICTEST result=%s samples=%u peak=%u mean=%u error=%s\n",
+                      result.success ? "pass" : "failed",
+                      static_cast<unsigned int>(result.sampleCount),
+                      static_cast<unsigned int>(result.peakLevel),
+                      static_cast<unsigned int>(result.meanLevel),
+                      result.success ? "none" : safeError.c_str());
+        return;
+    }
     if (command == "TTSTLS") {
         ensureNetworkReady();
         const cardputer::OperationResult result = cardputer::probeDefaultTtsTls();
@@ -1476,7 +1677,7 @@ void updateSerial()
             serialInput = "";
         } else if (((character >= 'A' && character <= 'Z') ||
                     (character >= '0' && character <= '9')) &&
-                   serialInput.length() < 32) {
+                   serialInput.length() < 380) {
             serialInput += character;
         } else if (character != '\r') {
             serialInput = "";
@@ -1609,6 +1810,7 @@ void submitPrompt()
         std::move(pendingFit.retained),
         activeChatInstructions,
         "",
+        activeChatSshToolsEnabled,
     };
     const cardputer::OperationResult pendingSave = cardputer::saveChat(pendingDocument);
     if (!pendingSave.success) {
@@ -1633,7 +1835,9 @@ void submitPrompt()
         }
     };
     const bool webSearchAvailable = cardputer::webSearchSettingsAreComplete(settings);
-    const bool useTools = useWorkspaceTools || webSearchAvailable;
+    const bool sshToolsAvailable = activeChatSshToolsEnabled &&
+        cardputer::sshToolIsAvailable();
+    const bool useTools = useWorkspaceTools || webSearchAvailable || sshToolsAvailable;
     Serial.printf("INFO event=chat_route workspace_tools=%s web_search_available=%s web_search_intent=%s\n",
                   useWorkspaceTools ? "enabled" : "disabled",
                   webSearchAvailable ? "yes" : "no",
@@ -1645,7 +1849,8 @@ void submitPrompt()
     };
     const cardputer::ChatResult result = useTools
         ? cardputer::streamChatCompletionWithTools(
-              settings, history, activeChatInstructions, onText, [&isCancelled](const cardputer::ToolCall& call) {
+              settings, history, activeChatInstructions, sshToolsAvailable, onText,
+              [&isCancelled](const cardputer::ToolCall& call) {
                   statusMessage = "Tool: " + String(call.name.c_str());
                   render();
                   return executeAvailableTool(call, isCancelled);
@@ -2178,7 +2383,6 @@ std::vector<String> filesMenuItems()
     return {
         "Browse SD workspace",
         "Import chat bundle",
-        "Web file manager",
         "Back to carousel",
     };
 }
@@ -2208,8 +2412,27 @@ std::vector<String> utilitiesMenuItems()
         "Calculator",
         "QR display",
         "SSH tool",
-        "Web console",
         "System monitor",
+        "Back to carousel",
+    };
+}
+
+std::vector<String> webConsoleMenuItems()
+{
+    const String address = WiFi.status() == WL_CONNECTED
+        ? String("Address: http://") + WiFi.localIP().toString()
+        : String("Address: connect Wi-Fi first");
+    const cardputer::PythonModeStatus python = cardputer::inspectPythonMode();
+    const String pythonStatus = python.partitionLayoutReady && python.pythonImageReady
+        ? String("Python workspace: ready")
+        : String("Python workspace: not installed");
+    return {
+        "Open Web Console",
+        address,
+        "Session timeout: 15 min",
+        pythonStatus,
+        "Start Python workspace",
+        "Configure API and Wi-Fi",
         "Back to carousel",
     };
 }
@@ -2265,7 +2488,7 @@ std::vector<String> fileActionItems()
     const String mode = cardputer::documentReaderModeLabel(fileReaderMode).c_str();
     return {
         "View as " + mode,
-        "Edit current chunk",
+        "Edit current page",
         "Read current page",
         "Read selected lines...",
         "Read entire document",
@@ -2294,6 +2517,7 @@ std::vector<cardputer::CarouselCard> carouselCards()
         {"SPEECH", "VOICE", "STT · TTS · Volume", 0xFD20, cardputer::CarouselIcon::Voice},
         {"CONNECTIVITY", "NETWORK", networkSubtitle, 0xB7E6, cardputer::CarouselIcon::Network},
         {"WORKSPACE", "FILES", "Edit · Read · Export", 0x4DFF, cardputer::CarouselIcon::Files},
+        {"BROWSER CONTROL", "WEB CONSOLE", "Chat · Files · Terminal", 0xFB4D, cardputer::CarouselIcon::Web},
         {"SYSTEM", "DEVICE", "Settings · Backup · Update", 0xFFE0, cardputer::CarouselIcon::Device},
         {"UTILITIES", "TOOLS", "Notes · SSH · Monitor", 0x07FF, cardputer::CarouselIcon::Tools},
         {"REFERENCE", "HELP", "Controls · About · Support", 0xF81F, cardputer::CarouselIcon::Help},
@@ -2440,6 +2664,12 @@ void renderVoiceMenu()
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
 }
 
+void renderWebConsoleMenu()
+{
+    cardputer::showSelectionList("WEB CONSOLE", webConsoleMenuItems(), webConsoleMenuIndex,
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
 void renderDeviceMenu()
 {
     cardputer::showSelectionList("DEVICE", deviceMenuItems(), deviceMenuIndex,
@@ -2515,7 +2745,8 @@ void renderCalculator()
 
 void renderQrEntry()
 {
-    cardputer::showTextEditor("QR CONTENT", qrInput, keyboardLayout, 160,
+    cardputer::showTextEditor("QR CONTENT", qrInput, keyboardLayout,
+                             cardputer::kMaximumQrPayloadBytes,
                              qrStatus, "Text or URL",
                              "ENTER show  ESC back  Fn+3 lang");
 }
@@ -3491,6 +3722,14 @@ void openVoiceMenu()
     renderVoiceMenu();
 }
 
+void openWebConsoleMenu()
+{
+    webConsoleMenuIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::WebConsoleMenu;
+    renderWebConsoleMenu();
+}
+
 void openDeviceMenu()
 {
     deviceMenuIndex = 0;
@@ -4088,13 +4327,6 @@ void handleKeyboard()
                 renderChatInstructions();
             }
         } else if (enterPressed && chatActionsIndex == 2) {
-            menuStatus = "Older turns are preserved on microSD";
-            renderChatActions();
-        } else if (enterPressed && chatActionsIndex == 3) {
-            retryLastRequest();
-        } else if (enterPressed && chatActionsIndex == 4) {
-            openLatestSearchSources();
-        } else if (enterPressed && (chatActionsIndex == 5 || chatActionsIndex == 6)) {
             const cardputer::ChatDocumentResult loaded = cardputer::loadChat(selectedChatId);
             if (!loaded.success) {
                 menuStatus = loaded.error;
@@ -4102,7 +4334,42 @@ void handleKeyboard()
                 return;
             }
             cardputer::ChatDocument updated = loaded.chat;
-            if (chatActionsIndex == 5) {
+            if (!updated.sshToolsEnabled && !cardputer::sshToolIsAvailable()) {
+                menuStatus = "Configure and trust an SSH profile first";
+                renderChatActions();
+                return;
+            }
+            updated.sshToolsEnabled = !updated.sshToolsEnabled;
+            updated.summary.updatedAt = currentChatTimestamp();
+            const cardputer::OperationResult saved = cardputer::saveChat(updated);
+            if (!saved.success) {
+                menuStatus = saved.error;
+            } else {
+                selectedChatSshToolsEnabled = updated.sshToolsEnabled;
+                if (selectedChatId == activeChatId) {
+                    activeChatSshToolsEnabled = updated.sshToolsEnabled;
+                }
+                menuStatus = updated.sshToolsEnabled
+                    ? String("Model SSH access enabled")
+                    : String("Model SSH access disabled");
+            }
+            renderChatActions();
+        } else if (enterPressed && chatActionsIndex == 3) {
+            menuStatus = "Older turns are preserved on microSD";
+            renderChatActions();
+        } else if (enterPressed && chatActionsIndex == 4) {
+            retryLastRequest();
+        } else if (enterPressed && chatActionsIndex == 5) {
+            openLatestSearchSources();
+        } else if (enterPressed && (chatActionsIndex == 6 || chatActionsIndex == 7)) {
+            const cardputer::ChatDocumentResult loaded = cardputer::loadChat(selectedChatId);
+            if (!loaded.success) {
+                menuStatus = loaded.error;
+                renderChatActions();
+                return;
+            }
+            cardputer::ChatDocument updated = loaded.chat;
+            if (chatActionsIndex == 6) {
                 updated.summary.pinned = !updated.summary.pinned;
             } else {
                 updated.summary.archived = !updated.summary.archived;
@@ -4121,13 +4388,13 @@ void handleKeyboard()
                     activeChatPinned = updated.summary.pinned;
                     activeChatArchived = updated.summary.archived;
                 }
-                menuStatus = chatActionsIndex == 5
+                menuStatus = chatActionsIndex == 6
                     ? (updated.summary.pinned ? String("Chat pinned") : String("Chat unpinned"))
                     : (updated.summary.archived ? String("Chat archived")
                                                 : String("Chat restored"));
             }
             renderChatActions();
-        } else if (enterPressed && chatActionsIndex == 7) {
+        } else if (enterPressed && chatActionsIndex == 8) {
             const cardputer::ChatDocumentResult duplicated = cardputer::duplicateChat(selectedChatId);
             if (!duplicated.success) {
                 menuStatus = duplicated.error;
@@ -4142,21 +4409,22 @@ void handleKeyboard()
             }
             selectedChatId = duplicated.chat.summary.id;
             selectedChatTitle = duplicated.chat.summary.title;
+            selectedChatSshToolsEnabled = duplicated.chat.sshToolsEnabled;
             menuStatus = "Chat duplicated";
             renderChatActions();
-        } else if (enterPressed && chatActionsIndex == 8) {
+        } else if (enterPressed && chatActionsIndex == 9) {
             const String filename = "chat_" + selectedChatId + ".md";
             const cardputer::OperationResult exported = cardputer::exportChatToWorkspace(
                 selectedChatId, filename);
             menuStatus = exported.success ? "Exported as " + filename : exported.error;
             renderChatActions();
-        } else if (enterPressed && chatActionsIndex == 9) {
+        } else if (enterPressed && chatActionsIndex == 10) {
             const String filename = "chat_" + selectedChatId + ".chat.jsonl";
             const cardputer::OperationResult exported = cardputer::exportChatBundleToWorkspace(
                 selectedChatId, filename);
             menuStatus = exported.success ? "Exported as " + filename : exported.error;
             renderChatActions();
-        } else if (enterPressed && chatActionsIndex == 10) {
+        } else if (enterPressed && chatActionsIndex == 11) {
             deleteChatId = selectedChatId;
             deleteChatTitle = selectedChatTitle;
             deleteChatReturnScreen = Screen::ChatActions;
@@ -4348,10 +4616,12 @@ void handleKeyboard()
             } else if (carouselIndex == 4) {
                 openFilesMenu();
             } else if (carouselIndex == 5) {
-                openDeviceMenu();
+                openWebConsoleMenu();
             } else if (carouselIndex == 6) {
-                openUtilitiesMenu();
+                openDeviceMenu();
             } else if (carouselIndex == 7) {
+                openUtilitiesMenu();
+            } else if (carouselIndex == 8) {
                 controlsHelpIndex = 0;
                 currentScreen = Screen::ControlsHelp;
                 renderControlsHelp();
@@ -4399,14 +4669,7 @@ void handleKeyboard()
                 renderDeviceMenu();
                 return;
             }
-            const cardputer::OperationResult removed = cardputer::removeDownloadedFirmware();
-            if (!removed.success) {
-                currentScreen = Screen::DeviceMenu;
-                menuStatus = "Firmware installed; cleanup failed: " + removed.error;
-                renderDeviceMenu();
-                return;
-            }
-            cardputer::showBusyScreen("FIRMWARE UPDATE", "Verified. Restarting...");
+            cardputer::showBusyScreen("FIRMWARE UPDATE", "Verified. Recovery is installing...");
             delay(800);
             ESP.restart();
         }
@@ -4539,11 +4802,79 @@ void handleKeyboard()
                 currentScreen = Screen::UtilitiesMenu;
                 renderUtilitiesMenu();
             } else if (utilitiesMenuIndex == 6) {
-                openWebConsole(Screen::UtilitiesMenu);
-            } else if (utilitiesMenuIndex == 7) {
                 menuStatus = "";
                 currentScreen = Screen::SystemMonitor;
                 renderSystemMonitor();
+            } else {
+                currentScreen = Screen::MainCarousel;
+                menuStatus = "";
+                renderCarousel();
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::WebConsoleMenu) {
+        const std::size_t itemCount = webConsoleMenuItems().size();
+        if (cancelPressed) {
+            currentScreen = Screen::MainCarousel;
+            menuStatus = "";
+            renderCarousel();
+        } else if (upPressed) {
+            webConsoleMenuIndex = webConsoleMenuIndex > 0 ? webConsoleMenuIndex - 1 : 0;
+            renderWebConsoleMenu();
+        } else if (downPressed) {
+            webConsoleMenuIndex = std::min(webConsoleMenuIndex + 1, itemCount - 1);
+            renderWebConsoleMenu();
+        } else if (enterPressed) {
+            if (webConsoleMenuIndex == 0) {
+                openWebConsole(Screen::WebConsoleMenu);
+            } else if (webConsoleMenuIndex == 1) {
+                menuStatus = WiFi.status() == WL_CONNECTED
+                    ? String("Open the address in a trusted local browser")
+                    : String("Connect CardMind to 2.4 GHz Wi-Fi first");
+                renderWebConsoleMenu();
+            } else if (webConsoleMenuIndex == 2) {
+                menuStatus = "Inactive browser sessions expire after 15 minutes";
+                renderWebConsoleMenu();
+            } else if (webConsoleMenuIndex == 3) {
+                const cardputer::PythonModeStatus status = cardputer::inspectPythonMode();
+                menuStatus = !status.lastRuntimeError.isEmpty()
+                    ? String("Last Python start failed: ") + status.lastRuntimeError
+                    : status.partitionLayoutReady && status.pythonImageReady
+                        ? String("Python workspace is installed and ready")
+                        : status.error;
+                renderWebConsoleMenu();
+            } else if (webConsoleMenuIndex == 4) {
+                String password;
+                cardputer::OperationResult result =
+                    cardputer::loadSetupAccessPointPassword(password);
+                if (result.success && password.isEmpty()) {
+                    result = {false, "Run configuration once to create an installation password"};
+                }
+                if (result.success) {
+                    result = cardputer::synchronizePythonModeSettings(settings, password);
+                }
+                if (result.success) {
+                    result = cardputer::activatePythonMode();
+                }
+                if (!result.success) {
+                    menuStatus = result.error;
+                    renderWebConsoleMenu();
+                    return;
+                }
+                const String address = WiFi.status() == WL_CONNECTED
+                    ? String("Open http://") + WiFi.localIP().toString() + " after restart"
+                    : String("Connect Wi-Fi after Python starts");
+                cardputer::showBusyScreen("PYTHON WORKSPACE", address);
+                delay(800);
+                ESP.restart();
+            } else if (webConsoleMenuIndex == 5) {
+                cardputer::markOperation("provisioning");
+                cardputer::runProvisioningPortal(settings);
+                cardputer::markOperation("idle");
+                menuStatus = "Configuration portal closed";
+                renderWebConsoleMenu();
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
@@ -4671,7 +5002,7 @@ void handleKeyboard()
                 const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
                     ? cardputer::mapKeyToRussian(character)
                     : std::string(1, character);
-                if (qrInput.size() + text.size() <= 160) {
+                if (qrInput.size() + text.size() <= cardputer::kMaximumQrPayloadBytes) {
                     qrInput += text;
                     qrStatus = "";
                 }
@@ -4780,8 +5111,8 @@ void handleKeyboard()
                     menuStatus = "Latest release is " + pendingFirmwareUpdate.version +
                         "; current is v" + kFirmwareVersion;
                     renderDeviceMenu();
-                } else if (!pendingFirmwareUpdate.rollbackPartitions) {
-                    menuStatus = "OTA disabled: dual rollback partitions are unavailable";
+                } else if (!pendingFirmwareUpdate.pythonRecoveryReady) {
+                    menuStatus = "Update disabled: MicroPython recovery is unavailable";
                     renderDeviceMenu();
                 } else {
                     currentScreen = Screen::FirmwareUpdateConfirm;
@@ -4818,8 +5149,6 @@ void handleKeyboard()
                 openWorkspaceFileList();
             } else if (filesMenuIndex == 1) {
                 openChatImportList();
-            } else if (filesMenuIndex == 2) {
-                openWebConsole(Screen::FilesMenu);
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
@@ -5108,7 +5437,7 @@ void handleKeyboard()
         } else if (clearDraftPressed) {
             fileEditorInput.clear();
             fileEditorCursor = 0;
-            fileEditorStatus = "Chunk cleared; ENTER to save";
+            fileEditorStatus = "Page cleared; ENTER to save";
             renderFileEditor();
         } else if (backspacePressed) {
             if (fileEditorCursor > 0) {
@@ -5152,7 +5481,7 @@ void handleKeyboard()
                 return;
             }
             currentScreen = Screen::FileViewer;
-            menuStatus = "Chunk saved atomically";
+            menuStatus = "File saved atomically";
             renderFileViewer();
         } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
             for (const char character : printableNewKeys(newPresses)) {

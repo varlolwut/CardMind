@@ -1,11 +1,10 @@
 #include "ota_update.h"
+#include "python_mode.h"
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <SD.h>
-#include <Update.h>
 #include <WiFiClientSecure.h>
-#include <esp_partition.h>
 #include <mbedtls/sha256.h>
 
 #include <algorithm>
@@ -22,7 +21,7 @@ constexpr const char* kAllowedAssetPrefix =
     "https://github.com/varlolwut/CardMind/releases/download/";
 constexpr const char* kTemporaryFirmwarePath = "/assistant/update.bin.tmp";
 constexpr const char* kFirmwarePath = "/assistant/update.bin";
-constexpr std::uint32_t kMaximumFirmwareBytes = 0x330000U;
+constexpr std::uint32_t kMaximumFirmwareBytes = 0x3f0000U;
 constexpr std::uint32_t kTransferTimeoutMs = 30000U;
 
 const char kGithubRoots[] PROGMEM = R"CERT(-----BEGIN CERTIFICATE-----
@@ -178,13 +177,10 @@ String sha256Hex(const std::uint8_t* digest)
     return String(output);
 }
 
-bool rollbackPartitionsPresent()
+bool pythonRecoveryReady()
 {
-    const esp_partition_t* first = esp_partition_find_first(
-        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
-    const esp_partition_t* second = esp_partition_find_first(
-        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
-    return first != nullptr && second != nullptr;
+    const PythonModeStatus status = inspectPythonMode();
+    return status.partitionLayoutReady && status.pythonImageReady;
 }
 
 OperationResult removePath(const char* path)
@@ -214,7 +210,7 @@ FirmwareUpdateInfo checkLatestFirmwareUpdate(const String& currentVersion)
     HTTPClient http;
     http.setTimeout(30000);
     if (!http.begin(client, kLatestReleaseUrl)) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 "Failed to initialize the GitHub release request"};
     }
     http.addHeader("Accept", "application/vnd.github+json");
@@ -225,7 +221,7 @@ FirmwareUpdateInfo checkLatestFirmwareUpdate(const String& currentVersion)
         char tlsError[160] = {};
         client.lastError(tlsError, sizeof(tlsError));
         http.end();
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 status > 0 ? String("GitHub release request returned HTTP ") + status
                            : String("GitHub release transport failed: ") +
                                  HTTPClient::errorToString(status) +
@@ -234,13 +230,13 @@ FirmwareUpdateInfo checkLatestFirmwareUpdate(const String& currentVersion)
     const int declaredBytes = http.getSize();
     if (declaredBytes > 32768) {
         http.end();
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 "GitHub latest release response exceeded 32768 bytes"};
     }
     const String responseBody = http.getString();
     http.end();
     if (responseBody.isEmpty() || responseBody.length() > 32768) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 responseBody.isEmpty()
                     ? "GitHub latest release response body was empty"
                     : "GitHub latest release response exceeded 32768 bytes"};
@@ -248,15 +244,15 @@ FirmwareUpdateInfo checkLatestFirmwareUpdate(const String& currentVersion)
     JsonDocument release;
     const DeserializationError error = deserializeJson(release, responseBody);
     if (error) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 String("GitHub latest release JSON parsing failed: ") + error.c_str()};
     }
     if (!release["tag_name"].is<const char*>()) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 "GitHub latest release response is missing tag_name"};
     }
     if (!release["assets"].is<JsonArrayConst>()) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 "GitHub latest release response is missing the assets array"};
     }
     String assetUrl;
@@ -275,23 +271,23 @@ FirmwareUpdateInfo checkLatestFirmwareUpdate(const String& currentVersion)
     }
     if (!assetUrl.startsWith(kAllowedAssetPrefix) || assetBytes == 0 ||
         assetBytes > kMaximumFirmwareBytes || !digest.startsWith("sha256:")) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 "Latest release is missing a valid signed Cardputer ADV firmware asset"};
     }
     digest.remove(0, 7);
     digest.toLowerCase();
     if (!validSha256(digest)) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 "Latest firmware asset has an invalid SHA-256 digest"};
     }
     const String version = release["tag_name"].as<const char*>();
     std::array<std::uint32_t, 3> parsed = {};
     if (!parseVersion(version, parsed)) {
-        return {false, false, "", "", "", 0, rollbackPartitionsPresent(),
+        return {false, false, "", "", "", 0, pythonRecoveryReady(),
                 "Latest release tag is not a stable semantic version"};
     }
     return {true, isNewerFirmwareVersion(version, currentVersion), version, assetUrl,
-            digest, assetBytes, rollbackPartitionsPresent(), ""};
+            digest, assetBytes, pythonRecoveryReady(), ""};
 }
 
 OperationResult downloadFirmwareUpdate(const FirmwareUpdateInfo& info,
@@ -408,6 +404,9 @@ OperationResult installDownloadedFirmware(const FirmwareUpdateInfo& info,
                                           FirmwareProgressCallback onProgress,
                                           FirmwareCancelCallback isCancelled)
 {
+    if (!info.pythonRecoveryReady) {
+        return {false, "MicroPython recovery image is unavailable"};
+    }
     File input = SD.open(kFirmwarePath, FILE_READ);
     if (!input || input.size() != info.assetBytes) {
         if (input) {
@@ -415,14 +414,9 @@ OperationResult installDownloadedFirmware(const FirmwareUpdateInfo& info,
         }
         return {false, "Verified firmware file is missing or has the wrong size"};
     }
-    if (!Update.begin(info.assetBytes, U_FLASH)) {
-        input.close();
-        return {false, String("OTA partition rejected the firmware: ") + Update.errorString()};
-    }
     mbedtls_sha256_context sha;
     mbedtls_sha256_init(&sha);
     if (mbedtls_sha256_starts(&sha, 0) != 0) {
-        Update.abort();
         input.close();
         mbedtls_sha256_free(&sha);
         return {false, "Failed to initialize installation SHA-256 verification"};
@@ -436,10 +430,8 @@ OperationResult installDownloadedFirmware(const FirmwareUpdateInfo& info,
             break;
         }
         const std::size_t received = input.read(buffer.data(), buffer.size());
-        if (received == 0 || Update.write(buffer.data(), received) != received ||
-            mbedtls_sha256_update(&sha, buffer.data(), received) != 0) {
-            result = {false, String("Failed while writing OTA partition: ") +
-                             Update.errorString()};
+        if (received == 0 || mbedtls_sha256_update(&sha, buffer.data(), received) != 0) {
+            result = {false, "Failed while verifying the downloaded firmware"};
             break;
         }
         total += static_cast<std::uint32_t>(received);
@@ -453,11 +445,17 @@ OperationResult installDownloadedFirmware(const FirmwareUpdateInfo& info,
     mbedtls_sha256_free(&sha);
     input.close();
     if (!result.success) {
-        Update.abort();
         return result;
     }
-    if (!Update.end(false) || !Update.isFinished()) {
-        return {false, String("Failed to activate the OTA partition: ") + Update.errorString()};
+    result = stageCardMindUpdateForPython(info.assetBytes, info.sha256);
+    if (!result.success) {
+        return result;
+    }
+    result = activatePythonMode();
+    if (!result.success) {
+        const OperationResult cleared = clearCardMindUpdateRequest();
+        return {false, cleared.success ? result.error
+                                      : result.error + "; cleanup failed: " + cleared.error};
     }
     return {true, ""};
 }
