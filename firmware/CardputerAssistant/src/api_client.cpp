@@ -40,7 +40,7 @@ struct CompletionTurnResult {
     String error;
 };
 
-const char kIsrgRootX1[] PROGMEM = R"CERT(-----BEGIN CERTIFICATE-----
+const char kIsrgRoots[] PROGMEM = R"CERT(-----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
 cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
@@ -70,6 +70,20 @@ yi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq4
 RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPAm
 RGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57de
 myPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICGzCCAaGgAwIBAgIQQdKd0XLq7qeAwSxs6S+HUjAKBggqhkjOPQQDAzBPMQsw
+CQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2gg
+R3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMjAeFw0yMDA5MDQwMDAwMDBaFw00
+MDA5MTcxNjAwMDBaME8xCzAJBgNVBAYTAlVTMSkwJwYDVQQKEyBJbnRlcm5ldCBT
+ZWN1cml0eSBSZXNlYXJjaCBHcm91cDEVMBMGA1UEAxMMSVNSRyBSb290IFgyMHYw
+EAYHKoZIzj0CAQYFK4EEACIDYgAEzZvVn4CDCuwJSvMWSj5cz3es3mcFDR0HttwW
++1qLFNvicWDEukWVEYmO6gbf9yoWHKS5xcUy4APgHoIYOIvXRdgKam7mAHf7AlF9
+ItgKbppbd9/w+kHsOdx1ymgHDB/qo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T
+AQH/BAUwAwEB/zAdBgNVHQ4EFgQUfEKWrt5LSDv6kviejM9ti6lyN5UwCgYIKoZI
+zj0EAwMDaAAwZQIwe3lORlCEwkSHRhtFcP9Ymd70/aTSVaYgLXTWNLxBo1BfASdW
+tL4ndQavEi51mI38AjEAi/V3bNTIZargCyzuFJ0nN6T5U6VR5CmD1/iQMVtCnwr1
+/q4AaOeMSQ+2b1tbFfLn
 -----END CERTIFICATE-----)CERT";
 
 bool isTransientStatus(int status)
@@ -185,7 +199,8 @@ void addWorkspaceTools(JsonDocument& document)
     writeTool["function"]["name"] = "write_file";
     writeTool["function"]["description"] =
         "Create or replace a downloadable UTF-8 text file with an initial chunk up to 12288 bytes. "
-        "Allowed extensions: .txt, .md, .json, .csv, .html, .svg. Use append_file for more content.";
+        "Allowed extensions: .txt, .md, .json, .csv, .html, .svg, .py. "
+        "MicroPython can run .py files from the same workspace. Use append_file for more content.";
     writeTool["function"]["parameters"]["type"] = "object";
     writeTool["function"]["parameters"]["properties"]["name"]["type"] = "string";
     writeTool["function"]["parameters"]["properties"]["content"]["type"] = "string";
@@ -241,9 +256,29 @@ void addWebSearchTool(JsonDocument& document)
     document["tool_choice"] = "auto";
 }
 
+void addSshTool(JsonDocument& document)
+{
+    JsonArray tools = document["tools"].as<JsonArray>();
+    JsonObject sshTool = tools.add<JsonObject>();
+    sshTool["type"] = "function";
+    sshTool["function"]["name"] = "ssh_command";
+    sshTool["function"]["description"] =
+        "Execute one non-interactive command through the selected trusted SSH profile. "
+        "Use only when the user's request requires work on that remote machine.";
+    sshTool["function"]["parameters"]["type"] = "object";
+    sshTool["function"]["parameters"]["properties"]["command"]["type"] = "string";
+    sshTool["function"]["parameters"]["properties"]["command"]["description"] =
+        "A single UTF-8 shell command, up to 1024 bytes.";
+    JsonArray required = sshTool["function"]["parameters"]["required"].to<JsonArray>();
+    required.add("command");
+    sshTool["function"]["parameters"]["additionalProperties"] = false;
+    document["tool_choice"] = "auto";
+}
+
 String buildToolChatRequest(const Settings& settings,
                             const std::vector<Message>& history,
                             const std::string& instructions,
+                            bool sshToolAvailable,
                             const std::vector<ToolRound>& rounds)
 {
     JsonDocument document;
@@ -279,6 +314,12 @@ String buildToolChatRequest(const Settings& settings,
             "in the answer when web_search is used.";
     } else {
         systemPrompt += "No web-search tool is available.";
+    }
+    if (sshToolAvailable) {
+        systemPrompt +=
+            " The user explicitly granted this chat access to the selected SSH profile. "
+            "Use ssh_command only for remote-machine work requested by the user. Report the command's "
+            "non-zero exit status and never claim success when its output says otherwise.";
     }
     if (!instructions.empty()) {
         systemPrompt += "\n\nChat-specific instructions supplied by the user:\n";
@@ -319,6 +360,9 @@ String buildToolChatRequest(const Settings& settings,
     if (settings.webSearchApiKey.length() >= 8 &&
         settings.webSearchBaseUrl.startsWith("https://")) {
         addWebSearchTool(document);
+    }
+    if (sshToolAvailable) {
+        addSshTool(document);
     }
     String payload;
     serializeJson(document, payload);
@@ -477,7 +521,7 @@ private:
 
 void configureSecureClient(WiFiClientSecure& client)
 {
-    client.setCACert(kIsrgRootX1);
+    client.setCACert(kIsrgRoots);
     client.setHandshakeTimeout(20);
 }
 
@@ -486,6 +530,17 @@ void configureHttp(HTTPClient& http, const Settings& settings)
     http.setTimeout(kHttpTimeoutMs);
     http.addHeader("Authorization", authorizationHeader(settings));
     http.addHeader("Accept", "application/json");
+}
+
+String transportError(const char* operation, int status, WiFiClientSecure& client)
+{
+    String error = String(operation) + ": " + HTTPClient::errorToString(status);
+    char tlsMessage[160] = {};
+    const int tlsStatus = client.lastError(tlsMessage, sizeof(tlsMessage));
+    if (tlsStatus < 0) {
+        error += "; TLS " + String(tlsStatus) + ": " + String(tlsMessage);
+    }
+    return error;
 }
 
 }  // namespace
@@ -547,8 +602,9 @@ ModelsResult fetchModels(const Settings& settings)
             break;
         }
         const String responseBody = status > 0 ? http.getString() : String();
-        const String error = status > 0 ? parseApiError(status, responseBody)
-                                        : String("GET /v1/models failed: ") + HTTPClient::errorToString(status);
+        const String error = status > 0
+            ? parseApiError(status, responseBody)
+            : transportError("GET /v1/models failed", status, client);
         const bool retry = (status <= 0 || isTransientStatus(status)) && attempt < kMaxAttempts;
         http.end();
         if (!retry) {
@@ -609,8 +665,9 @@ CompletionTurnResult streamCompletionTurn(const Settings& settings,
         const int status = http.POST(payload);
         if (status != HTTP_CODE_OK) {
             const String body = status > 0 ? http.getString() : String();
-            lastError = status > 0 ? parseApiError(status, body)
-                                   : String("POST /v1/chat/completions failed: ") + HTTPClient::errorToString(status);
+            lastError = status > 0
+                ? parseApiError(status, body)
+                : transportError("POST /v1/chat/completions failed", status, client);
             const bool retry = (status <= 0 || isTransientStatus(status)) && attempt < kMaxAttempts;
             http.end();
             if (!retry) {
@@ -712,6 +769,7 @@ ChatResult streamChatCompletion(const Settings& settings,
 ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const std::vector<Message>& history,
                                          const std::string& instructions,
+                                         bool sshToolAvailable,
                                          const ChatTextCallback& onText,
                                          const ToolExecutor& executeTool,
                                          const CancelCallback& isCancelled)
@@ -726,7 +784,8 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
         if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
             return {false, completeResponse, "Not enough free heap to continue tool request safely"};
         }
-        const String payload = buildToolChatRequest(settings, history, instructions, rounds);
+        const String payload = buildToolChatRequest(
+            settings, history, instructions, sshToolAvailable, rounds);
         if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
             return {false, completeResponse,
                     "Tool payload left less than 70000 bytes of free heap; start a new chat"};

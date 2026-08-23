@@ -90,6 +90,11 @@ public:
     int read(std::uint8_t* output, std::size_t maximumBytes);
     OperationResult write(const std::uint8_t* data, std::size_t bytes,
                           std::uint32_t timeoutMs);
+    OperationResult executeCommand(const String& command,
+                                   std::string& output,
+                                   int& exitStatus,
+                                   std::size_t maximumOutputBytes,
+                                   std::uint32_t timeoutMs);
     OperationResult openSftp(std::uint32_t timeoutMs);
     SftpEntriesResult listSftpDirectory(const String& path,
                                         std::uint32_t timeoutMs);

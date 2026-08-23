@@ -6,11 +6,14 @@
 
 namespace cardputer {
 
+constexpr std::size_t kMaximumQrPayloadBytes = 320;
+
 enum class CarouselIcon {
     Chats,
     Ai,
     Voice,
     Network,
+    Web,
     Files,
     Device,
     Tools,

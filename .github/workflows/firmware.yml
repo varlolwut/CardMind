@@ -24,6 +24,9 @@ jobs:
       - name: Run host tests
         run: |
           mkdir -p build
+          python -m py_compile tools/package_firmware.py
+          python -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in Path('micropython/vfs').glob('*.py')]"
+          python tests/micropython_supervisor_test.py
           g++ -std=c++17 -Wall -Wextra -Werror \
             tests/host_tests.cpp \
             firmware/CardputerAssistant/src/text_utils.cpp \
@@ -61,16 +64,31 @@ jobs:
 
       - name: Compile Cardputer ADV firmware
         run: |
-          mkdir -p dist
+          mkdir -p build/release dist
           arduino-cli compile \
-            --fqbn "m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=default_8MB" \
+            --fqbn "m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom" \
             --libraries .ci-libs \
-            --output-dir dist \
+            --output-dir build/release \
             firmware/CardputerAssistant
-          cp dist/CardputerAssistant.ino.bin dist/CardMind-cardputer-adv.bin
-          cp dist/CardputerAssistant.ino.merged.bin dist/CardMind-cardputer-adv-merged.bin
-          cd dist
-          sha256sum CardMind-cardputer-adv.bin CardMind-cardputer-adv-merged.bin > SHA256SUMS.txt
+
+      - name: Package CardMind and MicroPython
+        run: |
+          curl --fail --location --silent --show-error \
+            https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20260406-v1.28.0.app-bin \
+            --output build/release/micropython.app-bin
+          echo "931f47de3076f51f386db204c2cc710d0ac42480ded50b1298cfb860e1bc1bfa  build/release/micropython.app-bin" \
+            | sha256sum --check --strict
+          MKLITTLEFS="$(find "$HOME/.arduino15/packages/m5stack/tools/mklittlefs" -type f -name mklittlefs -print -quit)"
+          test -x "$MKLITTLEFS"
+          "$MKLITTLEFS" -c micropython/vfs -b 4096 -p 32 -s 131072 build/release/micropython-vfs.bin
+          "$MKLITTLEFS" -l -b 4096 -p 32 -s 131072 build/release/micropython-vfs.bin \
+            | grep -F '/cardmind_supervisor.py'
+          python tools/package_firmware.py \
+            --cardmind-merged build/release/CardputerAssistant.ino.merged.bin \
+            --cardmind-app build/release/CardputerAssistant.ino.bin \
+            --micropython-app build/release/micropython.app-bin \
+            --vfs-image build/release/micropython-vfs.bin \
+            --output-dir dist
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -78,7 +96,7 @@ jobs:
           name: CardMind-cardputer-adv
           path: |
             dist/CardMind-cardputer-adv.bin
-            dist/CardMind-cardputer-adv-merged.bin
+            dist/CardMind-cardputer-adv-full.bin
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
@@ -93,13 +111,13 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               dist/CardMind-cardputer-adv.bin \
-              dist/CardMind-cardputer-adv-merged.bin \
+              dist/CardMind-cardputer-adv-full.bin \
               dist/SHA256SUMS.txt \
               --clobber
           else
             gh release create "$TAG" \
               dist/CardMind-cardputer-adv.bin \
-              dist/CardMind-cardputer-adv-merged.bin \
+              dist/CardMind-cardputer-adv-full.bin \
               dist/SHA256SUMS.txt \
               --target "$GITHUB_SHA" \
               --title "CardMind $TAG" \

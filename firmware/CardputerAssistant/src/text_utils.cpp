@@ -481,7 +481,8 @@ bool isValidWorkspaceFilename(const std::string& value)
     const std::string extension = value.substr(dot);
     return extension == ".txt" || extension == ".md" || extension == ".json" ||
            extension == ".jsonl" ||
-           extension == ".csv" || extension == ".html" || extension == ".svg";
+           extension == ".csv" || extension == ".html" || extension == ".svg" ||
+           extension == ".py";
 }
 
 bool requestsWorkspaceAccess(const std::string& prompt)
@@ -492,7 +493,7 @@ bool requestsWorkspaceAccess(const std::string& prompt)
         return true;
     }
     const std::vector<std::string> extensions = {
-        ".txt", ".md", ".json", ".csv", ".html", ".svg",
+        ".txt", ".md", ".json", ".csv", ".html", ".svg", ".py",
     };
     if (containsAny(value, extensions)) {
         return true;

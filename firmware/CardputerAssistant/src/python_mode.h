@@ -1,0 +1,24 @@
+#pragma once
+
+#include "app_types.h"
+
+namespace cardputer {
+
+struct PythonModeStatus {
+    bool partitionLayoutReady;
+    bool pythonImageReady;
+    std::uint32_t cardMindPartitionBytes;
+    std::uint32_t pythonPartitionBytes;
+    String lastRuntimeError;
+    String error;
+};
+
+PythonModeStatus inspectPythonMode();
+OperationResult synchronizePythonModeSettings(const Settings& settings,
+                                              const String& consolePassword);
+OperationResult activatePythonMode();
+OperationResult stageCardMindUpdateForPython(std::uint32_t firmwareBytes,
+                                             const String& sha256);
+OperationResult clearCardMindUpdateRequest();
+
+}  // namespace cardputer

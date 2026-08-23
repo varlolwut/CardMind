@@ -17,7 +17,7 @@ namespace {
 
 constexpr const char* kAssistantDirectory = "/assistant";
 constexpr const char* kChatsDirectory = "/assistant/chats";
-constexpr std::uint32_t kFormatVersion = 3;
+constexpr std::uint32_t kFormatVersion = 4;
 constexpr std::uint32_t kOldestSupportedFormatVersion = 1;
 
 String chatPath(const String& id, const char* extension)
@@ -108,6 +108,9 @@ ChatDocumentResult parseChatFile(File& file)
          !document["archived_message_count"].is<std::uint32_t>())) {
         return {false, {}, "Chat JSON is missing version-3 metadata"};
     }
+    if (version >= 4 && !document["ssh_tools_enabled"].is<bool>()) {
+        return {false, {}, "Chat JSON is missing version-4 SSH permission metadata"};
+    }
 
     ChatDocument result;
     result.summary.id = document["id"].as<const char*>();
@@ -119,6 +122,8 @@ ChatDocumentResult parseChatFile(File& file)
     result.summary.archived = version >= 3 ? document["archived"].as<bool>() : false;
     result.summary.archivedMessageCount = version >= 3
         ? document["archived_message_count"].as<std::uint32_t>() : 0;
+    result.sshToolsEnabled = version >= 4
+        ? document["ssh_tools_enabled"].as<bool>() : false;
     const JsonArrayConst messages = document["messages"].as<JsonArrayConst>();
     if (messages.size() > kMaximumStoredMessages) {
         return {false, {}, "Chat JSON contains too many messages"};
@@ -164,6 +169,7 @@ OperationResult writeChatFile(const ChatDocument& chat, const String& path)
     document["pinned"] = chat.summary.pinned;
     document["archived"] = chat.summary.archived;
     document["archived_message_count"] = chat.summary.archivedMessageCount;
+    document["ssh_tools_enabled"] = chat.sshToolsEnabled;
     JsonArray messages = document["messages"].to<JsonArray>();
     for (const auto& message : chat.messages) {
         JsonObject item = messages.add<JsonObject>();
@@ -705,6 +711,7 @@ ChatDocumentResult duplicateChat(const String& id)
     duplicate.messages = source.chat.messages;
     duplicate.instructions = source.chat.instructions;
     duplicate.draft = source.chat.draft;
+    duplicate.sshToolsEnabled = source.chat.sshToolsEnabled;
     const OperationResult saved = saveChat(duplicate);
     if (!saved.success) {
         deleteChat(duplicate.summary.id);

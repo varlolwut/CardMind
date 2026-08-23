@@ -6,6 +6,7 @@
 #include "file_workspace.h"
 #include "storage.h"
 #include "ssh_client.h"
+#include "ssh_tool.h"
 #include "text_utils.h"
 #include "ui.h"
 #include "web_search_client.h"
@@ -51,9 +52,12 @@ bool exitRequested = false;
 bool routesConfigured = false;
 File uploadFile;
 String uploadName;
+String uploadStorageName;
 String uploadError;
 std::size_t uploadBytes = 0;
 bool uploadCreated = false;
+bool uploadReplacing = false;
+constexpr const char* kWebSaveTemporaryName = "_cardmind-web-save.txt";
 File sshKeyUploadFile;
 String sshKeyUploadError;
 std::size_t sshKeyUploadBytes = 0;
@@ -63,6 +67,7 @@ SshProfile webSshProfile = {"", "", 22, "", "", SshAuthMode::Password, ""};
 bool webSshAwaitingTrust = false;
 bool webSshTerminalOpen = false;
 bool consoleEscapeConsumed = false;
+String consoleQrPayload;
 
 bool consoleEscapePressed()
 {
@@ -111,6 +116,7 @@ void clearConsoleSecrets()
     consoleSettings.sttApiKey = "";
     consoleSettings.webSearchApiKey = "";
     consoleSettings.ttsApiKey = "";
+    consoleQrPayload = "";
 }
 
 void failUpload(const String& error)
@@ -118,8 +124,8 @@ void failUpload(const String& error)
     if (uploadFile) {
         uploadFile.close();
     }
-    if (uploadCreated && !uploadName.isEmpty()) {
-        SD.remove(workspaceFilePath(uploadName));
+    if (uploadCreated && !uploadStorageName.isEmpty()) {
+        SD.remove(workspaceFilePath(uploadStorageName));
     }
     uploadCreated = false;
     uploadError = error;
@@ -267,55 +273,57 @@ void sendConsolePage()
     static const char pageStart[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CardMind Console</title><style>
-:root{color-scheme:dark;--bg:#050b12;--sidebar:#08111c;--surface:#0d1825;--raised:#121f2e;--line:#203247;--line2:#2e4660;--text:#f3f7fb;--muted:#8fa4b9;--accent:#65f2cc;--blue:#6eb7ff;--warn:#ffd479;--danger:#ff7185;--shadow:0 18px 55px #0006}
+:root{color-scheme:dark;--bg:#0a0c12;--sidebar:#0a0c12;--surface:#11141d;--raised:#151a22;--line:#292e3d;--line2:#394640;--text:#eef1ff;--muted:#87958f;--accent:#ff6b45;--blue:#8fa3ff;--mint:#61e6b5;--warn:#ffd36a;--danger:#ff9189;--shadow:0 18px 55px #0005}
 *{box-sizing:border-box}html,body{min-height:100%;background:var(--bg)}body{margin:0;font:14px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);letter-spacing:.005em}button,input,textarea,select{font:inherit}button{touch-action:manipulation}
-.app{min-height:100vh;display:grid;grid-template-columns:224px minmax(0,1fr);background:radial-gradient(circle at 70% -10%,#143350 0,transparent 34rem)}.sidebar{position:sticky;top:0;height:100vh;padding:22px 14px;display:flex;flex-direction:column;border-right:1px solid var(--line);background:#07101bea;backdrop-filter:blur(18px)}
-.brand{display:flex;align-items:center;gap:11px;padding:0 8px 24px}.brand-mark{width:38px;height:38px;border:1px solid #65f2cc66;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#173a45,#0c202b);color:var(--accent);font-weight:900;box-shadow:inset 0 0 20px #65f2cc18}.brand strong{display:block;font-size:16px;letter-spacing:.12em}.brand small{color:var(--muted)}
-.nav{display:grid;gap:6px}.tab{width:100%;display:flex;align-items:center;gap:11px;padding:11px 12px;border:0;border-radius:11px;background:transparent;color:var(--muted);text-align:left;cursor:pointer;font-weight:700}.tab:hover{background:#132335;color:var(--text)}.tab.active{background:linear-gradient(100deg,#183b42,#122738);color:var(--accent);box-shadow:inset 3px 0 var(--accent)}.nav-glyph{width:28px;height:28px;border:1px solid var(--line2);border-radius:8px;display:grid;place-items:center;font-size:10px;letter-spacing:.04em;color:var(--blue)}
-.side-status{margin-top:auto;padding:12px;border:1px solid var(--line);border-radius:12px;background:#0b1724}.online{display:flex;align-items:center;gap:8px;font-weight:700}.online-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}.device-pill{display:block;margin-top:5px;color:var(--muted);font-size:12px}.workspace{min-width:0}.topbar{height:72px;padding:0 28px;display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--line);background:#07101bb8;backdrop-filter:blur(18px);position:sticky;top:0;z-index:5}.page-title{font-size:17px;font-weight:800}.page-subtitle{color:var(--muted);font-size:12px}.spacer{flex:1}
-.shell{padding:24px 28px 42px;max-width:1480px;margin:auto}.panel{display:none}.panel.active{display:block}.card{background:linear-gradient(145deg,#0f1c2a,#0a1521);border:1px solid var(--line);border-radius:17px;box-shadow:var(--shadow)}.card-pad{padding:18px}.section-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:16px}.section-head h2{margin:0;font-size:17px}.section-head p{margin:4px 0 0;color:var(--muted);font-size:12px}.section-actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
-.chat-layout{display:grid;grid-template-columns:276px minmax(0,1fr);gap:16px;min-height:calc(100vh - 138px)}.chat-rail{padding:16px;align-self:start}.chat-main{display:flex;flex-direction:column;min-height:calc(100vh - 138px);overflow:hidden}.chat-main .section-head{padding:17px 18px 12px;margin:0;border-bottom:1px solid var(--line)}
-#messages{flex:1;min-height:44vh;max-height:calc(100vh - 340px);overflow:auto;padding:20px;scrollbar-color:#39546f transparent}.message{white-space:pre-wrap;max-width:min(78%,760px);padding:12px 14px;border-radius:15px;margin:0 0 13px;line-height:1.5;border:1px solid transparent}.user{margin-left:auto;background:#163840;border-color:#24525a}.assistant{background:#152238;border-color:#273b5b}.stream{color:var(--warn)}.composer{padding:14px;border-top:1px solid var(--line);background:#0a1522}.composer textarea{min-height:74px;max-height:190px}.composer-bar{display:flex;align-items:center;gap:8px;margin-top:8px}.shortcut{color:var(--muted);font-size:11px;margin-right:auto}
-textarea,input,select{box-sizing:border-box;width:100%;background:#07111c;color:var(--text);border:1px solid var(--line2);border-radius:10px;padding:10px 11px;outline:none}textarea:focus,input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px #65f2cc16}textarea{min-height:96px;resize:vertical}button{border:0;border-radius:10px;padding:10px 13px;cursor:pointer;background:var(--accent);color:#052019;font-weight:850}button:hover{filter:brightness(1.08)}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#1b3046;color:#dcecff}.ghost{background:transparent;color:var(--muted);border:1px solid var(--line2)}.danger{background:#512331;color:#ffc4cc}.icon-button{padding:9px 11px}
-.field-label{display:block;color:#b9cada;font-size:12px;font-weight:700;margin:13px 0 6px}.stack{display:grid;gap:9px}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1 1 150px}.compact>*{flex:0 1 auto}.full{width:100%}small,.muted{color:var(--muted)}details{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}summary{cursor:pointer;color:#b9cada;padding:7px 0;font-weight:700}
+.app{min-height:100vh;display:grid;grid-template-columns:214px minmax(0,1fr);background:radial-gradient(ellipse at 65% 20%,#26305226 0,transparent 45%),var(--bg)}.sidebar{position:sticky;top:0;height:100vh;padding:22px 14px 16px;display:flex;flex-direction:column;border-right:1px solid var(--line);background:#0a0c12dc;backdrop-filter:blur(18px)}
+.brand{display:flex;align-items:center;gap:11px;padding:0 8px 24px}.brand-mark{width:36px;height:36px;border:1px solid var(--accent);border-radius:3px;display:grid;place-items:center;background:#27150f;color:var(--accent);font-weight:900}.brand strong{display:block;font-size:14px;letter-spacing:.15em}.brand small{color:var(--muted);font:10px ui-monospace,Consolas,monospace}.nav-caption,.page-kicker{padding:0 10px 9px;color:var(--accent);font:700 10px ui-monospace,Consolas,monospace;letter-spacing:.14em}.page-kicker{padding:0;margin-bottom:3px}.side-bottom{margin-top:auto;display:grid;gap:10px}
+.nav{display:grid;gap:5px}.tab{width:100%;display:flex;align-items:center;gap:9px;min-height:44px;padding:8px 10px;border:1px solid transparent;border-radius:3px;background:transparent;color:#aebbb6;text-align:left;cursor:pointer;font-weight:700}.tab:hover{background:#171f1d;color:var(--text)}.tab.active{background:linear-gradient(100deg,#6c82ff2e,#61e6b514);border-color:#405149;color:var(--text);box-shadow:inset 3px 0 #6c82ff}.nav-glyph{width:27px;height:auto;border:0;border-radius:0;display:block;font:700 10px ui-monospace,Consolas,monospace;letter-spacing:.04em;color:var(--accent)}
+.side-status{padding:12px;border:1px solid #34413c;border-radius:3px;background:#11141dcc}.online{display:flex;align-items:center;gap:8px;font-weight:700}.online-dot{width:7px;height:7px;border-radius:0;background:var(--mint);box-shadow:0 0 10px #61e6b580}.device-pill{display:block;margin-top:5px;color:var(--muted);font:11px ui-monospace,Consolas,monospace}.workspace{min-width:0}.topbar{min-height:68px;padding:10px 22px;display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--line);box-shadow:inset 0 -2px #6c82ff2e;background:#0c0f17d9;backdrop-filter:blur(18px);position:sticky;top:0;z-index:5}.page-title{font-size:clamp(20px,2.4vw,28px);line-height:1;font-weight:800;letter-spacing:-.04em}.page-subtitle{color:var(--muted);font-size:11px;margin-top:4px}.spacer{flex:1}
+.shell{padding:14px 18px 22px;max-width:none;margin:0}.panel{display:none;animation:panel-in .2s ease}.panel.active{display:block}.card{background:#11141dc9;border:1px solid #303c37;border-radius:4px;box-shadow:var(--shadow);backdrop-filter:blur(16px)}.card-pad{padding:15px}.section-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}.section-head h2{margin:0;font-size:14px}.section-head p{margin:3px 0 0;color:var(--muted);font-size:11px}.section-actions{margin-left:auto;display:flex;gap:7px;flex-wrap:wrap}@keyframes panel-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.chat-layout{display:grid;grid-template-columns:250px minmax(360px,1fr);gap:14px;height:calc(100vh - 105px);min-height:520px}.chat-rail{padding:13px;min-height:0;overflow:hidden}.chat-rail select{height:calc(100% - 58px);min-height:300px}.chat-main{display:flex;flex-direction:column;min-height:0;overflow:hidden}.chat-main .section-head{padding:12px 14px;margin:0;border-bottom:1px solid var(--line)}
+#messages{flex:1;min-height:0;overflow:auto;padding:0 16px;scrollbar-color:#394640 transparent}.message{white-space:pre-wrap;max-width:none;padding:15px 0;border-radius:0;margin:0;line-height:1.58;border:0;border-bottom:1px solid #25302b}.user{margin:0;background:transparent;color:#dfe7e3}.assistant{background:transparent;color:#eef1ff}.assistant::first-line{color:var(--blue)}.stream{color:var(--warn)}.composer{margin:10px;padding:0;border:1px solid #3b4943;border-radius:3px;background:#101815}.composer textarea{min-height:82px;max-height:180px;border:0;background:transparent;box-shadow:none}.composer-bar{display:flex;align-items:center;gap:8px;padding:8px;border-top:1px solid #29342f;margin:0}.shortcut{color:var(--muted);font-size:11px;margin-right:auto}.intent-row{display:flex;align-items:center;gap:6px;padding:8px 10px 0}.intent-row>span{color:#7f879c;font:700 9px ui-monospace,Consolas,monospace;letter-spacing:.12em}.intent{min-height:28px;padding:0 9px;border:1px solid #5367bf;border-radius:14px;background:#6c82ff18;color:#aeb9ff;font-size:10px}
+textarea,input,select{box-sizing:border-box;width:100%;min-width:0;background:#0d1412;color:var(--text);border:1px solid var(--line2);border-radius:7px;padding:10px 11px;outline:none}textarea:focus,input:focus,select:focus{border-color:#ffd36a;box-shadow:0 0 0 2px #ffd36a33}textarea{min-height:96px;resize:vertical}button{min-width:0;min-height:38px;border:1px solid #ff8060;border-radius:7px;padding:8px 12px;cursor:pointer;background:#ff6b45;color:#1c0e09;font-weight:800;line-height:1.2;white-space:normal}button:hover{background:#ff8060}button:focus-visible{outline:2px solid #ffd36a;outline-offset:2px}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#18211f;color:#e5eee9;border-color:#46534e}.secondary:hover{background:#202c29}.ghost{background:#11141d;color:#b9c6c0;border:1px solid #3b4642}.ghost:hover{background:#1a211f;color:#f0f5f2}.danger{background:#3d2222;color:#ffb0aa;border-color:#754542}.danger:hover{background:#502928}.icon-button{min-width:38px;padding:7px 10px}
+.field-label{display:block;color:#b9cada;font-size:12px;font-weight:700;margin:13px 0 6px}.stack{display:grid;gap:9px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch}.row>*{flex:1 1 150px;min-width:0}.compact>*{flex:0 1 auto}.full{width:100%}small,.muted{color:var(--muted)}details{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}summary{cursor:pointer;color:#b9cada;padding:7px 0;font-weight:700}.qr-card{margin-top:16px}.qr-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,.55fr);gap:16px}.qr-actions{display:flex;gap:8px;flex-wrap:wrap}.qr-actions button{flex:1 1 150px}.permission{display:flex;align-items:flex-start;gap:10px;padding:11px;border:1px solid #46534e;border-radius:7px;background:#101815}.permission input{width:18px;height:18px;flex:0 0 auto;margin:1px 0 0}.permission span{line-height:1.4}.permission small{display:block;margin-top:3px}
 .split-layout{display:grid;grid-template-columns:minmax(250px,.72fr) minmax(0,1.55fr);gap:16px}.file-editor{min-height:58vh;font:13px ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.55}.terminal-layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px}.terminal{margin:0;background:#02060b;color:#c8ffe8;border:1px solid #274158;border-radius:12px;padding:14px;min-height:55vh;max-height:68vh;overflow:auto;white-space:pre-wrap;font:13px ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.48;outline:none}.terminal:focus{border-color:var(--accent);box-shadow:0 0 0 3px #65f2cc16}.terminal-card{padding:16px}.terminal-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.terminal-state{margin-right:auto;color:var(--muted);font-size:12px}.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.metric{background:#081522;border:1px solid var(--line);border-radius:12px;padding:13px}.metric b{display:block;color:var(--accent);font-size:20px}.metric span{color:var(--muted);font-size:11px}.settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
-.statusbar{position:fixed;right:22px;bottom:22px;z-index:20;max-width:min(430px,calc(100vw - 28px));padding:11px 14px;border:1px solid #765d28;border-radius:11px;background:#271f0eea;color:var(--warn);box-shadow:var(--shadow);backdrop-filter:blur(12px)}.statusbar:empty{display:none}.mobile-nav{display:none}.dialog{width:min(430px,calc(100vw - 28px));padding:0;border:1px solid var(--line2);border-radius:16px;background:#0d1825;color:var(--text);box-shadow:0 25px 80px #000b}.dialog::backdrop{background:#01050acc;backdrop-filter:blur(4px)}.dialog-body{padding:20px}.dialog h2{margin:0 0 7px}.dialog p{color:var(--muted);white-space:pre-wrap}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}#saveSettings{margin:13px 0 9px}#saveSettings+small{display:block;line-height:1.45}
+.statusbar{position:fixed;right:22px;bottom:22px;z-index:80;max-width:min(430px,calc(100vw - 28px));padding:10px 13px;border:1px solid #765d28;border-radius:7px;background:#271f0ef2;color:var(--warn);box-shadow:var(--shadow)}.statusbar:empty{display:none}.mobile-nav{display:none}.dialog{width:min(430px,calc(100vw - 28px));padding:0;border:1px solid var(--line2);border-radius:9px;background:#11141d;color:var(--text);box-shadow:0 25px 80px #000b}.dialog::backdrop{background:#01050acc;backdrop-filter:blur(4px)}.dialog-body{padding:20px}.dialog h2{margin:0 0 7px}.dialog p{color:var(--muted);white-space:pre-wrap}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:16px}#saveSettings{margin:13px 0 9px}#saveSettings+small{display:block;line-height:1.45}.chat-details{position:fixed;z-index:70;top:78px;right:22px;bottom:22px;width:min(360px,calc(100vw - 44px));overflow:auto;opacity:0;pointer-events:none;transform:translateX(22px);transition:opacity .16s ease,transform .2s ease;box-shadow:0 28px 90px #0008}.chat-details.open{opacity:1;pointer-events:auto;transform:none}.details-head{display:flex;justify-content:space-between;gap:10px;padding:13px;border-bottom:1px solid var(--line)}.details-head h2{margin:0;font-size:14px}.details-head p{margin:3px 0 0;color:var(--muted);font-size:11px}.details-section{padding:13px;border-bottom:1px solid var(--line)}.details-section h3{color:var(--muted);font:700 10px ui-monospace,Consolas,monospace;letter-spacing:.12em}.action-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}#chats option,#workspaceFiles option{padding:8px 7px;background:#0d1412;color:var(--text)}#chats option:checked,#workspaceFiles option:checked{background:linear-gradient(90deg,#6c82ff42,#61e6b518)}[data-view="files"] .split-layout{min-height:500px}[data-view="files"] .card{min-height:0;overflow:auto}[data-view="files"] .card:last-child{display:flex;flex-direction:column}[data-view="files"] .file-editor{flex:1;min-height:58vh;resize:vertical}[data-view="files"] #workspaceFiles{height:220px;min-height:145px}.chat-layout{height:calc(100vh - 119px)}
 @media(max-width:960px){.app{grid-template-columns:86px minmax(0,1fr)}.brand{justify-content:center;padding-inline:0}.brand-copy,.nav-label,.side-status{display:none}.tab{justify-content:center;padding:10px}.chat-layout{grid-template-columns:230px minmax(0,1fr)}.terminal-layout{grid-template-columns:270px minmax(0,1fr)}}
-@media(max-width:720px){body{padding-bottom:68px}.app{display:block}.sidebar{display:none}.topbar{height:62px;padding:0 14px}.shell{padding:13px 10px 22px}.page-subtitle{display:none}.mobile-nav{position:fixed;display:grid;grid-template-columns:repeat(4,1fr);left:8px;right:8px;bottom:8px;z-index:30;padding:6px;border:1px solid var(--line2);border-radius:15px;background:#091521ee;box-shadow:var(--shadow);backdrop-filter:blur(16px)}.mobile-nav .tab{display:grid;gap:2px;padding:6px 3px;font-size:10px;justify-items:center}.mobile-nav .tab.active{box-shadow:none;background:#17323b}.mobile-nav .nav-glyph{width:24px;height:24px}.chat-layout,.split-layout,.terminal-layout,.settings-grid{grid-template-columns:1fr}.chat-main{min-height:calc(100vh - 154px)}#messages{max-height:none;min-height:44vh;padding:13px}.message{max-width:92%}.chat-rail{order:2}.terminal-card{order:-1}.file-editor{min-height:44vh}.terminal{min-height:50vh}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.section-actions{width:100%;margin-left:0}.statusbar{right:14px;bottom:82px}.shortcut{display:none}}
+@media(max-width:720px){body{padding-bottom:96px}.app{display:block}.sidebar{display:none}.topbar{min-height:62px;height:auto;padding:10px 12px;display:grid;grid-template-columns:1fr 1fr;gap:8px}.topbar>div:first-child{grid-column:1/-1}.topbar>.spacer{display:none}.topbar>button{width:100%}.shell{padding:13px 10px 104px}.page-subtitle{display:none}.mobile-nav{position:fixed;display:grid;grid-template-columns:repeat(4,1fr);left:8px;right:8px;bottom:8px;z-index:40;padding:6px;border:1px solid var(--line2);border-radius:15px;background:#091521f5;box-shadow:var(--shadow);backdrop-filter:blur(16px)}.mobile-nav .tab{display:grid;gap:2px;min-height:48px;padding:6px 3px;font-size:10px;justify-items:center}.mobile-nav .tab.active{box-shadow:none;background:#17323b}.mobile-nav .nav-glyph{width:24px;height:24px}.chat-layout,.split-layout,.terminal-layout,.settings-grid,.qr-layout{grid-template-columns:1fr}.chat-main{min-height:calc(100vh - 154px)}#messages{max-height:none;min-height:44vh;padding:13px}.message{max-width:92%}.chat-rail{order:2}.terminal-card{order:-1}[data-view="files"] .split-layout{height:auto;min-height:0}[data-view="files"] .card{overflow:visible}[data-view="files"] #workspaceFiles{height:180px;min-height:145px}[data-view="files"] .file-editor{min-height:44vh}.terminal{min-height:50vh}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.section-head{flex-wrap:wrap}.section-actions{width:100%;margin-left:0}.section-actions button{flex:1 1 120px}.composer-bar{flex-wrap:wrap}.composer-bar button{flex:1 1 90px}.statusbar{right:14px;bottom:88px}.shortcut{display:none}}
 </style></head><body>
-<div class="app"><aside class="sidebar"><div class="brand"><div class="brand-mark">CM</div><div class="brand-copy"><strong>CARDMIND</strong><small>Device console</small></div></div><nav class="nav" aria-label="Console sections"><button class="tab active" data-panel="chat"><span class="nav-glyph">CH</span><span class="nav-label">Chat</span></button><button class="tab" data-panel="files"><span class="nav-glyph">FS</span><span class="nav-label">Files</span></button><button class="tab" data-panel="ssh"><span class="nav-glyph">&gt;_</span><span class="nav-label">SSH &amp; SFTP</span></button><button class="tab" data-panel="settings"><span class="nav-glyph">SYS</span><span class="nav-label">Settings</span></button></nav><div class="side-status"><span class="online"><span class="online-dot"></span>Cardputer online</span><span class="device-pill" id="device"></span></div></aside>
-<section class="workspace"><header class="topbar"><div><div class="page-title" id="pageTitle">Chat</div><div class="page-subtitle" id="pageSubtitle">Continue a conversation on your Cardputer</div></div><span class="spacer"></span><button class="ghost" id="refresh">Refresh</button><button class="secondary" id="logout">Log out</button></header><div class="shell"><main>
-<section class="panel active" data-view="chat"><div class="chat-layout"><aside class="card chat-rail"><div class="section-head"><div><h2>Conversations</h2><p>Stored on microSD</p></div><button class="icon-button" id="newChat" title="New chat">＋</button></div><select id="chats" size="7" aria-label="Chat"></select><details><summary>Manage chat</summary><div class="stack"><button class="secondary" id="renameChat">Rename</button><div class="row"><button class="ghost" id="pinChat">Pin</button><button class="ghost" id="archiveChat">Archive</button></div><button class="ghost" id="duplicateChat">Duplicate</button><div class="row"><button class="ghost" id="exportChat">Export .md</button><button class="ghost" id="exportBundle">Export bundle</button></div><button class="danger" id="deleteChat">Delete chat</button></div></details><label class="field-label" for="instructions">Chat instructions</label><textarea id="instructions" maxlength="2048" placeholder="For example: answer briefly and in Russian"></textarea><button class="full" id="saveInstructions">Save instructions</button></aside>
-<section class="card chat-main"><div class="section-head"><div><h2 id="activeChatTitle">Conversation</h2><p><span id="activeModel">Model</span> · streaming enabled</p></div><div class="section-actions"><button class="ghost" id="retry">Retry last</button></div></div><div id="messages" aria-live="polite"></div><div class="composer"><textarea id="prompt" maxlength="1200" placeholder="Ask CardMind anything..."></textarea><div class="composer-bar"><span class="shortcut">Ctrl/⌘ + Enter to send</span><button class="danger" id="stop">Stop</button><button id="send">Send message</button></div></div></section></div></section>
-<section class="panel" data-view="files"><div class="section-head"><div><h2>microSD workspace</h2><p>Browse and edit large files without loading them fully into RAM</p></div></div><div class="split-layout"><section class="card card-pad"><label class="field-label" for="files">Workspace files</label><select id="files" size="12"></select><div class="stack"><div class="row"><button id="openFile">Open</button><button class="secondary" id="downloadFile">Download</button></div><input id="uploadInput" type="file" accept=".txt,.md,.json,.jsonl,.csv,.html,.svg"><button id="uploadFile">Upload new file</button><button class="ghost" id="importChat">Import selected chat bundle</button><div class="row"><button class="ghost" id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></div></section><section class="card card-pad"><div class="section-head"><div><h2>Chunk editor</h2><p id="filePosition">Select a file to begin</p></div><div class="section-actions"><button class="ghost" id="previousFilePage">Previous</button><button class="ghost" id="nextFilePage">Next</button><button id="saveFile">Save chunk</button></div></div><textarea class="file-editor" id="fileContent" maxlength="12288" placeholder="File content appears here"></textarea></section></div></section>
+<div class="app"><aside class="sidebar"><div class="brand"><div class="brand-mark">CM</div><div class="brand-copy"><strong>CARDMIND</strong><small>Field console</small></div></div><div class="nav-caption">WORKBENCH</div><nav class="nav" aria-label="Console sections"><button class="tab active" data-panel="chat"><span class="nav-glyph">01</span><span class="nav-label">Chat log</span></button><button class="tab" data-panel="files"><span class="nav-glyph">02</span><span class="nav-label">Workspace</span></button><button class="tab" data-panel="ssh"><span class="nav-glyph">03</span><span class="nav-label">Terminal</span></button></nav><div class="side-bottom"><button class="tab" data-panel="settings"><span class="nav-glyph">04</span><span class="nav-label">Settings</span></button><div class="side-status"><span class="online"><span class="online-dot"></span>Cardputer online</span><span class="device-pill" id="device"></span></div></div></aside>
+<section class="workspace"><header class="topbar"><div><div class="page-kicker">WORKBENCH / <span id="pageKicker">CHAT</span></div><div class="page-title" id="pageTitle">Chat log</div><div class="page-subtitle" id="pageSubtitle">Continue a conversation on your Cardputer</div></div><span class="spacer"></span><button class="ghost" id="refresh">Refresh</button><button class="secondary" id="logout">Lock</button></header><div class="shell"><main>
+<section class="panel active" data-view="chat"><div class="chat-layout"><aside class="card chat-rail"><div class="section-head"><div><h2>Chat log</h2><p>microSD journal</p></div><button class="icon-button" id="newChat" title="New chat">＋</button></div><select id="chats" size="12" aria-label="Chat"></select></aside>
+<section class="card chat-main"><div class="section-head"><div><h2 id="activeChatTitle">Conversation</h2><p><span id="activeModel">Model</span> · streaming enabled</p></div><div class="section-actions"><button class="ghost" id="retry">Retry last</button><button class="ghost" id="openChatDetails" aria-controls="chatDetails" aria-expanded="false">Details</button></div></div><div id="messages" aria-live="polite"></div><div class="composer"><div class="intent-row"><span>INTENT</span><button type="button" class="intent" data-intent="/search ">Research</button><button type="button" class="intent" data-intent="/file ">Work with file</button></div><textarea id="prompt" maxlength="1200" placeholder="Ask CardMind... /search and /file are available"></textarea><div class="composer-bar"><span class="shortcut">Ctrl/⌘ + Enter to send</span><button class="danger" id="stop">Stop</button><button id="send">Send ↗</button></div></div></section></div></section>
+<section class="panel" data-view="files"><div class="section-head"><div><h2>microSD workspace</h2><p>Open, edit and save complete documents up to 480 KiB</p></div></div><div class="split-layout"><section class="card card-pad"><label class="field-label" for="workspaceFiles">Workspace files</label><select id="workspaceFiles" size="12"></select><div class="stack"><div class="row"><button id="openFile">Open</button><button class="secondary" id="downloadFile">Download</button></div><input id="uploadInput" type="file" accept=".txt,.md,.json,.jsonl,.csv,.html,.svg,.py"><button id="uploadFile">Upload new file</button><button class="ghost" id="importChat">Import selected chat bundle</button><div class="row"><button class="ghost" id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></div></section><section class="card card-pad"><div class="section-head"><div><h2 id="fileEditorTitle">File editor</h2><p id="filePosition">Select a file to begin</p></div><div class="section-actions"><button id="saveFile">Save file</button></div></div><textarea class="file-editor" id="fileContent" placeholder="File content appears here" spellcheck="false"></textarea></section></div><section class="card card-pad qr-card"><div class="qr-layout"><div><div class="section-head"><div><h2>QR display</h2><p>Show text or a small file directly on the Cardputer screen</p></div></div><textarea id="qrContent" maxlength="320" placeholder="URL, Wi-Fi details, token, or other text"></textarea><small id="qrCount">0 / 320 bytes</small></div><div class="stack"><p class="muted">QR payloads are limited to 320 UTF-8 bytes so the code remains scannable on the 240×135 display.</p><div class="qr-actions"><button id="showQr">Show on Cardputer</button><button class="secondary" id="qrFromFile">Use selected file</button><button class="ghost" id="closeQr">Restore console screen</button></div></div></div></section></section>
 <section class="panel" data-view="ssh"><div class="section-head"><div><h2>Remote terminal</h2><p>Interactive SSH and microSD-backed SFTP transfers</p></div></div><div class="terminal-layout"><aside class="stack"><section class="card card-pad"><div class="section-head"><div><h2>Connection</h2><p>Saved profiles stay on-device</p></div><button class="icon-button" id="newSsh" title="New profile">＋</button></div><select id="sshProfiles"></select><label class="field-label" for="sshName">Profile name</label><input id="sshName" maxlength="32" placeholder="Server"><div class="row"><input id="sshHost" maxlength="253" placeholder="Host"><input id="sshPort" type="number" min="1" max="65535" placeholder="Port"></div><input id="sshUser" maxlength="64" placeholder="Username"><select id="sshAuth"><option value="password">Password</option><option value="key">Private key</option></select><input id="sshPassword" type="password" maxlength="192" placeholder="New password (blank keeps current)"><input id="sshPassphrase" type="password" maxlength="192" placeholder="New key passphrase (blank keeps current)"><div class="row"><button id="saveSsh">Save profile</button><button class="danger" id="deleteSsh">Delete</button></div><input id="sshKeyInput" type="file" accept=".pem,.key"><button class="ghost" id="uploadSshKey">Install private key</button><small>Secrets are write-only. New host fingerprints require confirmation.</small></section><section class="card card-pad"><h2>SFTP</h2><div class="row"><input id="sftpPath" value="/" maxlength="511"><button id="listSftp">List</button></div><select id="sftpEntries" size="7"></select><div class="row"><button class="ghost" id="sftpOpen">Open directory</button><button id="sftpDownload">Download to SD</button></div><label class="field-label" for="sftpLocal">Workspace file to upload</label><div class="row"><select id="sftpLocal"></select><button id="sftpUpload">Upload</button></div></section></aside><section class="card terminal-card"><div class="terminal-toolbar"><span class="terminal-state" id="terminalState">Disconnected</span><button id="connectSsh">Connect</button><button id="disconnectSsh" class="danger">Disconnect</button><button class="ghost" id="clearSsh">Clear</button><button class="ghost" id="fullSsh">Fullscreen</button></div><pre id="sshTerminal" class="terminal" tabindex="0">Choose a profile and connect. Click here to type directly.</pre><div class="row"><input id="sshInput" maxlength="512" placeholder="Command for touch keyboards"><button id="sendSshInput">Send</button></div></section></div></section>
 <section class="panel" data-view="settings"><div class="section-head"><div><h2>Device settings</h2><p>Non-secret connection settings and live diagnostics</p></div></div><div class="settings-grid"><section class="card card-pad"><h2>LLM connection</h2><label class="field-label" for="apiBaseUrl">OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180"><label class="field-label" for="model">Model</label><input id="model" maxlength="120"><button id="saveSettings">Save settings</button><small>API keys remain write-only and are never sent to this page.</small></section><section class="card card-pad"><h2>Live device status</h2><div id="diagnostics" class="metrics"></div></section></div></section>
-</main></div></section></div><nav class="mobile-nav" aria-label="Mobile console sections"><button class="tab active" data-panel="chat"><span class="nav-glyph">CH</span>Chat</button><button class="tab" data-panel="files"><span class="nav-glyph">FS</span>Files</button><button class="tab" data-panel="ssh"><span class="nav-glyph">&gt;_</span>SSH</button><button class="tab" data-panel="settings"><span class="nav-glyph">SYS</span>Settings</button></nav><p id="status" class="statusbar" role="status"></p>
+</main></div></section></div><aside class="chat-details card" id="chatDetails" aria-hidden="true"><div class="details-head"><div><h2>Thread details</h2><p>Context, permissions and actions</p></div><button class="ghost" id="closeChatDetails" aria-label="Close thread details">×</button></div><section class="details-section"><label class="field-label" for="instructions">Instructions</label><textarea id="instructions" maxlength="2048" placeholder="For example: answer briefly and in Russian"></textarea><button class="full" id="saveInstructions">Save instructions</button></section><section class="details-section"><h3>Model permissions</h3><label class="permission" for="sshToolsEnabled"><input id="sshToolsEnabled" type="checkbox"><span>Allow SSH commands<small>The model may execute commands through the selected, already-trusted SSH profile. Disabled by default for every chat.</small></span></label><button class="secondary full" id="savePermissions">Save permissions</button></section><section class="details-section"><h3>Chat actions</h3><div class="action-grid"><button class="secondary" id="renameChat">Rename</button><button class="ghost" id="pinChat">Pin</button><button class="ghost" id="archiveChat">Archive</button><button class="ghost" id="duplicateChat">Duplicate</button><button class="ghost" id="exportChat">Export .md</button><button class="ghost" id="exportBundle">Bundle</button></div><button class="danger full" id="deleteChat">Delete chat</button></section></aside><nav class="mobile-nav" aria-label="Mobile console sections"><button class="tab active" data-panel="chat"><span class="nav-glyph">01</span>Chat log</button><button class="tab" data-panel="files"><span class="nav-glyph">02</span>Workspace</button><button class="tab" data-panel="ssh"><span class="nav-glyph">03</span>Terminal</button><button class="tab" data-panel="settings"><span class="nav-glyph">04</span>Settings</button></nav><p id="status" class="statusbar" role="status"></p>
 <dialog class="dialog" id="actionDialog"><form method="dialog" class="dialog-body"><h2 id="dialogTitle">Confirm action</h2><p id="dialogMessage"></p><input id="dialogInput"><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="dialogConfirm" value="confirm">Confirm</button></div></form></dialog>
 <script>)HTML";
     static const char pageEnd[] PROGMEM = R"HTML(
-const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[],activeRequest=null,lastPrompt='',sshConnected=false,sshPoll=null,sftpState=[],sshCreating=false;
-const panelCopy={chat:['Chat','Continue a conversation on your Cardputer'],files:['Files','Browse and edit the microSD workspace'],ssh:['SSH & SFTP','Work on remote machines from CardMind'],settings:['Settings','Connection details and device health']};
-function showPanel(name){const target=panelCopy[name]?name:'chat';for(const p of document.querySelectorAll('.panel'))p.classList.toggle('active',p.dataset.view===target);for(const b of document.querySelectorAll('.tab'))b.classList.toggle('active',b.dataset.panel===target);q('#pageTitle').textContent=panelCopy[target][0];q('#pageSubtitle').textContent=panelCopy[target][1];history.replaceState(null,'','#'+target)}
+const q=s=>document.querySelector(s);history.scrollRestoration='manual';let state=null,fileName='',fileBytes=0,activeRequest=null,lastPrompt='',sshConnected=false,sshPoll=null,sftpState=[],sshCreating=false;
+const panelCopy={chat:['Chat log','Continue a conversation on your Cardputer'],files:['Workspace','Open and edit complete microSD documents'],ssh:['Terminal','SSH and SFTP on remote machines'],settings:['Settings','Connection details and device health']};
+function closeChatDetails(){q('#chatDetails').classList.remove('open');q('#chatDetails').setAttribute('aria-hidden','true');q('#openChatDetails').setAttribute('aria-expanded','false')}
+function showPanel(name){const target=panelCopy[name]?name:'chat';closeChatDetails();for(const p of document.querySelectorAll('.panel'))p.classList.toggle('active',p.dataset.view===target);for(const b of document.querySelectorAll('.tab'))b.classList.toggle('active',b.dataset.panel===target);q('#pageTitle').textContent=panelCopy[target][0];q('#pageSubtitle').textContent=panelCopy[target][1];q('#pageKicker').textContent=target.toUpperCase();history.replaceState(null,'','#'+target);window.scrollTo(0,0)}
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>showPanel(b.dataset.panel);showPanel(location.hash.slice(1)||'chat');
-function showError(error){q('#status').textContent=error instanceof Error?error.message:String(error)}
+let statusTimer=null;function showStatus(message){clearTimeout(statusTimer);q('#status').textContent=message||'';if(message)statusTimer=setTimeout(()=>q('#status').textContent='',5000)}function showError(error){showStatus(error instanceof Error?error.message:String(error))}
 window.addEventListener('unhandledrejection',event=>{showError(event.reason);event.preventDefault()});
 q('#prompt').addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();q('#send').click()}});
 function askDialog(title,message,value,confirmLabel,danger,inputVisible){const dialog=q('#actionDialog');q('#dialogTitle').textContent=title;q('#dialogMessage').textContent=message;q('#dialogInput').value=value||'';q('#dialogInput').hidden=!inputVisible;q('#dialogConfirm').textContent=confirmLabel;q('#dialogConfirm').className=danger?'danger':'';dialog.showModal();if(inputVisible)q('#dialogInput').focus();return new Promise(resolve=>dialog.addEventListener('close',()=>resolve(dialog.returnValue==='confirm'?(inputVisible?q('#dialogInput').value:true):null),{once:true}))}
 const askText=(title,value)=>askDialog(title,'Enter a new value.',value,'Save',false,true);const askConfirm=(title,message,label)=>askDialog(title,message,'',label,true,false);
 q('#dialogInput').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();q('#actionDialog').close('confirm')}};
 async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}if(!r.ok){let message=`HTTP ${r.status}`;try{message=(await r.json()).error||message}catch{}throw new Error(message)}return r}
-function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;q('#status').textContent=s.status||'';
+function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;if(s.status)showStatus(s.status);
 q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=`${c.pinned?'📌 ':c.archived?'📦 ':''}${c.title} · ${c.total_messages}`;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
 q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}
-q('#activeChatTitle').textContent=s.active_chat_title||'Conversation';q('#activeModel').textContent=s.model||'Model';q('#instructions').value=s.instructions||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
+q('#activeChatTitle').textContent=s.active_chat_title||'Conversation';q('#activeModel').textContent=s.model||'Model';q('#instructions').value=s.instructions||'';q('#sshToolsEnabled').checked=s.ssh_tools_enabled===true;q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
 q('#sshProfiles').innerHTML='';for(const [i,p] of (s.ssh_profiles||[]).entries()){const o=document.createElement('option');o.value=i;o.textContent=`${i===s.ssh_selected?'★ ':''}${p.name} · ${p.username}@${p.host}`;o.selected=i===s.ssh_selected;q('#sshProfiles').append(o)}
 q('#sshName').value=s.ssh_name||'';q('#sshHost').value=s.ssh_host||'';q('#sshPort').value=s.ssh_port||22;q('#sshUser').value=s.ssh_username||'';q('#sshAuth').value=s.ssh_auth_mode||'password';sshConnected=!!s.ssh_terminal_open;q('#terminalState').textContent=sshConnected?'Connected':'Disconnected';
 const metrics=[['Battery',`${s.battery}%`],['Wi-Fi',`${s.wifi_rssi} dBm`],['Free heap',`${Math.round(s.free_heap/1024)} KiB`],['Largest block',`${Math.round(s.largest_heap/1024)} KiB`],['microSD used',`${Math.round(s.sd_used_bytes/1048576)} MiB`],['microSD total',`${Math.round(s.sd_total_bytes/1048576)} MiB`]];q('#diagnostics').textContent='';for(const [label,value] of metrics){const d=document.createElement('div'),b=document.createElement('b'),span=document.createElement('span');d.className='metric';b.textContent=value;span.textContent=label;d.append(b,span);q('#diagnostics').append(d)}
-const selected=q('#files').value;q('#files').innerHTML='';q('#sftpLocal').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#files').append(o);q('#sftpLocal').append(o.cloneNode(true))}q('#messages').scrollTop=q('#messages').scrollHeight}
+const selected=q('#workspaceFiles').value;q('#workspaceFiles').innerHTML='';q('#sftpLocal').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#workspaceFiles').append(o);q('#sftpLocal').append(o.cloneNode(true))}q('#messages').scrollTop=q('#messages').scrollHeight}
 async function refresh(){const r=await request('/api/state');render(await r.json())}
 async function post(path,values){return request(path,{method:'POST',body:new URLSearchParams(values)})}
-async function openFile(offset,pushBack){const selected=q('#files').value;if(!selected)return;if(pushBack&&fileName===selected)fileBack.push(fileOffset);else if(fileName!==selected)fileBack=[];const r=await request(`/api/file?name=${encodeURIComponent(selected)}&offset=${offset}`);const f=await r.json();fileName=selected;fileOffset=f.offset;fileNextOffset=f.next_offset;fileOriginalBytes=f.next_offset-f.offset;fileEof=f.eof;q('#fileContent').value=f.content;q('#filePosition').textContent=`${fileOffset}-${fileNextOffset} / ${f.total_bytes} bytes`}
+const formatBytes=value=>value<1024?`${value} B`:`${(value/1024).toFixed(value<10240?1:0)} KiB`;
+async function openFile(){const selected=q('#workspaceFiles').value;if(!selected)return;fileName=selected;fileBytes=0;q('#fileEditorTitle').textContent=selected;q('#fileContent').value='';q('#fileContent').disabled=true;q('#saveFile').disabled=true;let offset=0,content='',total=0;do{q('#filePosition').textContent=`Opening ${formatBytes(offset)}...`;const r=await request(`/api/file?name=${encodeURIComponent(selected)}&offset=${offset}`),f=await r.json();if(f.offset!==offset)throw new Error(`File read resumed at ${f.offset}, expected ${offset}`);content+=f.content;offset=f.next_offset;total=f.total_bytes;if(f.eof)break;if(f.next_offset<=f.offset)throw new Error('File read did not advance')}while(offset<total);fileBytes=new Blob([content]).size;if(fileBytes!==total)throw new Error(`Decoded file has ${fileBytes} bytes, expected ${total}`);q('#fileContent').value=content;q('#fileContent').disabled=false;q('#saveFile').disabled=false;q('#filePosition').textContent=`${formatBytes(fileBytes)} · UTF-8 · Ready`}
 q('#refresh').onclick=refresh;q('#chats').onchange=async()=>{await request('/api/chat/select',{method:'POST',body:new URLSearchParams({id:q('#chats').value})});await refresh()};
 q('#newChat').onclick=async()=>{await request('/api/chat/new',{method:'POST'});await refresh()};
 q('#renameChat').onclick=async()=>{const title=await askText('Rename chat',state.active_chat_title);if(title){await post('/api/chat/rename',{title});await refresh()}};
@@ -323,6 +331,8 @@ q('#pinChat').onclick=async()=>{await post('/api/chat/pin',{});await refresh()};
 q('#duplicateChat').onclick=async()=>{await post('/api/chat/duplicate',{});await refresh()};q('#exportChat').onclick=async()=>{await post('/api/chat/export',{});await refresh()};q('#exportBundle').onclick=async()=>{await post('/api/chat/export-bundle',{});await refresh()};
 q('#deleteChat').onclick=async()=>{if(await askConfirm('Delete chat',`"${state.active_chat_title}" and its history will be removed from microSD.`,'Delete')){await post('/api/chat/delete',{});await refresh()}};
 q('#saveInstructions').onclick=async()=>{await request('/api/chat/instructions',{method:'POST',body:new URLSearchParams({instructions:q('#instructions').value})});await refresh()};
+q('#savePermissions').onclick=async()=>{if(q('#sshToolsEnabled').checked&&!state.ssh_configured)throw new Error('Configure a complete SSH profile before granting model access');await post('/api/chat/permissions',{ssh_tools_enabled:q('#sshToolsEnabled').checked?'1':'0'});await refresh()};
+q('#openChatDetails').onclick=()=>{const open=!q('#chatDetails').classList.contains('open');q('#chatDetails').classList.toggle('open',open);q('#chatDetails').setAttribute('aria-hidden',open?'false':'true');q('#openChatDetails').setAttribute('aria-expanded',open?'true':'false')};q('#closeChatDetails').onclick=closeChatDetails;document.addEventListener('keydown',event=>{if(event.key==='Escape'&&q('#chatDetails').classList.contains('open'))closeChatDetails()});for(const button of document.querySelectorAll('.intent'))button.onclick=()=>{q('#prompt').value=button.dataset.intent;q('#prompt').focus()};
 q('#saveSettings').onclick=async()=>{await post('/api/settings',{api_base_url:q('#apiBaseUrl').value,model:q('#model').value});await refresh()};
 q('#saveSsh').onclick=async()=>{const password=q('#sshPassword').value,passphrase=q('#sshPassphrase').value;await post('/api/ssh/settings',{name:q('#sshName').value,host:q('#sshHost').value,port:q('#sshPort').value,username:q('#sshUser').value,auth_mode:q('#sshAuth').value,password,replace_password:password?'1':'0',key_passphrase:passphrase,replace_key_passphrase:passphrase?'1':'0',create:sshCreating?'1':'0'});sshCreating=false;q('#sshPassword').value='';q('#sshPassphrase').value='';await refresh()};
 q('#sshProfiles').onchange=async()=>{sshCreating=false;await post('/api/ssh/select',{index:q('#sshProfiles').value});await refresh()};
@@ -340,14 +350,18 @@ q('#listSftp').onclick=async()=>{const r=await request(`/api/ssh/sftp/list?path=
 q('#sftpOpen').onclick=()=>{const e=sftpState[Number(q('#sftpEntries').value)];if(e&&e.directory){const p=q('#sftpPath').value;q('#sftpPath').value=(p==='/'?'':p)+'/'+e.name;q('#listSftp').click()}};
 q('#sftpDownload').onclick=async()=>{const e=sftpState[Number(q('#sftpEntries').value)];if(!e||e.directory)return;const name=await askText('Workspace filename',e.name);if(name){await post('/api/ssh/sftp/download',{path:(q('#sftpPath').value==='/'?'':q('#sftpPath').value)+'/'+e.name,name});await refresh()}};
 q('#sftpUpload').onclick=async()=>{const name=q('#sftpLocal').value;if(name){const remote=await askText('Remote filename',name);if(remote){await post('/api/ssh/sftp/upload',{name,path:(q('#sftpPath').value==='/'?'':q('#sftpPath').value)+'/'+remote});q('#listSftp').click()}}};
-q('#openFile').onclick=()=>openFile(0,false);q('#nextFilePage').onclick=()=>{if(!fileEof)openFile(fileNextOffset,true)};
-q('#previousFilePage').onclick=()=>{if(fileBack.length)openFile(fileBack.pop(),false)};
-q('#saveFile').onclick=async()=>{if(!fileName)return;await post('/api/file/save',{name:fileName,offset:String(fileOffset),original_bytes:String(fileOriginalBytes),content:q('#fileContent').value});await refresh();await openFile(fileOffset,false)};
-q('#downloadFile').onclick=()=>{const name=q('#files').value;if(name)location=`/api/file/download?name=${encodeURIComponent(name)}`};
+q('#openFile').onclick=openFile;
+q('#saveFile').onclick=async()=>{if(!fileName)return;const blob=new Blob([q('#fileContent').value],{type:'text/plain;charset=utf-8'});if(blob.size>491520)throw new Error(`File is ${blob.size} bytes; the limit is 491520 bytes`);q('#saveFile').disabled=true;q('#filePosition').textContent=`Saving ${formatBytes(blob.size)}...`;try{const data=new FormData();data.append('file',blob,fileName);await request(`/api/file/upload?replace=1&name=${encodeURIComponent(fileName)}`,{method:'POST',body:data});fileBytes=blob.size;q('#filePosition').textContent=`${formatBytes(fileBytes)} · UTF-8 · Saved`;await refresh()}finally{q('#saveFile').disabled=false}};
+q('#downloadFile').onclick=()=>{const name=q('#workspaceFiles').value;if(name)location=`/api/file/download?name=${encodeURIComponent(name)}`};
 q('#uploadFile').onclick=async()=>{const file=q('#uploadInput').files[0];if(!file)return;const data=new FormData();data.append('file',file,file.name);await request('/api/file/upload',{method:'POST',body:data});q('#uploadInput').value='';await refresh()};
-q('#importChat').onclick=async()=>{const name=q('#files').value;if(name){await post('/api/chat/import',{name});await refresh()}};
-q('#renameFile').onclick=async()=>{const name=q('#files').value,newName=await askText('Rename file',name);if(newName&&newName!==name){await post('/api/file/rename',{name,new_name:newName});fileName='';await refresh()}};
-q('#deleteFile').onclick=async()=>{const name=q('#files').value;if(name&&await askConfirm('Delete file',`${name} will be removed from the microSD workspace.`,'Delete')){await post('/api/file/delete',{name});fileName='';q('#fileContent').value='';q('#filePosition').textContent='';await refresh()}};
+q('#importChat').onclick=async()=>{const name=q('#workspaceFiles').value;if(name){await post('/api/chat/import',{name});await refresh()}};
+q('#renameFile').onclick=async()=>{const name=q('#workspaceFiles').value,newName=await askText('Rename file',name);if(newName&&newName!==name){await post('/api/file/rename',{name,new_name:newName});fileName='';q('#fileEditorTitle').textContent='File editor';q('#fileContent').value='';q('#filePosition').textContent='Select a file to begin';await refresh()}};
+q('#deleteFile').onclick=async()=>{const name=q('#workspaceFiles').value;if(name&&await askConfirm('Delete file',`${name} will be removed from the microSD workspace.`,'Delete')){await post('/api/file/delete',{name});fileName='';q('#fileEditorTitle').textContent='File editor';q('#fileContent').value='';q('#filePosition').textContent='Select a file to begin';await refresh()}};
+function updateQrCount(){const bytes=new TextEncoder().encode(q('#qrContent').value).length;q('#qrCount').textContent=`${bytes} / 320 bytes`;q('#showQr').disabled=bytes===0||bytes>320}
+q('#qrContent').oninput=updateQrCount;updateQrCount();
+q('#showQr').onclick=async()=>{await post('/api/qr/show',{content:q('#qrContent').value});showStatus('QR is now visible on the Cardputer')};
+q('#qrFromFile').onclick=async()=>{const name=q('#workspaceFiles').value;if(!name)throw new Error('Select a workspace file first');const r=await request(`/api/qr/file?name=${encodeURIComponent(name)}`),x=await r.json();q('#qrContent').value=x.content;updateQrCount();showStatus(`Loaded ${name} into the QR display`)};
+q('#closeQr').onclick=async()=>{await post('/api/qr/close',{});showStatus('Cardputer console access screen restored')};
 async function sendPrompt(){const prompt=q('#prompt').value.trim();if(!prompt)return;lastPrompt=prompt;q('#send').disabled=true;q('#status').textContent='Streaming...';activeRequest=new AbortController();
 const d=document.createElement('div');d.className='message assistant stream';d.textContent='AI: ';q('#messages').append(d);
 try{const r=await request('/api/prompt',{method:'POST',body:new URLSearchParams({prompt}),signal:activeRequest.signal});const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';
@@ -442,6 +456,7 @@ void handleState()
     document["active_context_messages"] = activeChat.summary.messageCount;
     document["archived_messages"] = activeChat.summary.archivedMessageCount;
     document["instructions"] = activeChat.instructions;
+    document["ssh_tools_enabled"] = activeChat.sshToolsEnabled;
     document["status"] = consoleStatus;
     document["model"] = consoleSettings.model;
     document["api_base_url"] = consoleSettings.apiBaseUrl;
@@ -525,6 +540,13 @@ ToolExecutionResult executeConsoleTool(const ToolCall& call,
         call.name == "write_file" || call.name == "append_file") {
         return executeWorkspaceTool(call);
     }
+    if (isSshToolName(call.name)) {
+        if (!activeChat.sshToolsEnabled) {
+            return {false, "{\"ok\":false,\"error\":\"permission denied\"}",
+                    "SSH tool access is disabled for this chat"};
+        }
+        return executeSshTool(call, isCancelled);
+    }
     return {false, "{\"ok\":false,\"error\":\"unsupported tool\"}",
             "API requested unsupported tool '" + String(call.name.c_str()) + "'"};
 }
@@ -598,6 +620,7 @@ void handlePrompt()
     };
     const bool useWorkspace = requestsWorkspaceAccess(prompt);
     const bool useSearch = webSearchSettingsAreComplete(consoleSettings);
+    const bool useSsh = activeChat.sshToolsEnabled && sshToolIsAvailable();
     const CancelCallback isCancelled = []() {
         M5Cardputer.update();
         if (consoleEscapePressed()) {
@@ -606,10 +629,11 @@ void handlePrompt()
         }
         return !server.client().connected();
     };
-    markOperation(useWorkspace || useSearch ? "web_console_tools" : "web_console_chat");
-    const ChatResult result = useWorkspace || useSearch
+    markOperation(useWorkspace || useSearch || useSsh
+        ? "web_console_tools" : "web_console_chat");
+    const ChatResult result = useWorkspace || useSearch || useSsh
         ? streamChatCompletionWithTools(consoleSettings, activeChat.messages,
-                                        activeChat.instructions, onText,
+                                        activeChat.instructions, useSsh, onText,
                                         [&isCancelled](const ToolCall& call) {
                                             return executeConsoleTool(call, isCancelled);
                                         },
@@ -718,6 +742,44 @@ void handleInstructions()
     consoleStatus = instructions.empty() ? String("Instructions disabled")
                                          : String("Instructions saved");
     renderConsoleChat();
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleChatPermissions()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const String requested = server.arg("ssh_tools_enabled");
+    if (requested != "0" && requested != "1") {
+        sendJsonError(400, "SSH tool permission must be either 0 or 1");
+        return;
+    }
+    if (requested == "1") {
+        SshProfile profile;
+        const OperationResult loaded = loadSshProfile(profile);
+        const bool complete = loaded.success && sshProfileIsComplete(profile);
+        profile.password = "";
+        profile.privateKeyPassphrase = "";
+        if (!complete) {
+            sendJsonError(409, loaded.success
+                ? String("A complete selected SSH profile is required") : loaded.error);
+            return;
+        }
+    }
+    activeChat.sshToolsEnabled = requested == "1";
+    activeChat.summary.updatedAt = currentTimestamp();
+    const OperationResult saved = saveChat(activeChat);
+    if (!saved.success) {
+        sendJsonError(500, saved.error);
+        return;
+    }
+    consoleStatus = activeChat.sshToolsEnabled
+        ? String("Model SSH access enabled for this chat")
+        : String("Model SSH access disabled for this chat");
     JsonDocument document;
     document["ok"] = true;
     sendJson(200, document);
@@ -933,6 +995,10 @@ void handleSettings()
     }
     Settings updated = consoleSettings;
     updated.apiBaseUrl = server.arg("api_base_url");
+    updated.apiBaseUrl.trim();
+    while (updated.apiBaseUrl.endsWith("/")) {
+        updated.apiBaseUrl.remove(updated.apiBaseUrl.length() - 1);
+    }
     updated.model = server.arg("model");
     const OperationResult result = saveSettings(updated);
     if (!result.success) {
@@ -1357,6 +1423,66 @@ void handleSshKeyUploadComplete()
     sendJson(200, document);
 }
 
+void handleQrShow()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const String content = server.arg("content");
+    const std::string payload = content.c_str();
+    if (payload.empty() || payload.size() > kMaximumQrPayloadBytes ||
+        !isValidUtf8(payload)) {
+        sendJsonError(400, "QR content must be valid UTF-8 between 1 and 320 bytes");
+        return;
+    }
+    consoleQrPayload = content;
+    showQrCode("WEB QR", consoleQrPayload, "Manage in Web Console");
+    JsonDocument document;
+    document["ok"] = true;
+    document["bytes"] = payload.size();
+    sendJson(200, document);
+}
+
+void handleQrFile()
+{
+    if (!sessionIsActive()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const WorkspaceChunkResult result = readWorkspaceFileChunk(
+        server.arg("name"), 0, kMaximumQrPayloadBytes + 1);
+    if (!result.success) {
+        sendJsonError(400, result.error);
+        return;
+    }
+    if (!result.eof || result.totalBytes == 0 ||
+        result.totalBytes > kMaximumQrPayloadBytes) {
+        sendJsonError(400, "Selected file must contain 1 to 320 UTF-8 bytes for QR display");
+        return;
+    }
+    consoleQrPayload = result.content.c_str();
+    showQrCode("FILE QR", consoleQrPayload, "Manage in Web Console");
+    JsonDocument document;
+    document["ok"] = true;
+    document["content"] = result.content;
+    document["bytes"] = result.totalBytes;
+    sendJson(200, document);
+}
+
+void handleQrClose()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    consoleQrPayload = "";
+    showWebConsoleAccess("http://" + WiFi.localIP().toString(), accessPassword);
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
 void handleFileRead()
 {
     if (!sessionIsActive()) {
@@ -1473,7 +1599,9 @@ void handleFileUploadData()
 {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
-        uploadName = upload.filename;
+        uploadReplacing = server.arg("replace") == "1";
+        uploadName = uploadReplacing ? server.arg("name") : upload.filename;
+        uploadStorageName = uploadReplacing ? String(kWebSaveTemporaryName) : uploadName;
         uploadError = "";
         uploadBytes = 0;
         uploadCreated = false;
@@ -1481,13 +1609,27 @@ void handleFileUploadData()
             uploadError = "Authentication required";
             return;
         }
-        const OperationResult created = createWorkspaceFile(uploadName);
-        if (!created.success) {
-            uploadError = created.error;
+        if (uploadReplacing &&
+            (!isValidWorkspaceFilename(uploadName.c_str()) ||
+             !SD.exists(workspaceFilePath(uploadName)))) {
+            uploadError = "Workspace file does not exist: " + uploadName;
             return;
         }
+        if (uploadReplacing && SD.exists(workspaceFilePath(uploadStorageName)) &&
+            !SD.remove(workspaceFilePath(uploadStorageName))) {
+            uploadError = "Failed to clear the temporary Web Console save file";
+            return;
+        }
+        if (!uploadReplacing) {
+            const OperationResult created = createWorkspaceFile(uploadStorageName);
+            if (!created.success) {
+                uploadError = created.error;
+                return;
+            }
+        }
         uploadCreated = true;
-        uploadFile = SD.open(workspaceFilePath(uploadName), FILE_APPEND);
+        uploadFile = SD.open(workspaceFilePath(uploadStorageName),
+                             uploadReplacing ? FILE_WRITE : FILE_APPEND);
         if (!uploadFile) {
             failUpload("Failed to open the new workspace file for upload");
         }
@@ -1515,10 +1657,18 @@ void handleFileUploadData()
         }
         uploadFile.flush();
         uploadFile.close();
-        const OperationResult valid = validateWorkspaceFileUtf8(uploadName);
+        const OperationResult valid = validateWorkspaceFileUtf8(uploadStorageName);
         if (!valid.success) {
             failUpload(valid.error);
             return;
+        }
+        if (uploadReplacing) {
+            const OperationResult replaced = replaceWorkspaceFileWithTemporary(
+                uploadName, uploadStorageName);
+            if (!replaced.success) {
+                failUpload(replaced.error);
+                return;
+            }
         }
         uploadCreated = false;
         return;
@@ -1539,7 +1689,7 @@ void handleFileUploadComplete()
         sendJsonError(400, uploadError);
         return;
     }
-    consoleStatus = "File uploaded";
+    consoleStatus = uploadReplacing ? "File saved" : "File uploaded";
     JsonDocument document;
     document["ok"] = true;
     document["name"] = uploadName;
@@ -1635,6 +1785,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/chat/select", HTTP_POST, handleSelectChat);
         server.on("/api/chat/new", HTTP_POST, handleNewChat);
         server.on("/api/chat/instructions", HTTP_POST, handleInstructions);
+        server.on("/api/chat/permissions", HTTP_POST, handleChatPermissions);
         server.on("/api/chat/rename", HTTP_POST, handleRenameChat);
         server.on("/api/chat/pin", HTTP_POST, handlePinChat);
         server.on("/api/chat/archive", HTTP_POST, handleArchiveChat);
@@ -1657,6 +1808,9 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/ssh/sftp/upload", HTTP_POST, handleSftpUpload);
         server.on("/api/ssh/key", HTTP_POST,
                   handleSshKeyUploadComplete, handleSshKeyUploadData);
+        server.on("/api/qr/show", HTTP_POST, handleQrShow);
+        server.on("/api/qr/file", HTTP_GET, handleQrFile);
+        server.on("/api/qr/close", HTTP_POST, handleQrClose);
         server.on("/api/file", HTTP_GET, handleFileRead);
         server.on("/api/file/save", HTTP_POST, handleFileSave);
         server.on("/api/file/rename", HTTP_POST, handleFileRename);

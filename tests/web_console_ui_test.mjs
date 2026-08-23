@@ -23,15 +23,50 @@ const requiredFragments = [
     'data-view="settings"',
     'id="messages"',
     'id="fileContent"',
+    'id="workspaceFiles"',
     'id="sshTerminal"',
     'id="diagnostics"',
     'id="actionDialog"',
+    'id="chatDetails"',
+    'id="openChatDetails"',
+    'id="fileEditorTitle"',
+    'id="qrContent"',
+    'id="showQr"',
+    'id="qrFromFile"',
+    'id="sshToolsEnabled"',
+    'id="savePermissions"',
     'class="mobile-nav"',
+    'data-panel="chat"><span class="nav-glyph">01</span>Chat log</button>',
+    'data-panel="files"><span class="nav-glyph">02</span>Workspace</button>',
+    'data-panel="ssh"><span class="nav-glyph">03</span>Terminal</button>',
+    'data-panel="settings"><span class="nav-glyph">04</span>Settings</button>',
+    '[data-view="files"] .split-layout{height:auto;min-height:0}',
+    '[data-view="files"] .file-editor{min-height:44vh}',
+    '/api/file/upload?replace=1&name=',
+    '/api/qr/show',
+    '/api/qr/file?name=',
+    '/api/chat/permissions',
 ];
 
 for (const fragment of requiredFragments) {
     if (!page.includes(fragment)) {
         throw new Error(`Web console page is missing ${fragment}`);
+    }
+}
+
+const forbiddenFragments = [
+    "Chunk editor",
+    "Save chunk",
+    'id="previousFilePage"',
+    'id="nextFilePage"',
+    'maxlength="12288"',
+    'data-panel="files"><span class="nav-glyph">02</span>Files</button>',
+    "Open in Safari",
+];
+
+for (const fragment of forbiddenFragments) {
+    if (page.includes(fragment)) {
+        throw new Error(`Web console page exposes internal file paging: ${fragment}`);
     }
 }
 

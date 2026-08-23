@@ -153,6 +153,46 @@ VoiceRecordingResult recordVoiceWhileButtonHeld(const VoiceProgressCallback& onP
     return {true, sampleCount, peakLevel, normalizedMean(absoluteTotal, sampleCount), ""};
 }
 
+VoiceRecordingResult probeMicrophone(std::uint32_t durationMs)
+{
+    if (durationMs == 0 || durationMs > 5000) {
+        return {false, 0, 0, 0, "Microphone probe duration must be between 1 and 5000 ms"};
+    }
+    M5Cardputer.Speaker.end();
+    if (!M5Cardputer.Mic.begin()) {
+        return {false, 0, 0, 0, "Failed to start the Cardputer ADV microphone"};
+    }
+
+    std::array<std::int16_t, kChunkSamples> samples = {};
+    const std::uint32_t targetSamples =
+        static_cast<std::uint32_t>(static_cast<std::uint64_t>(kSampleRate) * durationMs / 1000U);
+    std::uint32_t sampleCount = 0;
+    std::uint64_t absoluteTotal = 0;
+    std::uint16_t peakLevel = 0;
+    while (sampleCount < targetSamples) {
+        const std::size_t requested = std::min<std::size_t>(
+            kChunkSamples, static_cast<std::size_t>(targetSamples - sampleCount));
+        if (!M5Cardputer.Mic.record(samples.data(), requested, kSampleRate)) {
+            M5Cardputer.Mic.end();
+            return {false, sampleCount, peakLevel,
+                    normalizedMean(absoluteTotal, sampleCount),
+                    "Microphone probe queue rejected an audio chunk"};
+        }
+        while (M5Cardputer.Mic.isRecording() != 0) {
+            M5Cardputer.update();
+            delay(1);
+        }
+        for (std::size_t index = 0; index < requested; ++index) {
+            absoluteTotal += static_cast<std::uint64_t>(
+                std::abs(static_cast<std::int32_t>(samples[index])));
+        }
+        peakLevel = std::max(peakLevel, normalizedPeak(samples));
+        sampleCount += static_cast<std::uint32_t>(requested);
+    }
+    M5Cardputer.Mic.end();
+    return {true, sampleCount, peakLevel, normalizedMean(absoluteTotal, sampleCount), ""};
+}
+
 OperationResult removeVoiceRecording()
 {
     return deleteRecordingIfPresent();
