@@ -142,7 +142,7 @@ OperationResult removeTemporaryPcm()
         : OperationResult{false, "Failed to remove temporary TTS audio from microSD"};
 }
 
-OperationResult playPcmFile(std::uint8_t volume)
+OperationResult playPcmFile(std::uint8_t volume, const SpeechPlaybackControl& control)
 {
     File file = SD.open(kTemporaryPcmPath, FILE_READ);
     if (!file) {
@@ -160,6 +160,20 @@ OperationResult playPcmFile(std::uint8_t volume)
     M5Cardputer.Speaker.setVolume(volume);
     std::size_t bufferIndex = 0;
     while (file.available()) {
+        SpeechPlaybackCommand command = control();
+        while (command == SpeechPlaybackCommand::Pause) {
+            while (M5Cardputer.Speaker.isPlaying()) {
+                delay(1);
+            }
+            delay(10);
+            command = control();
+        }
+        if (command == SpeechPlaybackCommand::Stop) {
+            M5Cardputer.Speaker.stop();
+            file.close();
+            M5Cardputer.Speaker.end();
+            return {true, "Speech playback stopped"};
+        }
         auto& buffer = playbackBuffers[bufferIndex];
         const std::size_t bytes = file.read(
             reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size() * sizeof(std::int16_t));
@@ -178,6 +192,12 @@ OperationResult playPcmFile(std::uint8_t volume)
     }
     file.close();
     while (M5Cardputer.Speaker.isPlaying()) {
+        if (control() == SpeechPlaybackCommand::Stop) {
+            M5Cardputer.Speaker.stop();
+            file.close();
+            M5Cardputer.Speaker.end();
+            return {true, "Speech playback stopped"};
+        }
         M5Cardputer.update();
         delay(1);
     }
@@ -294,6 +314,14 @@ OperationResult requestUserEndpoint(const String& apiKey, bool requireAuthentica
 
 OperationResult synthesizeAndPlaySpeech(const Settings& settings, const std::string& text)
 {
+    return synthesizeAndPlaySpeechControlled(
+        settings, text, []() { return SpeechPlaybackCommand::Continue; });
+}
+
+OperationResult synthesizeAndPlaySpeechControlled(const Settings& settings,
+                                                  const std::string& text,
+                                                  const SpeechPlaybackControl& control)
+{
     if (!ttsSettingsAreComplete(settings)) {
         return {false, "TTS is not configured; use Fn+4 > Web setup"};
     }
@@ -310,12 +338,12 @@ OperationResult synthesizeAndPlaySpeech(const Settings& settings, const std::str
     if (!download.success) {
         return download;
     }
-    const OperationResult playback = playPcmFile(settings.ttsVolume);
+    const OperationResult playback = playPcmFile(settings.ttsVolume, control);
     const OperationResult cleanup = removeTemporaryPcm();
     if (!playback.success) {
         return playback;
     }
-    return cleanup;
+    return cleanup.success ? playback : cleanup;
 }
 
 OperationResult validateTtsCredentials(const Settings& settings)
