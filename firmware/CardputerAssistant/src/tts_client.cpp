@@ -59,42 +59,6 @@ constexpr std::size_t kPlaybackBuffers = 3;
 constexpr int kMaximumAttempts = 3;
 std::array<std::array<std::int16_t, kPlaybackSamples>, kPlaybackBuffers> playbackBuffers;
 
-class BoundedFileStream final : public Stream {
-public:
-    BoundedFileStream(File& file, std::size_t maximumBytes)
-        : file_(file), maximumBytes_(maximumBytes)
-    {
-    }
-
-    std::size_t write(std::uint8_t byte) override
-    {
-        return write(&byte, 1);
-    }
-
-    std::size_t write(const std::uint8_t* buffer, std::size_t size) override
-    {
-        if (writtenBytes_ + size > maximumBytes_) {
-            overflowed_ = true;
-            return 0;
-        }
-        const std::size_t written = file_.write(buffer, size);
-        writtenBytes_ += written;
-        return written;
-    }
-
-    int available() override { return 0; }
-    int read() override { return -1; }
-    int peek() override { return -1; }
-    void flush() override { file_.flush(); }
-    bool overflowed() const { return overflowed_; }
-
-private:
-    File& file_;
-    std::size_t maximumBytes_;
-    std::size_t writtenBytes_ = 0;
-    bool overflowed_ = false;
-};
-
 bool isTransientStatus(int status)
 {
     return status <= 0 || status == 429 || status == 500 || status == 502 ||
@@ -205,7 +169,9 @@ OperationResult playPcmFile(std::uint8_t volume, const SpeechPlaybackControl& co
     return {true, ""};
 }
 
-OperationResult downloadSpeech(const Settings& settings, const std::string& text)
+OperationResult downloadSpeech(const Settings& settings,
+                               const std::string& text,
+                               const SpeechPlaybackControl& control)
 {
     const String voicePath = "/v1/text-to-speech/" + settings.ttsVoice + "/stream";
     const String url = endpointUrl(settings, voicePath) + "?output_format=pcm_16000";
@@ -219,6 +185,9 @@ OperationResult downloadSpeech(const Settings& settings, const std::string& text
 
     String lastError = "TTS request did not run";
     for (int attempt = 1; attempt <= kMaximumAttempts; ++attempt) {
+        if (control() == SpeechPlaybackCommand::Stop) {
+            return {false, "Speech synthesis canceled by user"};
+        }
         const OperationResult cleanup = removeTemporaryPcm();
         if (!cleanup.success) {
             return cleanup;
@@ -247,23 +216,55 @@ OperationResult downloadSpeech(const Settings& settings, const std::string& text
                 http.end();
                 return {false, "Failed to create temporary TTS PCM file on microSD"};
             }
-            BoundedFileStream boundedFile(file, kMaximumPcmBytes);
-            const int written = http.writeToStream(&boundedFile);
+            NetworkClient* stream = http.getStreamPtr();
+            std::array<std::uint8_t, 2048> buffer = {};
+            std::size_t written = 0;
+            std::uint32_t lastDataAt = millis();
+            OperationResult transfer = {true, ""};
+            while (declaredSize < 0 || written < static_cast<std::size_t>(declaredSize)) {
+                if (control() == SpeechPlaybackCommand::Stop) {
+                    transfer = {false, "Speech synthesis canceled by user"};
+                    break;
+                }
+                const int available = stream->available();
+                if (available <= 0) {
+                    if (!http.connected()) {
+                        break;
+                    }
+                    if (millis() - lastDataAt >= kHttpTimeoutMs) {
+                        transfer = {false, "TTS PCM response body timed out"};
+                        break;
+                    }
+                    delay(2);
+                    continue;
+                }
+                const std::size_t requested = std::min<std::size_t>(
+                    buffer.size(), static_cast<std::size_t>(available));
+                const std::size_t received = stream->readBytes(buffer.data(), requested);
+                if (received == 0 || written + received > kMaximumPcmBytes ||
+                    file.write(buffer.data(), received) != received) {
+                    transfer = {false, written + received > kMaximumPcmBytes
+                        ? "TTS PCM response exceeded the 16 MiB microSD safety limit"
+                        : "Failed to stream TTS PCM response to microSD"};
+                    break;
+                }
+                written += received;
+                lastDataAt = millis();
+            }
             file.flush();
             file.close();
             http.end();
-            if (boundedFile.overflowed()) {
+            if (!transfer.success) {
                 removeTemporaryPcm();
-                return {false, "TTS PCM response exceeded the 16 MiB microSD safety limit"};
+                return transfer;
             }
-            if (written <= 0) {
+            if (declaredSize >= 0 && written != static_cast<std::size_t>(declaredSize)) {
                 removeTemporaryPcm();
-                return {false, "Failed to stream TTS PCM response to microSD: " +
-                               HTTPClient::errorToString(written)};
+                return {false, "TTS PCM response ended before all bytes arrived"};
             }
-            if (written > static_cast<int>(kMaximumPcmBytes)) {
+            if (written == 0) {
                 removeTemporaryPcm();
-                return {false, "TTS PCM response exceeded the 16 MiB microSD safety limit"};
+                return {false, "TTS returned an empty PCM response"};
             }
             return {true, ""};
         }
@@ -276,7 +277,13 @@ OperationResult downloadSpeech(const Settings& settings, const std::string& text
             return {false, lastError};
         }
         Serial.printf("WARN event=tts_request attempt=%d status=%d retry=yes\n", attempt, status);
-        delay(250U * static_cast<std::uint32_t>(attempt));
+        const std::uint32_t retryAt = millis() + 250U * static_cast<std::uint32_t>(attempt);
+        while (static_cast<std::int32_t>(retryAt - millis()) > 0) {
+            if (control() == SpeechPlaybackCommand::Stop) {
+                return {false, "Speech synthesis canceled by user"};
+            }
+            delay(10);
+        }
     }
     return {false, lastError};
 }
@@ -301,6 +308,14 @@ OperationResult requestUserEndpoint(const String& apiKey, bool requireAuthentica
     http.end();
     if (requireAuthentication && status == 200) {
         return {true, ""};
+    }
+    if (requireAuthentication && (status == 401 || status == 403)) {
+        JsonDocument document;
+        if (!deserializeJson(document, body) &&
+            document["detail"]["status"].is<const char*>() &&
+            String(document["detail"]["status"].as<const char*>()) == "missing_permissions") {
+            return {true, ""};
+        }
     }
     if (!requireAuthentication && (status == 401 || status == 403)) {
         return {true, ""};
@@ -334,7 +349,7 @@ OperationResult synthesizeAndPlaySpeechControlled(const Settings& settings,
     if (!isValidUtf8(text)) {
         return {false, "Assistant response contains invalid UTF-8 and cannot be spoken"};
     }
-    const OperationResult download = downloadSpeech(settings, text);
+    const OperationResult download = downloadSpeech(settings, text, control);
     if (!download.success) {
         return download;
     }

@@ -1,6 +1,7 @@
 #include "../firmware/CardputerAssistant/src/text_utils.h"
 #include "../firmware/CardputerAssistant/src/audio_utils.h"
 #include "../firmware/CardputerAssistant/src/document_reader.h"
+#include "../firmware/CardputerAssistant/src/offline_tools.h"
 #include "../firmware/CardputerAssistant/src/ssh_terminal.h"
 
 #include <cstdlib>
@@ -108,6 +109,8 @@ void testChatText()
     require(cardputer::isValidChatId("0123456789abcdef"), "Valid chat id rejected");
     require(!cardputer::isValidChatId("0123456789ABCDEF"), "Uppercase chat id accepted");
     require(cardputer::isValidWorkspaceFilename("notes_ru.md"), "Valid workspace filename rejected");
+    require(cardputer::isValidWorkspaceFilename("chat_export.chat.jsonl"),
+            "Portable chat bundle filename rejected");
     require(!cardputer::isValidWorkspaceFilename("../secret.txt"), "Traversal filename accepted");
     require(!cardputer::isValidWorkspaceFilename("program.exe"), "Executable extension accepted");
     require(!cardputer::isValidWorkspaceFilename(".hidden.txt"), "Hidden filename accepted");
@@ -204,6 +207,24 @@ void testDocumentReader()
             "HTML speech extraction failed");
 }
 
+void testOfflineCalculator()
+{
+    const cardputer::CalculationResult precedence = cardputer::calculateExpression("2+3*4");
+    require(precedence.success && precedence.value == 14.0,
+            "Calculator precedence failed");
+    const cardputer::CalculationResult parentheses = cardputer::calculateExpression("(2+3)*4");
+    require(parentheses.success && parentheses.value == 20.0,
+            "Calculator parentheses failed");
+    const cardputer::CalculationResult unary = cardputer::calculateExpression("-2.5 + 1");
+    require(unary.success && unary.value == -1.5, "Calculator unary operator failed");
+    require(!cardputer::calculateExpression("1/0").success,
+            "Calculator accepted division by zero");
+    require(!cardputer::calculateExpression("2+").success,
+            "Calculator accepted an incomplete expression");
+    require(cardputer::formatCalculationResult(1.25) == "1.25",
+            "Calculator result formatting failed");
+}
+
 }  // namespace
 
 int main()
@@ -220,6 +241,7 @@ int main()
         testWebSearchRouting();
         testSshTerminalFiltering();
         testDocumentReader();
+        testOfflineCalculator();
         std::cout << "host_tests: PASS\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

@@ -161,6 +161,14 @@ void drawCarouselIcon(CarouselIcon icon, int x, int y, std::uint16_t color)
             canvas->drawCircle(x + 15, y + 15, 6, color);
             canvas->fillCircle(x + 15, y + 15, 2, color);
             break;
+        case CarouselIcon::Tools:
+            canvas->drawCircle(x + 15, y + 15, 10, color);
+            canvas->drawFastVLine(x + 15, y, 6, color);
+            canvas->drawFastVLine(x + 15, y + 25, 6, color);
+            canvas->drawFastHLine(x, y + 15, 6, color);
+            canvas->drawFastHLine(x + 25, y + 15, 6, color);
+            canvas->fillCircle(x + 15, y + 15, 3, color);
+            break;
         case CarouselIcon::Help:
             canvas->drawCircle(x + 15, y + 15, 14, color);
             canvas->setFont(&fonts::efontCN_14);
@@ -676,6 +684,22 @@ void showTextEditor(const String& title,
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
     canvas->print(clippedLine(footer, 44));
+    canvas->pushSprite(0, 0);
+}
+
+void showQrCode(const String& title, const String& payload, const String& footer)
+{
+    canvas->fillScreen(TFT_WHITE);
+    canvas->fillRect(0, 0, 240, 18, TFT_NAVY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(5, 3);
+    canvas->print(clippedLine(title, 38));
+    canvas->qrcode(payload.c_str(), 68, 21, 92, 1, true);
+    canvas->fillRect(0, 116, 240, 19, TFT_DARKGREY);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(5, 119);
+    canvas->print(clippedLine(footer, 42));
     canvas->pushSprite(0, 0);
 }
 

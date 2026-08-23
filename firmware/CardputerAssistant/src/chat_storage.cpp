@@ -493,6 +493,177 @@ OperationResult exportChatToWorkspace(const String& id, const String& filename)
     return {true, ""};
 }
 
+OperationResult exportChatBundleToWorkspace(const String& id, const String& filename)
+{
+    const ChatDocumentResult loaded = loadChat(id);
+    if (!loaded.success) {
+        return {false, loaded.error};
+    }
+    const OperationResult created = createWorkspaceFile(filename);
+    if (!created.success) {
+        return created;
+    }
+    File output = SD.open(workspaceFilePath(filename), FILE_APPEND);
+    if (!output) {
+        deleteWorkspaceFile(filename);
+        return {false, "Failed to open portable chat bundle"};
+    }
+    std::size_t writtenBytes = 0;
+    auto writeJsonLine = [&output, &writtenBytes](JsonDocument& document) -> OperationResult {
+        const std::size_t required = measureJson(document) + 1;
+        if (required > kMaximumWorkspaceFileBytes - writtenBytes) {
+            return {false, "Portable chat bundle exceeds the 491520-byte workspace file limit"};
+        }
+        if (serializeJson(document, output) != required - 1 || output.write('\n') != 1) {
+            return {false, "Failed while writing portable chat bundle"};
+        }
+        writtenBytes += required;
+        return {true, ""};
+    };
+
+    JsonDocument header;
+    header["type"] = "cardmind_chat";
+    header["format"] = 1;
+    header["title"] = loaded.chat.summary.title;
+    header["instructions"] = loaded.chat.instructions;
+    header["archived_message_count"] = loaded.chat.summary.archivedMessageCount;
+    OperationResult result = writeJsonLine(header);
+    File archive;
+    if (result.success) {
+        archive = SD.open(chatArchivePath(id), FILE_READ);
+    }
+    while (result.success && archive && archive.available()) {
+        const String line = archive.readStringUntil('\n');
+        if (line.isEmpty()) {
+            continue;
+        }
+        JsonDocument message;
+        const DeserializationError error = deserializeJson(message, line);
+        if (error || !message["role"].is<const char*>() ||
+            !message["content"].is<const char*>()) {
+            result = {false, "Archived chat contains an invalid JSON line"};
+        } else {
+            result = writeJsonLine(message);
+        }
+    }
+    if (archive) {
+        archive.close();
+    }
+    for (const auto& message : loaded.chat.messages) {
+        if (!result.success) {
+            break;
+        }
+        JsonDocument item;
+        item["role"] = message.role;
+        item["content"] = message.content;
+        result = writeJsonLine(item);
+    }
+    output.flush();
+    output.close();
+    if (!result.success) {
+        deleteWorkspaceFile(filename);
+    }
+    return result;
+}
+
+ChatDocumentResult importChatBundleFromWorkspace(const String& filename)
+{
+    if (!filename.endsWith(".chat.jsonl")) {
+        return {false, {}, "Portable chat filename must end with .chat.jsonl"};
+    }
+    File input = SD.open(workspaceFilePath(filename), FILE_READ);
+    if (!input) {
+        return {false, {}, "Portable chat bundle was not found in the workspace"};
+    }
+    const String headerLine = input.readStringUntil('\n');
+    JsonDocument header;
+    const DeserializationError headerError = deserializeJson(header, headerLine);
+    if (headerError || !header["type"].is<const char*>() ||
+        String(header["type"].as<const char*>()) != "cardmind_chat" ||
+        !header["format"].is<std::uint32_t>() ||
+        header["format"].as<std::uint32_t>() != 1 ||
+        !header["title"].is<const char*>() || !header["instructions"].is<const char*>() ||
+        !header["archived_message_count"].is<std::uint32_t>()) {
+        input.close();
+        return {false, {}, "Portable chat bundle header is invalid or unsupported"};
+    }
+    const String title = header["title"].as<const char*>();
+    const std::string instructions = header["instructions"].as<const char*>();
+    const std::uint32_t declaredArchivedMessages =
+        header["archived_message_count"].as<std::uint32_t>();
+    if (title.isEmpty() || title.length() > 120 || !isValidUtf8(title.c_str()) ||
+        instructions.size() > kMaximumChatInstructionsBytes || !isValidUtf8(instructions)) {
+        input.close();
+        return {false, {}, "Portable chat bundle metadata exceeds the supported limits"};
+    }
+
+    const ChatDocumentResult created = createChat(title);
+    if (!created.success) {
+        input.close();
+        return created;
+    }
+    ChatDocument imported = created.chat;
+    imported.instructions = instructions;
+    std::size_t activeBytes = 0;
+    std::uint32_t messageIndex = 0;
+    OperationResult result = {true, ""};
+    while (input.available() && result.success) {
+        const String line = input.readStringUntil('\n');
+        if (line.isEmpty()) {
+            continue;
+        }
+        JsonDocument item;
+        const DeserializationError itemError = deserializeJson(item, line);
+        if (itemError || !item["role"].is<const char*>() ||
+            !item["content"].is<const char*>()) {
+            result = {false, "Portable chat bundle contains an invalid message line"};
+            break;
+        }
+        Message message = {item["role"].as<const char*>(), item["content"].as<const char*>()};
+        if ((message.role != "user" && message.role != "assistant") ||
+            message.content.empty() || !isValidUtf8(message.content) ||
+            message.content.size() > kMaximumStoredHistoryBytes) {
+            result = {false, "Portable chat bundle contains an unsupported message"};
+            break;
+        }
+        if (messageIndex < declaredArchivedMessages) {
+            result = archiveChatMessages(imported.summary.id, {message});
+            if (result.success) {
+                ++imported.summary.archivedMessageCount;
+            }
+            ++messageIndex;
+            continue;
+        }
+        ++messageIndex;
+        imported.messages.push_back(std::move(message));
+        activeBytes += imported.messages.back().content.size();
+        while (imported.messages.size() > kMaximumStoredMessages ||
+               activeBytes > kMaximumStoredHistoryBytes) {
+            const Message archived = imported.messages.front();
+            result = archiveChatMessages(imported.summary.id, {archived});
+            if (!result.success) {
+                break;
+            }
+            activeBytes -= archived.content.size();
+            imported.messages.erase(imported.messages.begin());
+            ++imported.summary.archivedMessageCount;
+        }
+    }
+    input.close();
+    if (result.success && messageIndex < declaredArchivedMessages) {
+        result = {false, "Portable chat bundle declares more archived messages than it contains"};
+    }
+    if (result.success) {
+        result = saveChat(imported);
+    }
+    if (!result.success) {
+        deleteChat(imported.summary.id);
+        return {false, {}, result.error};
+    }
+    imported.summary.messageCount = static_cast<std::uint32_t>(imported.messages.size());
+    return {true, imported, ""};
+}
+
 ChatDocumentResult duplicateChat(const String& id)
 {
     const ChatDocumentResult source = loadChat(id);

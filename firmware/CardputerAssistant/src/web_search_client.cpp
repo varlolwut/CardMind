@@ -9,6 +9,7 @@
 #include <WiFiClientSecure.h>
 
 #include <algorithm>
+#include <array>
 
 namespace cardputer {
 namespace {
@@ -16,6 +17,8 @@ namespace {
 constexpr const char* kSearchPath = "/search";
 constexpr const char* kContentsPath = "/contents";
 constexpr const char* kWebResponsePath = "/assistant-web-response.tmp";
+constexpr const char* kSearchCachePath = "/assistant/search-sources.json";
+constexpr const char* kSearchCacheTemporaryPath = "/assistant/search-sources.tmp";
 constexpr std::uint16_t kHttpTimeoutMs = 30000;
 constexpr int kMaximumAttempts = 3;
 constexpr std::size_t kMaximumResponseBytes = 24576;
@@ -112,16 +115,50 @@ ToolExecutionResult failure(const String& error)
     return {false, output.c_str(), error};
 }
 
+OperationResult cacheSearchSources(const std::string& output)
+{
+    if (output.empty() || output.size() > 8192) {
+        return {false, "Search source cache must contain 1 to 8192 bytes"};
+    }
+    if (SD.exists(kSearchCacheTemporaryPath) && !SD.remove(kSearchCacheTemporaryPath)) {
+        return {false, "Failed to remove the previous temporary search cache"};
+    }
+    File file = SD.open(kSearchCacheTemporaryPath, FILE_WRITE);
+    if (!file) {
+        return {false, "Failed to create the search source cache on microSD"};
+    }
+    const std::size_t written = file.write(
+        reinterpret_cast<const std::uint8_t*>(output.data()), output.size());
+    file.flush();
+    file.close();
+    if (written != output.size()) {
+        SD.remove(kSearchCacheTemporaryPath);
+        return {false, "Failed to write the complete search source cache"};
+    }
+    if (SD.exists(kSearchCachePath) && !SD.remove(kSearchCachePath)) {
+        SD.remove(kSearchCacheTemporaryPath);
+        return {false, "Failed to replace the previous search source cache"};
+    }
+    if (!SD.rename(kSearchCacheTemporaryPath, kSearchCachePath)) {
+        return {false, "Failed to commit the search source cache"};
+    }
+    return {true, ""};
+}
+
 OperationResult requestJsonToMicroSd(const Settings& settings,
                                      const String& path,
                                      const String& payload,
-                                     const String& operation)
+                                     const String& operation,
+                                     const CancelCallback& isCancelled)
 {
     if (SD.exists(kWebResponsePath) && !SD.remove(kWebResponsePath)) {
         return {false, "Failed to remove the previous temporary web response from microSD"};
     }
     String lastError = operation + " request was not attempted";
     for (int attempt = 1; attempt <= kMaximumAttempts; ++attempt) {
+        if (isCancelled()) {
+            return {false, operation + " canceled by user"};
+        }
         WiFiClientSecure client;
         client.setCACert(kGtsRootR4);
         client.setHandshakeTimeout(20);
@@ -153,13 +190,51 @@ OperationResult requestJsonToMicroSd(const Settings& settings,
                 http.end();
                 return {false, "Failed to create a temporary web response on microSD"};
             }
-            const int bytesWritten = http.writeToStream(&responseFile);
+            NetworkClient* stream = http.getStreamPtr();
+            std::array<std::uint8_t, 2048> buffer = {};
+            std::size_t bytesWritten = 0;
+            std::uint32_t lastDataAt = millis();
+            OperationResult transfer = {true, ""};
+            while (declaredSize < 0 || bytesWritten < static_cast<std::size_t>(declaredSize)) {
+                if (isCancelled()) {
+                    transfer = {false, operation + " canceled by user"};
+                    break;
+                }
+                const int available = stream->available();
+                if (available <= 0) {
+                    if (!http.connected()) {
+                        break;
+                    }
+                    if (millis() - lastDataAt >= kHttpTimeoutMs) {
+                        transfer = {false, operation + " response body timed out"};
+                        break;
+                    }
+                    delay(2);
+                    continue;
+                }
+                const std::size_t requested = std::min<std::size_t>(
+                    buffer.size(), static_cast<std::size_t>(available));
+                const std::size_t received = stream->readBytes(buffer.data(), requested);
+                if (received == 0 || bytesWritten + received > kMaximumResponseBytes ||
+                    responseFile.write(buffer.data(), received) != received) {
+                    transfer = {false, bytesWritten + received > kMaximumResponseBytes
+                        ? operation + " response exceeded 24576 bytes"
+                        : "Failed to stream the web response to microSD"};
+                    break;
+                }
+                bytesWritten += received;
+                lastDataAt = millis();
+            }
             responseFile.close();
             http.end();
-            if (bytesWritten < 0) {
+            if (!transfer.success) {
                 SD.remove(kWebResponsePath);
-                return {false, "Failed to stream the web response to microSD: " +
-                               HTTPClient::errorToString(bytesWritten)};
+                return transfer;
+            }
+            if (declaredSize >= 0 &&
+                bytesWritten != static_cast<std::size_t>(declaredSize)) {
+                SD.remove(kWebResponsePath);
+                return {false, operation + " response ended before all bytes arrived"};
             }
             responseFile = SD.open(kWebResponsePath, FILE_READ);
             if (!responseFile) {
@@ -187,7 +262,14 @@ OperationResult requestJsonToMicroSd(const Settings& settings,
         }
         Serial.printf("WARN event=web_retry operation=%s attempt=%d status=%d\n",
                       operation.c_str(), attempt, status);
-        delay(static_cast<std::uint32_t>(1000U << (attempt - 1)) + (esp_random() % 350U));
+        const std::uint32_t retryAt = millis() +
+            static_cast<std::uint32_t>(1000U << (attempt - 1)) + (esp_random() % 350U);
+        while (static_cast<std::int32_t>(retryAt - millis()) > 0) {
+            if (isCancelled()) {
+                return {false, operation + " canceled by user"};
+            }
+            delay(10);
+        }
     }
     return {false, lastError};
 }
@@ -276,7 +358,9 @@ ToolExecutionResult parseFetchResponse(Stream& body, const String& requestedUrl)
 
 }  // namespace
 
-ToolExecutionResult executeWebSearchTool(const Settings& settings, const ToolCall& call)
+ToolExecutionResult executeWebSearchTool(const Settings& settings,
+                                         const ToolCall& call,
+                                         const CancelCallback& isCancelled)
 {
     if (!isWebSearchToolName(call.name)) {
         return failure("Web search executor received unsupported tool '" +
@@ -309,7 +393,7 @@ ToolExecutionResult executeWebSearchTool(const Settings& settings, const ToolCal
     serializeJson(requestDocument, payload);
 
     const OperationResult request = requestJsonToMicroSd(
-        settings, kSearchPath, payload, "Web search");
+        settings, kSearchPath, payload, "Web search", isCancelled);
     if (!request.success) {
         return failure(request.error);
     }
@@ -323,10 +407,18 @@ ToolExecutionResult executeWebSearchTool(const Settings& settings, const ToolCal
     if (!SD.remove(kWebResponsePath)) {
         return failure("Failed to remove the temporary web search response from microSD");
     }
+    if (result.success) {
+        const OperationResult cached = cacheSearchSources(result.output);
+        if (!cached.success) {
+            return failure(cached.error);
+        }
+    }
     return result;
 }
 
-ToolExecutionResult executeWebFetchTool(const Settings& settings, const ToolCall& call)
+ToolExecutionResult executeWebFetchTool(const Settings& settings,
+                                        const ToolCall& call,
+                                        const CancelCallback& isCancelled)
 {
     if (!isWebFetchToolName(call.name)) {
         return failure("Web fetch executor received unsupported tool '" +
@@ -356,7 +448,7 @@ ToolExecutionResult executeWebFetchTool(const Settings& settings, const ToolCall
     String payload;
     serializeJson(requestDocument, payload);
     const OperationResult request = requestJsonToMicroSd(
-        settings, kContentsPath, payload, "Web fetch");
+        settings, kContentsPath, payload, "Web fetch", isCancelled);
     if (!request.success) {
         return failure(request.error);
     }
@@ -369,6 +461,35 @@ ToolExecutionResult executeWebFetchTool(const Settings& settings, const ToolCall
     responseFile.close();
     if (!SD.remove(kWebResponsePath)) {
         return failure("Failed to remove the temporary web fetch response from microSD");
+    }
+    return result;
+}
+
+WebSearchSourcesResult loadLatestWebSearchSources()
+{
+    File file = SD.open(kSearchCachePath, FILE_READ);
+    if (!file) {
+        return {false, "", {}, "No cached web search sources are available"};
+    }
+    JsonDocument document;
+    const DeserializationError error = deserializeJson(document, file);
+    file.close();
+    if (error || !document["ok"].is<bool>() || !document["ok"].as<bool>() ||
+        !document["query"].is<const char*>() || !document["results"].is<JsonArray>()) {
+        return {false, "", {}, "Cached web search sources contain invalid JSON"};
+    }
+    WebSearchSourcesResult result = {true, document["query"].as<const char*>(), {}, ""};
+    for (const JsonObjectConst item : document["results"].as<JsonArrayConst>()) {
+        if (!item["title"].is<const char*>() || !item["url"].is<const char*>() ||
+            !item["content"].is<const char*>()) {
+            return {false, "", {}, "Cached web search source is missing a typed field"};
+        }
+        result.sources.push_back({item["title"].as<const char*>(),
+                                  item["url"].as<const char*>(),
+                                  item["content"].as<const char*>()});
+    }
+    if (result.sources.empty()) {
+        return {false, "", {}, "Cached web search did not contain any sources"};
     }
     return result;
 }

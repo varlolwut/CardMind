@@ -480,6 +480,7 @@ bool isValidWorkspaceFilename(const std::string& value)
     }
     const std::string extension = value.substr(dot);
     return extension == ".txt" || extension == ".md" || extension == ".json" ||
+           extension == ".jsonl" ||
            extension == ".csv" || extension == ".html" || extension == ".svg";
 }
 
