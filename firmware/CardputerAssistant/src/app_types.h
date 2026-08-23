@@ -30,6 +30,10 @@ struct Settings {
     String ttsVoice;
     bool ttsAutoPlay;
     std::uint8_t ttsVolume;
+    std::uint8_t displayBrightness;
+    std::uint16_t screenSleepMinutes;
+    std::uint16_t keyboardRepeatMs;
+    std::uint8_t powerProfile;
 };
 
 struct Message {
