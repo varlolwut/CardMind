@@ -15,6 +15,7 @@
 #include "src/provisioning.h"
 #include "src/stt_client.h"
 #include "src/storage.h"
+#include "src/ssh_client.h"
 #include "src/text_utils.h"
 #include "src/tts_client.h"
 #include "src/ui.h"
@@ -850,6 +851,31 @@ void handleSerialCommand(const String& command)
     }
     if (command == "FILETEST") {
         runFileWorkspaceEditTest();
+        return;
+    }
+    if (command == "SSHCHECK") {
+        const cardputer::SshRuntimeProbeResult result = cardputer::probeSshRuntime();
+        Serial.printf("SSHCHECK result=%s version=%s heap=%u largest_heap=%u stack_free=%u\n",
+                      result.success ? "pass" : "failed",
+                      result.success ? result.version.c_str() : "unavailable",
+                      static_cast<unsigned int>(ESP.getFreeHeap()),
+                      static_cast<unsigned int>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                      static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)));
+        return;
+    }
+    if (command == "SSHPROBE") {
+        ensureNetworkReady();
+        cardputer::markOperation("ssh_probe");
+        const cardputer::SshHostProbeResult result =
+            cardputer::probeSshHost("ssh.github.com", 443, 60000);
+        cardputer::markOperation("idle");
+        Serial.printf("SSHPROBE result=%s key_type=%s heap=%u largest_heap=%u stack_free=%u error=%s\n",
+                      result.success ? "pass" : "failed",
+                      result.success ? result.hostKeyType.c_str() : "unavailable",
+                      static_cast<unsigned int>(ESP.getFreeHeap()),
+                      static_cast<unsigned int>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+                      static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+                      result.success ? "none" : result.error.c_str());
         return;
     }
     if (command == "TOOLTEST") {

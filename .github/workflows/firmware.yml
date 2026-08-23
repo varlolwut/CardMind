@@ -52,6 +52,8 @@ jobs:
           git clone --filter=blob:none https://github.com/m5stack/M5GFX.git .ci-libs/M5GFX
           git -C .ci-libs/M5GFX checkout 93b480bb349749202c8a2a953065c8ae95f58320
           git clone --branch v7.2.1 --depth 1 https://github.com/bblanchon/ArduinoJson.git .ci-libs/ArduinoJson
+          git clone --branch libssh2-1.11.1 --depth 1 https://github.com/libssh2/libssh2.git .ci-libssh2-source
+          python tools/prepare_libssh2.py .ci-libssh2-source .ci-libs/libssh2-arduino
 
       - name: Compile Cardputer ADV firmware
         run: |
