@@ -198,16 +198,25 @@ std::size_t historyBytes(const std::vector<Message>& messages)
     return total;
 }
 
-std::vector<Message> trimmedHistory(const std::vector<Message>& messages)
+struct HistoryFitResult {
+    std::vector<Message> retained;
+    std::vector<Message> archived;
+};
+
+HistoryFitResult fitHistoryToActiveContext(const std::vector<Message>& messages)
 {
-    std::vector<Message> result = messages;
-    while (result.size() > kMaximumStoredMessages ||
-           historyBytes(result) > kMaximumStoredHistoryBytes) {
-        if (result.size() < 2) {
-            result.clear();
+    HistoryFitResult result = {messages, {}};
+    while (result.retained.size() > kMaximumStoredMessages ||
+           historyBytes(result.retained) > kMaximumStoredHistoryBytes) {
+        if (result.retained.size() < 2) {
+            result.archived.insert(result.archived.end(),
+                                   result.retained.begin(), result.retained.end());
+            result.retained.clear();
             break;
         }
-        result.erase(result.begin(), result.begin() + 2);
+        result.archived.insert(result.archived.end(),
+                               result.retained.begin(), result.retained.begin() + 2);
+        result.retained.erase(result.retained.begin(), result.retained.begin() + 2);
     }
     return result;
 }
@@ -288,7 +297,7 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 .row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}small{color:#9fb3ca}#status{color:#fde68a}</style></head><body>
 <header><strong>CardMind</strong><span id="device"></span><button id="logout">Logout</button></header>
 <main class="layout"><section class="card"><div class="row"><select id="chats"></select><button id="newChat">New chat</button></div>
-<div class="row"><button id="renameChat">Rename</button><button class="danger" id="deleteChat">Delete</button></div>
+<div class="row"><button id="renameChat">Rename</button><button id="pinChat">Pin</button><button id="archiveChat">Archive</button><button id="duplicateChat">Duplicate</button><button id="exportChat">Export</button><button class="danger" id="deleteChat">Delete</button></div>
 <p id="status"></p><div id="messages"></div></section><section class="card"><textarea id="prompt" maxlength="1200" placeholder="Message CardMind..."></textarea>
 <div class="row"><button id="send">Send</button><button class="danger" id="stop">Stop</button><button id="retry">Retry</button><button id="refresh">Refresh</button></div></section>
 <section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section>
@@ -311,7 +320,7 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[],activeRequest=null,lastPrompt='';
 async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}if(!r.ok){let message=`HTTP ${r.status}`;try{message=(await r.json()).error||message}catch{}throw new Error(message)}return r}
 function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;q('#status').textContent=s.status||'';
-q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=c.title;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
+q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=`${c.pinned?'📌 ':c.archived?'📦 ':''}${c.title} · ${c.total_messages}`;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
 q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}
 q('#instructions').value=s.instructions||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
 q('#sshHost').value=s.ssh_host||'';q('#sshPort').value=s.ssh_port||22;q('#sshUser').value=s.ssh_username||'';q('#sshAuth').value=s.ssh_auth_mode||'password';
@@ -323,6 +332,8 @@ async function openFile(offset,pushBack){const selected=q('#files').value;if(!se
 q('#refresh').onclick=refresh;q('#chats').onchange=async()=>{await request('/api/chat/select',{method:'POST',body:new URLSearchParams({id:q('#chats').value})});await refresh()};
 q('#newChat').onclick=async()=>{await request('/api/chat/new',{method:'POST'});await refresh()};
 q('#renameChat').onclick=async()=>{const title=prompt('Chat title',state.active_chat_title);if(title){await post('/api/chat/rename',{title});await refresh()}};
+q('#pinChat').onclick=async()=>{await post('/api/chat/pin',{});await refresh()};q('#archiveChat').onclick=async()=>{await post('/api/chat/archive',{});await refresh()};
+q('#duplicateChat').onclick=async()=>{await post('/api/chat/duplicate',{});await refresh()};q('#exportChat').onclick=async()=>{await post('/api/chat/export',{});await refresh()};
 q('#deleteChat').onclick=async()=>{if(confirm(`Delete chat "${state.active_chat_title}"?`)){await post('/api/chat/delete',{});await refresh()}};
 q('#saveInstructions').onclick=async()=>{await request('/api/chat/instructions',{method:'POST',body:new URLSearchParams({instructions:q('#instructions').value})});await refresh()};
 q('#saveSettings').onclick=async()=>{await post('/api/settings',{api_base_url:q('#apiBaseUrl').value,model:q('#model').value});await refresh()};
@@ -420,6 +431,8 @@ void handleState()
     document["sd_used_bytes"] = SD.usedBytes();
     document["active_chat_id"] = activeChat.summary.id;
     document["active_chat_title"] = activeChat.summary.title;
+    document["active_context_messages"] = activeChat.summary.messageCount;
+    document["archived_messages"] = activeChat.summary.archivedMessageCount;
     document["instructions"] = activeChat.instructions;
     document["status"] = consoleStatus;
     document["model"] = consoleSettings.model;
@@ -442,6 +455,9 @@ void handleState()
         JsonObject item = chats.add<JsonObject>();
         item["id"] = chat.id;
         item["title"] = chat.title;
+        item["pinned"] = chat.pinned;
+        item["archived"] = chat.archived;
+        item["total_messages"] = chat.messageCount + chat.archivedMessageCount;
     }
     std::size_t firstMessage = activeChat.messages.size();
     std::size_t includedBytes = 0;
@@ -521,7 +537,18 @@ void handlePrompt()
     server.send(200, "text/event-stream; charset=utf-8", "");
     std::vector<Message> pending = activeChat.messages;
     pending.push_back({"user", prompt});
-    activeChat.messages = trimmedHistory(pending);
+    HistoryFitResult pendingFit = fitHistoryToActiveContext(pending);
+    if (!pendingFit.archived.empty()) {
+        const OperationResult archived = archiveChatMessages(
+            activeChat.summary.id, pendingFit.archived);
+        if (!archived.success) {
+            sendSse("error", "", archived.error);
+            return;
+        }
+        activeChat.summary.archivedMessageCount += pendingFit.archived.size();
+    }
+    activeChat.messages = std::move(pendingFit.retained);
+    activeChat.draft.clear();
     if (activeChat.summary.messageCount == 0) {
         activeChat.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
     }
@@ -567,7 +594,20 @@ void handlePrompt()
         return;
     }
     activeChat.messages.push_back({"assistant", result.response});
-    activeChat.messages = trimmedHistory(activeChat.messages);
+    HistoryFitResult finalFit = fitHistoryToActiveContext(activeChat.messages);
+    if (!finalFit.archived.empty()) {
+        const OperationResult archived = archiveChatMessages(
+            activeChat.summary.id, finalFit.archived);
+        if (!archived.success) {
+            activeResponse.clear();
+            consoleStatus = archived.error;
+            sendSse("error", "", archived.error);
+            renderConsoleChat();
+            return;
+        }
+        activeChat.summary.archivedMessageCount += finalFit.archived.size();
+    }
+    activeChat.messages = std::move(finalFit.retained);
     activeChat.summary.messageCount = activeChat.messages.size();
     activeChat.summary.updatedAt = currentTimestamp();
     saved = saveChat(activeChat);
@@ -677,6 +717,99 @@ void handleRenameChat()
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handlePinChat()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    activeChat.summary.pinned = !activeChat.summary.pinned;
+    if (activeChat.summary.pinned) {
+        activeChat.summary.archived = false;
+    }
+    OperationResult result = saveChat(activeChat);
+    if (result.success) {
+        result = refreshChats();
+    }
+    if (!result.success) {
+        sendJsonError(500, result.error);
+        return;
+    }
+    consoleStatus = activeChat.summary.pinned ? String("Chat pinned") : String("Chat unpinned");
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleArchiveChat()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    activeChat.summary.archived = !activeChat.summary.archived;
+    if (activeChat.summary.archived) {
+        activeChat.summary.pinned = false;
+    }
+    OperationResult result = saveChat(activeChat);
+    if (result.success) {
+        result = refreshChats();
+    }
+    if (!result.success) {
+        sendJsonError(500, result.error);
+        return;
+    }
+    consoleStatus = activeChat.summary.archived ? String("Chat archived")
+                                                : String("Chat restored");
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleDuplicateChat()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const ChatDocumentResult duplicated = duplicateChat(activeChat.summary.id);
+    if (!duplicated.success) {
+        sendJsonError(500, duplicated.error);
+        return;
+    }
+    activeChat = duplicated.chat;
+    const OperationResult refreshed = refreshChats();
+    if (!refreshed.success) {
+        sendJsonError(500, refreshed.error);
+        return;
+    }
+    consoleStatus = "Chat duplicated";
+    renderConsoleChat();
+    JsonDocument document;
+    document["ok"] = true;
+    sendJson(200, document);
+}
+
+void handleExportChat()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const String filename = "chat_" + activeChat.summary.id + ".md";
+    const OperationResult exported = exportChatToWorkspace(
+        activeChat.summary.id, filename);
+    if (!exported.success) {
+        sendJsonError(400, exported.error);
+        return;
+    }
+    consoleStatus = "Chat exported as " + filename;
+    JsonDocument document;
+    document["ok"] = true;
+    document["filename"] = filename;
     sendJson(200, document);
 }
 
@@ -1137,6 +1270,10 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/chat/new", HTTP_POST, handleNewChat);
         server.on("/api/chat/instructions", HTTP_POST, handleInstructions);
         server.on("/api/chat/rename", HTTP_POST, handleRenameChat);
+        server.on("/api/chat/pin", HTTP_POST, handlePinChat);
+        server.on("/api/chat/archive", HTTP_POST, handleArchiveChat);
+        server.on("/api/chat/duplicate", HTTP_POST, handleDuplicateChat);
+        server.on("/api/chat/export", HTTP_POST, handleExportChat);
         server.on("/api/chat/delete", HTTP_POST, handleDeleteChat);
         server.on("/api/settings", HTTP_POST, handleSettings);
         server.on("/api/ssh/settings", HTTP_POST, handleSshSettings);

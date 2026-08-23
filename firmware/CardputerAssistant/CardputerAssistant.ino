@@ -40,6 +40,7 @@ constexpr std::size_t kMaximumInputBytes = 1200;
 constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
 constexpr std::uint32_t kBatteryRefreshIntervalMs = 30000;
+constexpr std::uint32_t kDraftAutosaveIntervalMs = 2000;
 constexpr std::size_t kFileViewerChunkBytes = 2048;
 constexpr std::size_t kFileViewerPageLines = 8;
 constexpr std::size_t kFileEditorMaximumBytes = 4096;
@@ -79,6 +80,8 @@ std::vector<cardputer::Message> history;
 std::vector<cardputer::ChatSummary> chats;
 std::vector<String> availableModels;
 std::string inputBuffer;
+std::string persistedDraft;
+std::uint32_t lastDraftAutosaveAt = 0;
 std::string activeResponse;
 cardputer::KeyboardLayout keyboardLayout = cardputer::KeyboardLayout::English;
 String statusMessage;
@@ -91,6 +94,9 @@ Screen currentScreen = Screen::MainCarousel;
 String activeChatId;
 String activeChatTitle = "New chat";
 std::string activeChatInstructions;
+bool activeChatPinned = false;
+bool activeChatArchived = false;
+std::uint32_t activeChatArchivedMessageCount = 0;
 bool chatStorageReady = false;
 String chatStorageError;
 bool fileWorkspaceReady = false;
@@ -201,16 +207,25 @@ std::size_t historyBytes(const std::vector<cardputer::Message>& messages)
     return total;
 }
 
-std::vector<cardputer::Message> trimmedHistory(const std::vector<cardputer::Message>& messages)
+struct HistoryFitResult {
+    std::vector<cardputer::Message> retained;
+    std::vector<cardputer::Message> archived;
+};
+
+HistoryFitResult fitHistoryToActiveContext(const std::vector<cardputer::Message>& messages)
 {
-    std::vector<cardputer::Message> result = messages;
-    while (result.size() > cardputer::kMaximumStoredMessages ||
-           historyBytes(result) > cardputer::kMaximumStoredHistoryBytes) {
-        if (result.size() < 2) {
-            result.clear();
+    HistoryFitResult result = {messages, {}};
+    while (result.retained.size() > cardputer::kMaximumStoredMessages ||
+           historyBytes(result.retained) > cardputer::kMaximumStoredHistoryBytes) {
+        if (result.retained.size() < 2) {
+            result.archived.insert(result.archived.end(),
+                                   result.retained.begin(), result.retained.end());
+            result.retained.clear();
             break;
         }
-        result.erase(result.begin(), result.begin() + 2);
+        result.archived.insert(result.archived.end(),
+                               result.retained.begin(), result.retained.begin() + 2);
+        result.retained.erase(result.retained.begin(), result.retained.begin() + 2);
     }
     return result;
 }
@@ -247,11 +262,17 @@ cardputer::OperationResult saveCurrentChat()
         }
     }
     const cardputer::ChatDocument document = {
-        {activeChatId, activeChatTitle, updatedAt, static_cast<std::uint32_t>(history.size())},
+        {activeChatId, activeChatTitle, updatedAt, static_cast<std::uint32_t>(history.size()),
+         activeChatPinned, activeChatArchived, activeChatArchivedMessageCount},
         history,
         activeChatInstructions,
+        inputBuffer,
     };
-    return cardputer::saveChat(document);
+    const cardputer::OperationResult result = cardputer::saveChat(document);
+    if (result.success) {
+        persistedDraft = inputBuffer;
+    }
+    return result;
 }
 
 cardputer::OperationResult activateChat(const String& id)
@@ -268,8 +289,13 @@ cardputer::OperationResult activateChat(const String& id)
     activeChatTitle = loaded.chat.summary.title;
     history = loaded.chat.messages;
     activeChatInstructions = loaded.chat.instructions;
+    activeChatPinned = loaded.chat.summary.pinned;
+    activeChatArchived = loaded.chat.summary.archived;
+    activeChatArchivedMessageCount = loaded.chat.summary.archivedMessageCount;
     activeResponse.clear();
-    inputBuffer.clear();
+    inputBuffer = loaded.chat.draft;
+    persistedDraft = inputBuffer;
+    lastDraftAutosaveAt = millis();
     scrollOffset = 0;
     return {true, ""};
 }
@@ -287,9 +313,14 @@ cardputer::OperationResult createAndActivateChat()
     activeChatId = created.chat.summary.id;
     activeChatTitle = created.chat.summary.title;
     activeChatInstructions.clear();
+    activeChatPinned = false;
+    activeChatArchived = false;
+    activeChatArchivedMessageCount = 0;
     history.clear();
     activeResponse.clear();
     inputBuffer.clear();
+    persistedDraft.clear();
+    lastDraftAutosaveAt = millis();
     scrollOffset = 0;
     return refreshChatList();
 }
@@ -328,8 +359,10 @@ std::vector<String> chatListItems()
     std::vector<String> items = {"+ New chat"};
     items.reserve(chats.size() + 1);
     for (const auto& chat : chats) {
-        const String marker = chat.id == activeChatId ? "[ON] " : "";
-        items.push_back(marker + chat.title + "  [" + chat.messageCount + "]");
+        const String marker = chat.id == activeChatId ? "[ON] " :
+            (chat.pinned ? "[PIN] " : (chat.archived ? "[ARC] " : ""));
+        const std::uint32_t totalMessages = chat.messageCount + chat.archivedMessageCount;
+        items.push_back(marker + chat.title + "  [" + totalMessages + "]");
     }
     return items;
 }
@@ -344,9 +377,23 @@ void renderChatList()
 
 std::vector<String> chatActionItems()
 {
+    cardputer::ChatSummary selected = {};
+    for (const auto& chat : chats) {
+        if (chat.id == selectedChatId) {
+            selected = chat;
+            break;
+        }
+    }
     return {
         "Open chat",
         "Chat instructions",
+        "Context: " + String(selected.messageCount) + "/" +
+            String(cardputer::kMaximumStoredMessages) + " + " +
+            String(selected.archivedMessageCount) + " archived",
+        selected.pinned ? "Unpin chat" : "Pin chat",
+        selected.archived ? "Restore from archive" : "Archive chat",
+        "Duplicate chat",
+        "Export to workspace",
         "Delete chat",
         "Back",
     };
@@ -380,6 +427,14 @@ void renderChatInstructions()
 
 void openChatList(Screen returnScreen)
 {
+    if (chatStorageReady && !activeChatId.isEmpty()) {
+        const cardputer::OperationResult saved = saveCurrentChat();
+        if (!saved.success) {
+            statusMessage = saved.error;
+            render();
+            return;
+        }
+    }
     const cardputer::OperationResult result = refreshChatList();
     if (!result.success) {
         statusMessage = result.error;
@@ -693,6 +748,70 @@ void runStorageTest()
                   fileVerified && fileCleanup ? "pass" : "failed");
 }
 
+void runChatQolTest()
+{
+    const String exportName = "firmware_chat_export.md";
+    const String exportPath = cardputer::workspaceFilePath(exportName);
+    if (SD.exists(exportPath)) {
+        SD.remove(exportPath);
+    }
+    const cardputer::ChatDocumentResult created = cardputer::createChat("Chat QoL test");
+    if (!created.success) {
+        Serial.println("CHATQOLTEST result=failed stage=create");
+        return;
+    }
+    cardputer::ChatDocument source = created.chat;
+    source.messages = {{"user", "active"}, {"assistant", "answer"}};
+    source.instructions = "Be concise.";
+    source.draft = "unfinished";
+    source.summary.pinned = true;
+    const std::vector<cardputer::Message> archivedMessages = {
+        {"user", "old"}, {"assistant", "reply"},
+    };
+    cardputer::OperationResult result = cardputer::archiveChatMessages(
+        source.summary.id, archivedMessages);
+    if (result.success) {
+        source.summary.archivedMessageCount = archivedMessages.size();
+        result = cardputer::saveChat(source);
+    }
+    const cardputer::ChatDocumentResult loaded = result.success
+        ? cardputer::loadChat(source.summary.id)
+        : cardputer::ChatDocumentResult{false, {}, result.error};
+    if (result.success && (!loaded.success || !loaded.chat.summary.pinned ||
+                           loaded.chat.summary.archivedMessageCount != 2 ||
+                           loaded.chat.draft != "unfinished")) {
+        result = {false, "Chat version-3 metadata round trip failed"};
+    }
+    const cardputer::ChatDocumentResult duplicated = result.success
+        ? cardputer::duplicateChat(source.summary.id)
+        : cardputer::ChatDocumentResult{false, {}, result.error};
+    if (result.success && (!duplicated.success || duplicated.chat.messages.size() != 2 ||
+                           duplicated.chat.draft != "unfinished")) {
+        result = {false, "Chat duplication verification failed"};
+    }
+    if (result.success) {
+        result = cardputer::exportChatToWorkspace(source.summary.id, exportName);
+    }
+    if (result.success && !SD.exists(exportPath)) {
+        result = {false, "Chat export file was not created"};
+    }
+    if (duplicated.success) {
+        const cardputer::OperationResult cleanup = cardputer::deleteChat(
+            duplicated.chat.summary.id);
+        if (result.success && !cleanup.success) {
+            result = cleanup;
+        }
+    }
+    const cardputer::OperationResult sourceCleanup = cardputer::deleteChat(source.summary.id);
+    if (result.success && !sourceCleanup.success) {
+        result = sourceCleanup;
+    }
+    if (SD.exists(exportPath) && !SD.remove(exportPath) && result.success) {
+        result = {false, "Chat export cleanup failed"};
+    }
+    Serial.printf("CHATQOLTEST result=%s\n", result.success ? "pass" : "failed");
+}
+
 void runFileWorkspaceEditTest()
 {
     const String sourceName = "firmware_editor_test.txt";
@@ -851,6 +970,10 @@ void handleSerialCommand(const String& command)
     }
     if (command == "STORAGETEST") {
         runStorageTest();
+        return;
+    }
+    if (command == "CHATQOLTEST") {
+        runChatQolTest();
         return;
     }
     if (command == "FILETEST") {
@@ -1066,15 +1189,28 @@ void submitPrompt()
 
     std::vector<cardputer::Message> pendingHistory = history;
     pendingHistory.push_back({"user", prompt});
-    pendingHistory = trimmedHistory(pendingHistory);
+    HistoryFitResult pendingFit = fitHistoryToActiveContext(pendingHistory);
+    if (!pendingFit.archived.empty()) {
+        const cardputer::OperationResult archived = cardputer::archiveChatMessages(
+            activeChatId, pendingFit.archived);
+        if (!archived.success) {
+            statusMessage = archived.error;
+            render();
+            return;
+        }
+        activeChatArchivedMessageCount +=
+            static_cast<std::uint32_t>(pendingFit.archived.size());
+    }
     const String pendingTitle = history.empty()
         ? String(cardputer::makeChatTitle(prompt, cardputer::kMaximumChatTitleCells).c_str())
         : activeChatTitle;
     cardputer::ChatDocument pendingDocument = {
         {activeChatId, pendingTitle, currentChatTimestamp(),
-         static_cast<std::uint32_t>(pendingHistory.size())},
-        std::move(pendingHistory),
+         static_cast<std::uint32_t>(pendingFit.retained.size()), activeChatPinned,
+         activeChatArchived, activeChatArchivedMessageCount},
+        std::move(pendingFit.retained),
         activeChatInstructions,
+        "",
     };
     const cardputer::OperationResult pendingSave = cardputer::saveChat(pendingDocument);
     if (!pendingSave.success) {
@@ -1131,7 +1267,20 @@ void submitPrompt()
         return;
     }
     history.push_back({"assistant", result.response});
-    history = trimmedHistory(history);
+    HistoryFitResult finalFit = fitHistoryToActiveContext(history);
+    if (!finalFit.archived.empty()) {
+        const cardputer::OperationResult archived = cardputer::archiveChatMessages(
+            activeChatId, finalFit.archived);
+        if (!archived.success) {
+            activeResponse.clear();
+            statusMessage = "Response received but history archive failed: " + archived.error;
+            render();
+            return;
+        }
+        activeChatArchivedMessageCount +=
+            static_cast<std::uint32_t>(finalFit.archived.size());
+    }
+    history = std::move(finalFit.retained);
     activeResponse.clear();
     const cardputer::OperationResult finalSave = saveCurrentChat();
     if (!finalSave.success) {
@@ -2433,6 +2582,65 @@ void handleKeyboard()
                 renderChatInstructions();
             }
         } else if (enterPressed && chatActionsIndex == 2) {
+            menuStatus = "Older turns are preserved on microSD";
+            renderChatActions();
+        } else if (enterPressed && (chatActionsIndex == 3 || chatActionsIndex == 4)) {
+            const cardputer::ChatDocumentResult loaded = cardputer::loadChat(selectedChatId);
+            if (!loaded.success) {
+                menuStatus = loaded.error;
+                renderChatActions();
+                return;
+            }
+            cardputer::ChatDocument updated = loaded.chat;
+            if (chatActionsIndex == 3) {
+                updated.summary.pinned = !updated.summary.pinned;
+            } else {
+                updated.summary.archived = !updated.summary.archived;
+                if (updated.summary.archived) {
+                    updated.summary.pinned = false;
+                }
+            }
+            cardputer::OperationResult result = cardputer::saveChat(updated);
+            if (result.success) {
+                result = refreshChatList();
+            }
+            if (!result.success) {
+                menuStatus = result.error;
+            } else {
+                if (selectedChatId == activeChatId) {
+                    activeChatPinned = updated.summary.pinned;
+                    activeChatArchived = updated.summary.archived;
+                }
+                menuStatus = chatActionsIndex == 3
+                    ? (updated.summary.pinned ? String("Chat pinned") : String("Chat unpinned"))
+                    : (updated.summary.archived ? String("Chat archived")
+                                                : String("Chat restored"));
+            }
+            renderChatActions();
+        } else if (enterPressed && chatActionsIndex == 5) {
+            const cardputer::ChatDocumentResult duplicated = cardputer::duplicateChat(selectedChatId);
+            if (!duplicated.success) {
+                menuStatus = duplicated.error;
+                renderChatActions();
+                return;
+            }
+            const cardputer::OperationResult refreshed = refreshChatList();
+            if (!refreshed.success) {
+                menuStatus = refreshed.error;
+                renderChatActions();
+                return;
+            }
+            selectedChatId = duplicated.chat.summary.id;
+            selectedChatTitle = duplicated.chat.summary.title;
+            menuStatus = "Chat duplicated";
+            renderChatActions();
+        } else if (enterPressed && chatActionsIndex == 6) {
+            const String filename = "chat_" + selectedChatId + ".md";
+            const cardputer::OperationResult exported = cardputer::exportChatToWorkspace(
+                selectedChatId, filename);
+            menuStatus = exported.success ? "Exported as " + filename : exported.error;
+            renderChatActions();
+        } else if (enterPressed && chatActionsIndex == 7) {
             deleteChatId = selectedChatId;
             deleteChatTitle = selectedChatTitle;
             deleteChatReturnScreen = Screen::ChatActions;
@@ -3330,6 +3538,15 @@ void loop()
     }
     updateTransientStatus();
     updateSerial();
+    if (currentScreen == Screen::Chat && inputBuffer != persistedDraft &&
+        millis() - lastDraftAutosaveAt >= kDraftAutosaveIntervalMs) {
+        lastDraftAutosaveAt = millis();
+        const cardputer::OperationResult saved = saveCurrentChat();
+        if (!saved.success) {
+            statusMessage = "Draft autosave failed: " + saved.error;
+            render();
+        }
+    }
     if (currentScreen == Screen::Chat && M5Cardputer.BtnA.wasPressed()) {
         handleVoiceInput();
     } else {

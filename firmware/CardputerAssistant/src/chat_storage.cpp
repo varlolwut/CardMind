@@ -1,5 +1,6 @@
 #include "chat_storage.h"
 
+#include "file_workspace.h"
 #include "text_utils.h"
 
 #include <ArduinoJson.h>
@@ -16,12 +17,17 @@ namespace {
 
 constexpr const char* kAssistantDirectory = "/assistant";
 constexpr const char* kChatsDirectory = "/assistant/chats";
-constexpr std::uint32_t kFormatVersion = 2;
+constexpr std::uint32_t kFormatVersion = 3;
 constexpr std::uint32_t kOldestSupportedFormatVersion = 1;
 
 String chatPath(const String& id, const char* extension)
 {
     return String(kChatsDirectory) + "/" + id + extension;
+}
+
+String chatArchivePath(const String& id)
+{
+    return chatPath(id, ".archive.jsonl");
 }
 
 std::uint64_t currentTimestamp()
@@ -71,6 +77,9 @@ OperationResult validateDocument(const ChatDocument& chat)
     if (!isValidUtf8(chat.instructions)) {
         return {false, "Chat instructions must be valid UTF-8"};
     }
+    if (chat.draft.size() > kMaximumChatDraftBytes || !isValidUtf8(chat.draft)) {
+        return {false, "Chat draft must be valid UTF-8 up to 1200 bytes"};
+    }
     return {true, ""};
 }
 
@@ -93,12 +102,23 @@ ChatDocumentResult parseChatFile(File& file)
     if (version >= 2 && !document["instructions"].is<const char*>()) {
         return {false, {}, "Chat JSON is missing typed instructions"};
     }
+    if (version >= 3 &&
+        (!document["draft"].is<const char*>() || !document["pinned"].is<bool>() ||
+         !document["archived"].is<bool>() ||
+         !document["archived_message_count"].is<std::uint32_t>())) {
+        return {false, {}, "Chat JSON is missing version-3 metadata"};
+    }
 
     ChatDocument result;
     result.summary.id = document["id"].as<const char*>();
     result.summary.title = document["title"].as<const char*>();
     result.summary.updatedAt = document["updated_at"].as<std::uint64_t>();
     result.instructions = version >= 2 ? document["instructions"].as<const char*>() : "";
+    result.draft = version >= 3 ? document["draft"].as<const char*>() : "";
+    result.summary.pinned = version >= 3 ? document["pinned"].as<bool>() : false;
+    result.summary.archived = version >= 3 ? document["archived"].as<bool>() : false;
+    result.summary.archivedMessageCount = version >= 3
+        ? document["archived_message_count"].as<std::uint32_t>() : 0;
     const JsonArrayConst messages = document["messages"].as<JsonArrayConst>();
     if (messages.size() > kMaximumStoredMessages) {
         return {false, {}, "Chat JSON contains too many messages"};
@@ -140,6 +160,10 @@ OperationResult writeChatFile(const ChatDocument& chat, const String& path)
     document["title"] = chat.summary.title;
     document["updated_at"] = chat.summary.updatedAt;
     document["instructions"] = chat.instructions;
+    document["draft"] = chat.draft;
+    document["pinned"] = chat.summary.pinned;
+    document["archived"] = chat.summary.archived;
+    document["archived_message_count"] = chat.summary.archivedMessageCount;
     JsonArray messages = document["messages"].to<JsonArray>();
     for (const auto& message : chat.messages) {
         JsonObject item = messages.add<JsonObject>();
@@ -215,6 +239,12 @@ ChatsResult listChats()
     }
     directory.close();
     std::sort(chats.begin(), chats.end(), [](const ChatSummary& left, const ChatSummary& right) {
+        if (left.pinned != right.pinned) {
+            return left.pinned;
+        }
+        if (left.archived != right.archived) {
+            return !left.archived;
+        }
         if (left.updatedAt != right.updatedAt) {
             return left.updatedAt > right.updatedAt;
         }
@@ -325,7 +355,164 @@ OperationResult deleteChat(const String& id)
     if (!SD.remove(target)) {
         return {false, "Failed to delete chat file " + id};
     }
+    const String archive = chatArchivePath(id);
+    if (SD.exists(archive) && !SD.remove(archive)) {
+        return {false, "Chat was deleted, but its archived turns could not be removed"};
+    }
     return {true, ""};
+}
+
+OperationResult archiveChatMessages(const String& id,
+                                    const std::vector<Message>& messages)
+{
+    if (!isValidChatId(id.c_str())) {
+        return {false, "Cannot archive messages: invalid chat id"};
+    }
+    if (messages.empty()) {
+        return {true, ""};
+    }
+    const String path = chatArchivePath(id);
+    File existing = SD.open(path, FILE_READ);
+    const std::size_t existingBytes = existing ? existing.size() : 0;
+    if (existing) {
+        existing.close();
+    }
+    std::size_t additionalBytes = 0;
+    for (const auto& message : messages) {
+        if ((message.role != "user" && message.role != "assistant") ||
+            message.content.empty() || !isValidUtf8(message.content)) {
+            return {false, "Cannot archive an invalid chat message"};
+        }
+        JsonDocument document;
+        document["role"] = message.role;
+        document["content"] = message.content;
+        additionalBytes += measureJson(document) + 1;
+    }
+    if (existingBytes > kMaximumArchivedChatBytes ||
+        additionalBytes > kMaximumArchivedChatBytes - existingBytes) {
+        return {false, "Archived chat history reached the 2 MiB safety limit; export it first"};
+    }
+    File file = SD.open(path, FILE_APPEND);
+    if (!file) {
+        return {false, "Failed to open archived chat history on microSD"};
+    }
+    for (const auto& message : messages) {
+        JsonDocument document;
+        document["role"] = message.role;
+        document["content"] = message.content;
+        const std::size_t expected = measureJson(document);
+        if (serializeJson(document, file) != expected || file.write('\n') != 1) {
+            file.close();
+            return {false, "Failed while appending archived chat history"};
+        }
+    }
+    file.flush();
+    file.close();
+    return {true, ""};
+}
+
+OperationResult exportChatToWorkspace(const String& id, const String& filename)
+{
+    const ChatDocumentResult loaded = loadChat(id);
+    if (!loaded.success) {
+        return {false, loaded.error};
+    }
+    const OperationResult created = createWorkspaceFile(filename);
+    if (!created.success) {
+        return created;
+    }
+    const String target = workspaceFilePath(filename);
+    File output = SD.open(target, FILE_APPEND);
+    if (!output) {
+        deleteWorkspaceFile(filename);
+        return {false, "Failed to open chat export file"};
+    }
+    std::size_t writtenBytes = 0;
+    const String heading = "# " + loaded.chat.summary.title + "\n\n";
+    const std::size_t headingBytes = output.print(heading);
+    if (headingBytes != heading.length()) {
+        output.close();
+        deleteWorkspaceFile(filename);
+        return {false, "Failed while writing the chat export heading"};
+    }
+    writtenBytes += headingBytes;
+    String exportError;
+    auto writeMessage = [&output, &writtenBytes, &exportError](const Message& message) -> bool {
+        const String headingText = message.role == "user" ? "## You\n\n" : "## Assistant\n\n";
+        const std::size_t required = headingText.length() + message.content.size() + 2;
+        if (required > kMaximumWorkspaceFileBytes - writtenBytes) {
+            exportError = "Chat export exceeds the 491520-byte workspace file limit";
+            return false;
+        }
+        const std::size_t headingWritten = output.print(headingText);
+        const std::size_t contentWritten = output.write(
+            reinterpret_cast<const std::uint8_t*>(message.content.data()),
+            message.content.size());
+        const std::size_t separatorWritten = output.print("\n\n");
+        if (headingWritten != headingText.length() ||
+            contentWritten != message.content.size() || separatorWritten != 2) {
+            exportError = "Failed while writing a chat export message";
+            return false;
+        }
+        writtenBytes += headingWritten + contentWritten + separatorWritten;
+        return true;
+    };
+    File archive = SD.open(chatArchivePath(id), FILE_READ);
+    while (archive && archive.available()) {
+        const String line = archive.readStringUntil('\n');
+        if (line.isEmpty()) {
+            continue;
+        }
+        JsonDocument item;
+        const DeserializationError error = deserializeJson(item, line);
+        if (error || !item["role"].is<const char*>() || !item["content"].is<const char*>()) {
+            archive.close();
+            output.close();
+            deleteWorkspaceFile(filename);
+            return {false, "Archived chat contains an invalid JSON line"};
+        }
+        if (!writeMessage({item["role"].as<const char*>(), item["content"].as<const char*>()})) {
+            archive.close();
+            output.close();
+            deleteWorkspaceFile(filename);
+            return {false, exportError};
+        }
+    }
+    if (archive) {
+        archive.close();
+    }
+    for (const auto& message : loaded.chat.messages) {
+        if (!writeMessage(message)) {
+            output.close();
+            deleteWorkspaceFile(filename);
+            return {false, exportError};
+        }
+    }
+    output.flush();
+    output.close();
+    return {true, ""};
+}
+
+ChatDocumentResult duplicateChat(const String& id)
+{
+    const ChatDocumentResult source = loadChat(id);
+    if (!source.success) {
+        return source;
+    }
+    const ChatDocumentResult created = createChat(source.chat.summary.title + " copy");
+    if (!created.success) {
+        return created;
+    }
+    ChatDocument duplicate = created.chat;
+    duplicate.messages = source.chat.messages;
+    duplicate.instructions = source.chat.instructions;
+    duplicate.draft = source.chat.draft;
+    const OperationResult saved = saveChat(duplicate);
+    if (!saved.success) {
+        deleteChat(duplicate.summary.id);
+        return {false, {}, saved.error};
+    }
+    return {true, duplicate, ""};
 }
 
 }  // namespace cardputer

@@ -114,12 +114,16 @@ struct ChatSummary {
     String title;
     std::uint64_t updatedAt;
     std::uint32_t messageCount;
+    bool pinned = false;
+    bool archived = false;
+    std::uint32_t archivedMessageCount = 0;
 };
 
 struct ChatDocument {
     ChatSummary summary;
     std::vector<Message> messages;
     std::string instructions;
+    std::string draft;
 };
 
 struct ChatsResult {
