@@ -1,5 +1,6 @@
 #include "../firmware/CardputerAssistant/src/text_utils.h"
 #include "../firmware/CardputerAssistant/src/audio_utils.h"
+#include "../firmware/CardputerAssistant/src/ssh_terminal.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -154,6 +155,24 @@ void testWebSearchRouting()
             "File tool name was classified as web fetch");
 }
 
+void testSshTerminalFiltering()
+{
+    cardputer::SshTerminalText state = {"prompt", "", false};
+    const std::string colored = "\x1B[31m red\x1B[0m\nnext\rreplace";
+    state = cardputer::appendSshTerminalBytes(
+        state, reinterpret_cast<const std::uint8_t*>(colored.data()),
+        colored.size(), 1024);
+    require(state.text == "prompt red\nreplace", "SSH ANSI or carriage-return filtering failed");
+    const std::string clear = "\x1B[2Jclean";
+    state = cardputer::appendSshTerminalBytes(
+        state, reinterpret_cast<const std::uint8_t*>(clear.data()),
+        clear.size(), 1024);
+    require(state.text == "clean", "SSH clear-screen filtering failed");
+    const auto lines = cardputer::sshTerminalVisibleLines(state, 10, 3);
+    require(lines.size() == 3 && lines.back() == "clean",
+            "SSH terminal viewport failed");
+}
+
 }  // namespace
 
 int main()
@@ -168,6 +187,7 @@ int main()
         testChatText();
         testWorkspaceRouting();
         testWebSearchRouting();
+        testSshTerminalFiltering();
         std::cout << "host_tests: PASS\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
