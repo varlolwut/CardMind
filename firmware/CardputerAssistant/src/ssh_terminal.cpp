@@ -85,7 +85,7 @@ std::vector<std::string> sshTerminalVisibleLines(const SshTerminalText& terminal
         lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(rows));
     }
     while (lines.size() < rows) {
-        lines.push_back("");
+        lines.insert(lines.begin(), "");
     }
     return lines;
 }
