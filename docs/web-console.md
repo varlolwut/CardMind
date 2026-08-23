@@ -19,11 +19,15 @@ SSH sessions. The device returns to Tools without restarting.
 
 ## Interface
 
-The responsive interface is split into four sections. On a narrow phone display the
-section buttons scroll horizontally.
+The responsive interface is split into four sections. Desktop and tablet layouts use
+a persistent sidebar and compact top bar. A phone uses a thumb-accessible fixed bottom
+navigation bar, single-column cards, and places the live SSH terminal before profile
+configuration and SFTP controls.
 
 ### Chat
 
+- Use the two-pane desktop layout to keep conversations beside the active thread; on
+  a phone the active conversation and composer appear first.
 - Select, create, rename, pin, archive, duplicate, export, or delete chats.
 - Send prompts with SSE streaming, cancel an active request, or retry the previous
   browser prompt.
@@ -55,6 +59,9 @@ Passwords and private-key passphrases are write-only. An uploaded private key is
 installed outside the downloadable workspace. Browser terminal output is retained
 only in the current page; on-device terminal sessions also use the rotating microSD
 scrollback log.
+
+Destructive actions and editable names use CardMind dialogs instead of browser-native
+prompts, so confirmation remains usable and visually consistent on desktop and mobile.
 
 ### Settings
 

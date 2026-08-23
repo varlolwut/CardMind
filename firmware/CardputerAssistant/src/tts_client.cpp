@@ -53,6 +53,7 @@ constexpr std::uint32_t kConnectTimeoutMs = 15000;
 constexpr std::uint16_t kHttpTimeoutMs = 60000;
 constexpr std::size_t kMaximumSpeechBytes = 5000;
 constexpr std::size_t kMaximumPcmBytes = 16U * 1024U * 1024U;
+constexpr std::uint32_t kSpeakerDrainTimeoutMs = 5000;
 constexpr std::uint32_t kPcmSampleRate = 16000;
 constexpr std::size_t kPlaybackSamples = 1024;
 constexpr std::size_t kPlaybackBuffers = 3;
@@ -188,6 +189,32 @@ OperationResult removeTemporaryPcm()
         : OperationResult{false, "Failed to remove temporary TTS audio from microSD"};
 }
 
+struct SpeakerWaitResult {
+    bool success;
+    bool stopped;
+    String error;
+};
+
+SpeakerWaitResult waitForSpeakerIdle(const SpeechPlaybackControl& control,
+                                     std::uint32_t timeoutMs)
+{
+    const std::uint32_t startedAt = millis();
+    while (M5Cardputer.Speaker.isPlaying()) {
+        if (control() == SpeechPlaybackCommand::Stop) {
+            M5Cardputer.Speaker.stop();
+            return {true, true, ""};
+        }
+        if (static_cast<std::uint32_t>(millis() - startedAt) >= timeoutMs) {
+            M5Cardputer.Speaker.stop();
+            return {false, false,
+                    "Cardputer speaker did not drain its playback queue within 5 seconds"};
+        }
+        M5Cardputer.update();
+        delay(1);
+    }
+    return {true, false, ""};
+}
+
 OperationResult playPcmFile(std::uint8_t volume, const SpeechPlaybackControl& control)
 {
     File file = SD.open(kTemporaryPcmPath, FILE_READ);
@@ -208,8 +235,14 @@ OperationResult playPcmFile(std::uint8_t volume, const SpeechPlaybackControl& co
     while (file.available()) {
         SpeechPlaybackCommand command = control();
         while (command == SpeechPlaybackCommand::Pause) {
-            while (M5Cardputer.Speaker.isPlaying()) {
-                delay(1);
+            const SpeakerWaitResult drained =
+                waitForSpeakerIdle(control, kSpeakerDrainTimeoutMs);
+            if (!drained.success || drained.stopped) {
+                file.close();
+                M5Cardputer.Speaker.end();
+                return drained.stopped
+                    ? OperationResult{true, "Speech playback stopped"}
+                    : OperationResult{false, drained.error};
             }
             delay(10);
             command = control();
@@ -237,18 +270,12 @@ OperationResult playPcmFile(std::uint8_t volume, const SpeechPlaybackControl& co
         bufferIndex = (bufferIndex + 1) % playbackBuffers.size();
     }
     file.close();
-    while (M5Cardputer.Speaker.isPlaying()) {
-        if (control() == SpeechPlaybackCommand::Stop) {
-            M5Cardputer.Speaker.stop();
-            file.close();
-            M5Cardputer.Speaker.end();
-            return {true, "Speech playback stopped"};
-        }
-        M5Cardputer.update();
-        delay(1);
-    }
+    const SpeakerWaitResult drained = waitForSpeakerIdle(control, kSpeakerDrainTimeoutMs);
     M5Cardputer.Speaker.end();
-    return {true, ""};
+    if (!drained.success) {
+        return {false, drained.error};
+    }
+    return {true, drained.stopped ? String("Speech playback stopped") : String()};
 }
 
 OperationResult downloadSpeech(const Settings& settings,
@@ -457,11 +484,11 @@ OperationResult playTtsHardwareTest(std::uint8_t volume)
         M5Cardputer.Speaker.end();
         return {false, "Cardputer speaker rejected the hardware test PCM"};
     }
-    while (M5Cardputer.Speaker.isPlaying()) {
-        delay(1);
-    }
+    const SpeakerWaitResult drained = waitForSpeakerIdle(
+        []() { return SpeechPlaybackCommand::Continue; }, kSpeakerDrainTimeoutMs);
     M5Cardputer.Speaker.end();
-    return {true, ""};
+    return drained.success ? OperationResult{true, ""}
+                           : OperationResult{false, drained.error};
 }
 
 }  // namespace cardputer

@@ -14,7 +14,7 @@ namespace {
 
 constexpr const char* kWorkspaceDirectory = "/assistant/files";
 constexpr const char* kBookmarksPath = "/assistant/file_bookmarks.json";
-constexpr std::size_t kCopyBufferBytes = 1024;
+constexpr std::size_t kCopyBufferBytes = 4096;
 constexpr std::size_t kMaximumSearchBytes = 128;
 
 struct BookmarkEntry {

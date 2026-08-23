@@ -269,38 +269,6 @@ void refreshBatteryStatus()
     lastBatteryRefreshAt = millis();
 }
 
-std::size_t historyBytes(const std::vector<cardputer::Message>& messages)
-{
-    std::size_t total = 0;
-    for (const auto& message : messages) {
-        total += message.content.size();
-    }
-    return total;
-}
-
-struct HistoryFitResult {
-    std::vector<cardputer::Message> retained;
-    std::vector<cardputer::Message> archived;
-};
-
-HistoryFitResult fitHistoryToActiveContext(const std::vector<cardputer::Message>& messages)
-{
-    HistoryFitResult result = {messages, {}};
-    while (result.retained.size() > cardputer::kMaximumStoredMessages ||
-           historyBytes(result.retained) > cardputer::kMaximumStoredHistoryBytes) {
-        if (result.retained.size() < 2) {
-            result.archived.insert(result.archived.end(),
-                                   result.retained.begin(), result.retained.end());
-            result.retained.clear();
-            break;
-        }
-        result.archived.insert(result.archived.end(),
-                               result.retained.begin(), result.retained.begin() + 2);
-        result.retained.erase(result.retained.begin(), result.retained.begin() + 2);
-    }
-    return result;
-}
-
 std::uint64_t currentChatTimestamp()
 {
     const std::time_t current = std::time(nullptr);
@@ -876,6 +844,7 @@ void runApiTest()
 
 void runStorageTest()
 {
+    Serial.println("STORAGETEST stage=chat_create");
     const cardputer::ChatDocumentResult created = cardputer::createChat("Storage test");
     if (!created.success) {
         Serial.println("STORAGETEST result=failed stage=chat_create");
@@ -884,13 +853,16 @@ void runStorageTest()
     cardputer::ChatDocument document = created.chat;
     document.messages = {{"user", "test"}, {"assistant", "OK"}};
     document.instructions = "Reply briefly.";
+    Serial.println("STORAGETEST stage=chat_save");
     const cardputer::OperationResult saved = cardputer::saveChat(document);
+    Serial.println("STORAGETEST stage=chat_load");
     const cardputer::ChatDocumentResult loaded = saved.success
         ? cardputer::loadChat(document.summary.id)
         : cardputer::ChatDocumentResult{false, {}, saved.error};
     const bool chatVerified = loaded.success && loaded.chat.messages.size() == 2 &&
         loaded.chat.messages[1].content == "OK" &&
         loaded.chat.instructions == "Reply briefly.";
+    Serial.println("STORAGETEST stage=chat_delete");
     const cardputer::OperationResult chatCleanup = cardputer::deleteChat(document.summary.id);
     if (!chatVerified || !chatCleanup.success) {
         Serial.println("STORAGETEST result=failed stage=chat_roundtrip");
@@ -898,9 +870,11 @@ void runStorageTest()
     }
 
     const String testName = "firmware_storage_test.txt";
+    Serial.println("STORAGETEST stage=file_write");
     const cardputer::ToolExecutionResult write = cardputer::executeWorkspaceTool(
         {"storage-write", "write_file",
          "{\"name\":\"firmware_storage_test.txt\",\"content\":\"OK\"}"});
+    Serial.println("STORAGETEST stage=file_read");
     const cardputer::ToolExecutionResult read = write.success
         ? cardputer::executeWorkspaceTool(
               {"storage-read", "read_file",
@@ -908,6 +882,7 @@ void runStorageTest()
         : cardputer::ToolExecutionResult{false, "", write.error};
     const bool fileVerified = read.success && read.output.find("\"content\":\"OK\"") != std::string::npos;
     const String testPath = cardputer::workspaceFilePath(testName);
+    Serial.println("STORAGETEST stage=file_delete");
     const bool fileCleanup = SD.exists(testPath) && SD.remove(testPath);
     Serial.printf("STORAGETEST result=%s\n",
                   fileVerified && fileCleanup ? "pass" : "failed");
@@ -1022,13 +997,15 @@ void runFileWorkspaceEditTest()
     if (SD.exists(renamedPath)) {
         SD.remove(renamedPath);
     }
+    Serial.println("FILETEST stage=create");
     cardputer::OperationResult result = cardputer::createWorkspaceFile(sourceName);
     if (result.success) {
+        Serial.println("FILETEST stage=write_large_file");
         File file = SD.open(sourcePath, FILE_WRITE);
         if (!file) {
             result = {false, "Failed to open maximum-size workspace test file"};
         } else {
-            std::uint8_t block[1024] = {};
+            std::uint8_t block[4096] = {};
             std::fill(block, block + sizeof(block), static_cast<std::uint8_t>('a'));
             std::size_t written = 0;
             while (result.success && written < cardputer::kMaximumWorkspaceFileBytes) {
@@ -1046,6 +1023,7 @@ void runFileWorkspaceEditTest()
     constexpr std::uint32_t editOffset = 245760;
     const std::string replacement = "мир";
     if (result.success) {
+        Serial.println("FILETEST stage=replace_range");
         result = cardputer::replaceWorkspaceFileRange(
             sourceName, editOffset, static_cast<std::uint32_t>(replacement.size()), replacement);
     }
@@ -1057,8 +1035,10 @@ void runFileWorkspaceEditTest()
         result = {false, "Workspace editor content verification failed"};
     }
     if (result.success) {
+        Serial.println("FILETEST stage=validate_utf8");
         result = cardputer::validateWorkspaceFileUtf8(sourceName);
     }
+    Serial.println("FILETEST stage=find_text");
     const cardputer::WorkspaceFindResult found = result.success
         ? cardputer::findWorkspaceText(sourceName, replacement, 0)
         : cardputer::WorkspaceFindResult{false, false, 0, result.error};
@@ -1066,6 +1046,7 @@ void runFileWorkspaceEditTest()
         result = {false, "Workspace search verification failed"};
     }
     if (result.success) {
+        Serial.println("FILETEST stage=save_bookmark");
         result = cardputer::saveWorkspaceBookmark(sourceName, editOffset);
     }
     const cardputer::WorkspaceBookmarkResult sourceBookmark = result.success
@@ -1076,9 +1057,11 @@ void runFileWorkspaceEditTest()
         result = {false, "Workspace bookmark verification failed"};
     }
     if (result.success) {
+        Serial.println("FILETEST stage=copy");
         result = cardputer::copyWorkspaceFile(sourceName, copyName);
     }
     if (result.success) {
+        Serial.println("FILETEST stage=rename");
         result = cardputer::renameWorkspaceFile(copyName, renamedName);
     }
     const cardputer::WorkspaceBookmarkResult renamedBookmark = result.success
@@ -1089,9 +1072,11 @@ void runFileWorkspaceEditTest()
         result = {false, "Copied and renamed bookmark verification failed"};
     }
     if (result.success) {
+        Serial.println("FILETEST stage=delete_source");
         result = cardputer::deleteWorkspaceFile(sourceName);
     }
     if (result.success) {
+        Serial.println("FILETEST stage=delete_copy");
         result = cardputer::deleteWorkspaceFile(renamedName);
     }
     if (SD.exists(sourcePath)) {
@@ -1194,6 +1179,10 @@ void runToolApiTest()
 
 void handleSerialCommand(const String& command)
 {
+    if (command == "PING") {
+        Serial.println("PONG");
+        return;
+    }
     if (command == "STATUS") {
         printStatus();
         return;
@@ -1207,9 +1196,11 @@ void handleSerialCommand(const String& command)
         return;
     }
     if (command == "CANCELTEST") {
+        Serial.println("CANCELTEST stage=chat");
         const std::vector<cardputer::Message> testHistory = {{"user", "cancel"}};
         const cardputer::ChatResult result = cardputer::streamChatCompletion(
             settings, testHistory, "", [](const std::string&) {}, []() { return true; });
+        Serial.println("CANCELTEST stage=search");
         const cardputer::ToolExecutionResult searchResult =
             cardputer::webSearchSettingsAreComplete(settings)
                 ? cardputer::executeWebSearchTool(
@@ -1217,10 +1208,12 @@ void handleSerialCommand(const String& command)
                       {"cancel-search", "web_search", "{\"query\":\"cancel\"}"},
                       []() { return true; })
                 : cardputer::ToolExecutionResult{false, "", "Web search canceled by user"};
+        Serial.println("CANCELTEST stage=stt");
         const cardputer::TranscriptionResult sttResult =
             cardputer::voiceSettingsAreComplete(settings)
                 ? cardputer::transcribeVoiceRecording(settings, []() { return true; })
                 : cardputer::TranscriptionResult{false, {}, "STT request canceled by user"};
+        Serial.println("CANCELTEST stage=tts");
         const cardputer::OperationResult ttsResult =
             cardputer::ttsSettingsAreComplete(settings)
                 ? cardputer::synthesizeAndPlaySpeechControlled(
@@ -1478,6 +1471,7 @@ void updateSerial()
             serialInput.trim();
             if (!serialInput.isEmpty()) {
                 handleSerialCommand(serialInput);
+                Serial.flush();
             }
             serialInput = "";
         } else if (((character >= 'A' && character <= 'Z') ||
@@ -1592,7 +1586,8 @@ void submitPrompt()
 
     std::vector<cardputer::Message> pendingHistory = history;
     pendingHistory.push_back({"user", prompt});
-    HistoryFitResult pendingFit = fitHistoryToActiveContext(pendingHistory);
+    cardputer::HistoryFitResult pendingFit =
+        cardputer::fitHistoryToActiveContext(pendingHistory);
     if (!pendingFit.archived.empty()) {
         const cardputer::OperationResult archived = cardputer::archiveChatMessages(
             activeChatId, pendingFit.archived);
@@ -1672,7 +1667,7 @@ void submitPrompt()
     }
     history.push_back({"assistant", result.response});
     retryPrompt.clear();
-    HistoryFitResult finalFit = fitHistoryToActiveContext(history);
+    cardputer::HistoryFitResult finalFit = cardputer::fitHistoryToActiveContext(history);
     if (!finalFit.archived.empty()) {
         const cardputer::OperationResult archived = cardputer::archiveChatMessages(
             activeChatId, finalFit.archived);
