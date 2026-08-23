@@ -11,6 +11,8 @@ Every successful build of `main` publishes a GitHub Release named after the firm
 - `SHA256SUMS.txt`: checksums for both images.
 
 The same files are retained as a workflow artifact for every successful `main` build.
+Release publication runs only for `main`; manually dispatched builds of another branch
+produce an artifact without replacing a published release.
 
 ## Install a release
 
@@ -53,6 +55,13 @@ Use the application-only image to keep NVS credentials and the installation-spec
 ```
 
 Do not run `erase_flash` for an ordinary update. Chats and workspace files live on microSD and remain independent of either update method.
+
+CardMind 1.9 and newer can also check and install a newer published application image
+under **Device → Firmware update**. The updater requires the two OTA app partitions,
+downloads to microSD, verifies the release asset size and GitHub SHA-256 digest, and
+verifies the same digest again while writing the inactive app partition. It never
+disables TLS verification and does not erase NVS or microSD data. Updates are manual:
+CardMind does not install them in the background.
 
 ## First-run configuration
 
@@ -101,12 +110,19 @@ The HTTPS clients validate the configured chat endpoint against ISRG Root X1 and
 - Fn+7: create and switch to a new chat immediately
 - Fn+8: speak the latest assistant response through the built-in speaker
 - Ctrl+Backspace: clear the current draft
+- Esc during chat, search, STT upload, TTS playback, or firmware download: cancel the active operation
 
 The complete controls reference is available on-device under **Fn+4 → Help**. The carousel contains Chats, AI, Voice, Network, Files, Device, and Help cards. Browse it with the printed Left/Right arrow keys (plain `,` and `/`), press Enter to open a card, and press plain `` ` `` (the Esc-marked key) to go back. Inside lists, the plain arrow-marked `;` and `.` keys move the selection and Enter confirms it. In the chat manager, Fn+Delete opens a confirmation screen before deleting the selected chat. During an LLM response or tool chain, Esc cancels the active network stream with an explicit status instead of waiting for completion. Wi-Fi, microSD, and battery status remain visible in the carousel header; battery level is also shown in the chat header. **Device → Web console** starts a protected console on the current Wi-Fi network. Open the local address shown on the Cardputer and sign in with the installation password displayed only on its screen. The console mirrors chat history, streams prompts, can stop or retry the latest browser request, creates, switches, renames, or deletes chats, and edits per-chat instructions. It can also change the non-secret OpenAI-compatible base URL and model, display Wi-Fi/heap/SD diagnostics, browse large microSD workspace files in 12,288-byte chunks, edit a chunk atomically, upload or download, rename, or delete a file. Uploads stream directly to microSD, reject duplicate names and invalid UTF-8, and remove incomplete data after an error. API keys remain write-only and are never returned to the browser. Press Esc on the Cardputer to close the console without restarting. Sessions expire after 15 minutes of inactivity and mutating requests require a session-specific CSRF token.
 
 On every normal restart CardMind initializes local storage, opens the main carousel, and connects Wi-Fi and starts NTP synchronization in the background. The model list is fetched only when the model picker is opened. The previously active chat remains selected but is not shown during startup.
 
 The optional SSH terminal is under **Device → SSH terminal**. Configure one host through the protected Web console; host, port, username, and auth mode are readable there, while passwords and key passphrases are write-only. Password and PEM private-key authentication are supported. Uploaded private keys are stored in `/assistant/ssh` outside the downloadable workspace. On the first connection, and whenever a host key changes, CardMind shows the complete SHA-256 fingerprint on its own display and will not authenticate until Enter explicitly trusts it. Plain arrows, Tab, Enter, Backspace, and Ctrl combinations are forwarded to the PTY; Esc disconnects. Sanitized terminal output is appended to `/assistant/ssh/terminal.log` and rotates at 512 KiB. SSH runs exclusively and does not overlap memory-heavy LLM, search, STT, or TTS requests.
+
+SFTP was evaluated after the interactive client stabilized. It is intentionally not
+enabled in 1.9: a second remote file-transfer UI and its simultaneous channel and
+buffer costs would duplicate the safer workspace upload/download path without a
+validated Cardputer ADV memory margin. Remote commands and the PTY are supported;
+SFTP is not advertised as available.
 
 The chat request uses `POST /v1/chat/completions`, Bearer authorization, and SSE `choices[0].delta.content` streaming. Voice input records 16 kHz mono PCM WAV to `/voice.wav` on microSD, uploads it as multipart form data to the separately configured `/v1/audio/transcriptions` endpoint, then deletes the temporary file. Speech language is detected automatically and is independent of the active keyboard layout. The default STT configuration is Groq `whisper-large-v3-turbo`; its API key is separate from the chat API key.
 
@@ -116,11 +132,27 @@ Speech output uses ElevenLabs `POST /v1/text-to-speech/{voice_id}/stream` with `
 
 Each conversation has an independent context and a separate versioned JSON file under `/assistant/chats`. The active chat survives restarts. The firmware keeps at most 20 chats, 64 messages and 32,768 UTF-8 bytes of active context per chat; the oldest complete user/assistant pairs are trimmed when needed.
 
+Older complete turns are archived to a streamed 2 MiB microSD journal instead of
+being silently discarded. Chat actions show the total context meter and provide
+rename, pin, archive, duplicate, retry, Markdown export, and portable `.chat.jsonl`
+export. Portable bundles retain the title, per-chat instructions, active messages,
+and archived-message boundary; import is available under **Files → Import chat
+bundle**. Failed requests retain both the original error and a retryable prompt.
+The latest bounded web-search snippets and source URLs are cached on microSD and can
+be opened from **Chats → Latest search sources**.
+
 Each chat can also store up to 2,048 UTF-8 bytes of private instructions. Open **Chats → select a chat → Chat instructions**, type a prompt such as `Answer as briefly as possible`, and press Enter to save it. An empty value disables the feature. The instruction is sent as a system message only for that chat and is not displayed or mixed into its visible message history. Existing version-1 chat files are loaded automatically and acquire the new field the next time they are saved.
 
 The model receives four standard OpenAI function tools: `list_files`, chunked `read_file`, `write_file`, and atomic `append_file`. They are restricted to `/assistant/files`, validate filenames and UTF-8, reject traversal, and allow only `.txt`, `.md`, `.json`, `.csv`, `.html`, and `.svg` files. A single file is limited to 491,520 bytes (20 times the original limit); each model call reads or writes at most 12,288 bytes so large files never have to fit in ESP32 RAM. Open **Fn+4 → Files → Browse SD workspace** to create, view, edit, search, copy, rename, or delete files directly on the Cardputer. The viewer and editor operate on 2,048-byte UTF-8 chunks, while saves stream the untouched prefix and suffix through a temporary file before an atomic replacement. In the editor, **Opt+Left/Right** moves the UTF-8 cursor and **Fn+Enter** inserts a newline. Search streams through the complete file without loading it into RAM; one persistent byte-offset bookmark per file is stored separately under `/assistant` and follows copy and rename operations. Existing destinations are never overwritten silently. Choose **Files → Web file manager** to browse, edit, and download files through the protected console on the current Wi-Fi network; Esc returns to CardMind without a restart.
 
 Workspace tools are attached only when the current prompt explicitly mentions a file, microSD, a supported filename extension, or starts with `/file`. This prevents ordinary questions from accidentally entering repeated tool-calling rounds. Mention the filename again in a later follow-up when further file access is required.
+
+The **Tools** carousel card works without a network. It provides quick notes and a
+checklist stored in the workspace, 5/15/25-minute timers, a bounded arithmetic
+calculator, QR rendering, and the system monitor. **Device → Backup** creates a
+transactional local backup of non-secret preferences, chats, and workspace metadata;
+restore requires an explicit on-device confirmation. Wi-Fi passwords, API keys, SSH
+passwords, and private keys are excluded.
 
 Current-information prompts and explicit `/search` or `/web` commands attach a `web_search` tool. The OpenAI-compatible chat API relays tool calls, while the Cardputer executes the search itself through the separately configured Exa endpoint and returns bounded source snippets and URLs to the model. Search setup is optional: create an Exa key at `https://dashboard.exa.ai`, then enter it under **Fn+4 → Device → Web setup**. If search is not configured, current-information prompts fail once with an actionable setup message instead of entering repeated tool rounds.
 
@@ -175,7 +207,7 @@ arduino-cli upload `
   firmware/CardputerAssistant
 ```
 
-The source contains serial-safe diagnostics at 115200 baud: `STATUS`, `SELFTEST`, `STORAGETEST`, `FILETEST`, `SSHCHECK`, `SSHPROBE`, `APITEST`, `TOOLTEST`, `WEBTEST`, `FETCHTEST`, `SEARCHTEST`, `E2ETEST`, `STTTLS`, `STTAUTH`, `TTSHW`, `TTSTLS`, `TTSAUTH`, and `TTSTEST`. `STATUS` reports chat/file/search/TTS readiness, crash-journal state, and the previous bounded operation name without names or contents. CardMind appends a secret-free boot record to `/assistant/diagnostics.log` on microSD with the reset reason and memory headroom; the journal rotates at 64 KiB. `STORAGETEST` performs temporary chat and file round trips on microSD and removes both test records. `FILETEST` creates a maximum-size 491,520-byte file, edits UTF-8 content in its middle, reads it by offset, copies and renames it, then removes every test file. `SSHCHECK` verifies the packaged libssh2 runtime. `SSHPROBE` performs a real host-key handshake without authenticating or printing the fingerprint. `APITEST` sends a fixed prompt using credentials already stored in NVS. `TOOLTEST` verifies proxy tool-calling with a temporary file and removes it. `WEBTEST` runs a fixed search using the stored search configuration. `FETCHTEST` extracts a fixed public HTTPS page through Exa Contents. `SEARCHTEST` verifies the complete model-to-search-to-model round trip. `E2ETEST` creates a temporary chat, submits `/search cardputer zero` through the same streaming, rendering, tool, and persistence path as keyboard input, restores the original chat, and removes the temporary chat. `TTSHW` plays a local PCM test without a network or key. `TTSTLS` verifies the default ElevenLabs endpoint without a key and expects its authenticated HTTP rejection. `TTSAUTH` validates stored TTS credentials without generating billable audio. `TTSTEST` generates and plays one fixed English phrase. API tests print only pass/fail metadata and never print a key or response content. None of these commands returns credentials, the Wi-Fi SSID, audio, file contents, or model response text.
+The source contains serial-safe diagnostics at 115200 baud: `STATUS`, `SELFTEST`, `CANCELTEST`, `STORAGETEST`, `CHATQOLTEST`, `FILETEST`, `DEVICESETTINGSTEST`, `BACKUPTEST`, `OFFLINETEST`, `SEARCHCACHETEST`, `OTACHECK`, `OTADOWNLOADTEST`, `OTAINSTALLTEST`, `SSHCHECK`, `SSHPROBE`, `APITEST`, `TOOLTEST`, `WEBTEST`, `FETCHTEST`, `SEARCHTEST`, `E2ETEST`, `STTTLS`, `STTAUTH`, `TTSHW`, `TTSTLS`, `TTSAUTH`, and `TTSTEST`. `STATUS` reports chat/file/search/TTS readiness, crash-journal state, and the previous bounded operation name without names or contents. CardMind appends a secret-free boot record to `/assistant/diagnostics.log` on microSD with the reset reason and memory headroom; the journal rotates at 64 KiB. `STORAGETEST` performs temporary chat and file round trips on microSD and removes both test records. `FILETEST` creates a maximum-size 491,520-byte file, edits UTF-8 content in its middle, reads it by offset, copies and renames it, then removes every test file. `CHATQOLTEST`, `DEVICESETTINGSTEST`, `BACKUPTEST`, and `OFFLINETEST` exercise portable chats, persistent device preferences, transactional backup, and offline utilities. `CANCELTEST` checks chat, search, STT, and TTS cancellation before network I/O. `OTACHECK` validates current public release metadata and partition layout; `OTADOWNLOADTEST` downloads and SHA-256-verifies the application image on microSD, removes it, and never installs it. `OTAINSTALLTEST` is a physical serial-only release test: it refuses equal or older versions or a non-dual-partition layout, installs a verified newer image, and reboots only after `Update.end()` succeeds. `SSHCHECK` verifies the packaged libssh2 runtime. `SSHPROBE` performs a real host-key handshake without authenticating or printing the fingerprint. `APITEST` sends a fixed prompt using credentials already stored in NVS. `TOOLTEST` verifies proxy tool-calling with a temporary file and removes it. `WEBTEST` runs a fixed search using the stored search configuration. `FETCHTEST` extracts a fixed public HTTPS page through Exa Contents. `SEARCHTEST` verifies the complete model-to-search-to-model round trip. `E2ETEST` creates a temporary chat, submits `/search cardputer zero` through the same streaming, rendering, tool, and persistence path as keyboard input, restores the original chat, and removes the temporary chat. `TTSHW` plays a local PCM test without a network or key. `TTSTLS` verifies the default ElevenLabs endpoint without a key and expects its authenticated HTTP rejection. `TTSAUTH` accepts a valid least-privilege key even when it intentionally lacks unrelated `user_read`; `TTSTEST` is the functional synthesis and playback check. API tests print only pass/fail metadata and never print a key or response content. None of these commands returns credentials, the Wi-Fi SSID, audio, file contents, or model response text.
 
 Cardputer ADV supports 2.4 GHz Wi-Fi. If connection fails, open **Fn+4 → Network**, select a visible 2.4 GHz network, and enter its password.
 

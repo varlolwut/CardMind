@@ -13,6 +13,7 @@ enum class CarouselIcon {
     Network,
     Files,
     Device,
+    Tools,
     Help,
 };
 
@@ -78,6 +79,7 @@ void showTextEditor(const String& title,
                     const String& status,
                     const String& emptyHint,
                     const String& footer);
+void showQrCode(const String& title, const String& payload, const String& footer);
 void showFileEditor(const String& title,
                     const std::string& input,
                     std::size_t cursor,

@@ -147,11 +147,15 @@ OperationResult parseHttpsEndpoint(const String& url, HttpsEndpoint& endpoint)
 OperationResult writeFully(WiFiClientSecure& client,
                            const std::uint8_t* data,
                            std::size_t size,
-                           const char* stage)
+                           const char* stage,
+                           const CancelCallback& isCancelled)
 {
     std::size_t offset = 0;
     std::uint32_t lastProgress = millis();
     while (offset < size) {
+        if (isCancelled()) {
+            return {false, "STT request canceled by user"};
+        }
         if (client.available() > 0) {
             return {false, String("STT server responded during ") + stage + " at " + offset +
                                "/" + size + " bytes"};
@@ -175,19 +179,28 @@ OperationResult writeFully(WiFiClientSecure& client,
     return {true, ""};
 }
 
-OperationResult writeString(WiFiClientSecure& client, const String& value, const char* stage)
+OperationResult writeString(WiFiClientSecure& client,
+                            const String& value,
+                            const char* stage,
+                            const CancelCallback& isCancelled)
 {
     return writeFully(client,
                       reinterpret_cast<const std::uint8_t*>(value.c_str()),
                       value.length(),
-                      stage);
+                      stage,
+                      isCancelled);
 }
 
-OperationResult readHttpLine(WiFiClientSecure& client, String& line)
+OperationResult readHttpLine(WiFiClientSecure& client,
+                             String& line,
+                             const CancelCallback& isCancelled)
 {
     line = "";
     const std::uint32_t startedAt = millis();
     while (millis() - startedAt < kHttpTimeoutMs) {
+        if (isCancelled()) {
+            return {false, "STT request canceled by user"};
+        }
         while (client.available() > 0) {
             const int value = client.read();
             if (value < 0) {
@@ -212,7 +225,10 @@ OperationResult readHttpLine(WiFiClientSecure& client, String& line)
     return {false, "STT HTTP response header timed out"};
 }
 
-OperationResult readExactBody(WiFiClientSecure& client, String& body, std::size_t size)
+OperationResult readExactBody(WiFiClientSecure& client,
+                              String& body,
+                              std::size_t size,
+                              const CancelCallback& isCancelled)
 {
     if (body.length() + size > kMaximumResponseBytes) {
         return {false, "STT HTTP response exceeded 8192 bytes"};
@@ -221,6 +237,9 @@ OperationResult readExactBody(WiFiClientSecure& client, String& body, std::size_
     std::size_t remaining = size;
     std::uint32_t lastProgress = millis();
     while (remaining > 0) {
+        if (isCancelled()) {
+            return {false, "STT request canceled by user"};
+        }
         const std::size_t available = static_cast<std::size_t>(std::max(client.available(), 0));
         if (available > 0) {
             const std::size_t requested = std::min({remaining, available, buffer.size()});
@@ -241,11 +260,13 @@ OperationResult readExactBody(WiFiClientSecure& client, String& body, std::size_
     return {true, ""};
 }
 
-OperationResult readChunkedBody(WiFiClientSecure& client, String& body)
+OperationResult readChunkedBody(WiFiClientSecure& client,
+                                String& body,
+                                const CancelCallback& isCancelled)
 {
     while (true) {
         String sizeLine;
-        const OperationResult lineResult = readHttpLine(client, sizeLine);
+        const OperationResult lineResult = readHttpLine(client, sizeLine, isCancelled);
         if (!lineResult.success) {
             return lineResult;
         }
@@ -260,28 +281,31 @@ OperationResult readChunkedBody(WiFiClientSecure& client, String& body)
         }
         if (chunkSize == 0) {
             do {
-                const OperationResult trailerResult = readHttpLine(client, sizeLine);
+                const OperationResult trailerResult = readHttpLine(
+                    client, sizeLine, isCancelled);
                 if (!trailerResult.success) {
                     return trailerResult;
                 }
             } while (!sizeLine.isEmpty());
             return {true, ""};
         }
-        const OperationResult bodyResult = readExactBody(client, body, chunkSize);
+        const OperationResult bodyResult = readExactBody(
+            client, body, chunkSize, isCancelled);
         if (!bodyResult.success) {
             return bodyResult;
         }
-        const OperationResult endingResult = readHttpLine(client, sizeLine);
+        const OperationResult endingResult = readHttpLine(client, sizeLine, isCancelled);
         if (!endingResult.success || !sizeLine.isEmpty()) {
             return {false, "STT response chunk is missing its CRLF terminator"};
         }
     }
 }
 
-UploadResult readHttpResponse(WiFiClientSecure& client)
+UploadResult readHttpResponse(WiFiClientSecure& client,
+                              const CancelCallback& isCancelled)
 {
     String line;
-    OperationResult result = readHttpLine(client, line);
+    OperationResult result = readHttpLine(client, line, isCancelled);
     if (!result.success) {
         return {-1, "", result.error};
     }
@@ -301,7 +325,7 @@ UploadResult readHttpResponse(WiFiClientSecure& client)
     int contentLength = -1;
     bool chunked = false;
     while (true) {
-        result = readHttpLine(client, line);
+        result = readHttpLine(client, line, isCancelled);
         if (!result.success) {
             return {-1, "", result.error};
         }
@@ -330,13 +354,17 @@ UploadResult readHttpResponse(WiFiClientSecure& client)
         ? std::min<std::size_t>(contentLength, kMaximumResponseBytes)
         : 512U);
     if (chunked) {
-        result = readChunkedBody(client, body);
+        result = readChunkedBody(client, body, isCancelled);
     } else if (contentLength >= 0) {
-        result = readExactBody(client, body, static_cast<std::size_t>(contentLength));
+        result = readExactBody(
+            client, body, static_cast<std::size_t>(contentLength), isCancelled);
     } else {
         std::array<std::uint8_t, 512> buffer = {};
         std::uint32_t lastProgress = millis();
         while (client.connected() || client.available() > 0) {
+            if (isCancelled()) {
+                return {-1, "", "STT request canceled by user"};
+            }
             const int available = client.available();
             if (available <= 0) {
                 if (millis() - lastProgress >= kHttpTimeoutMs) {
@@ -364,7 +392,9 @@ UploadResult readHttpResponse(WiFiClientSecure& client)
                           : UploadResult{-1, "", result.error};
 }
 
-UploadResult uploadVoiceFile(const Settings& settings, File& file)
+UploadResult uploadVoiceFile(const Settings& settings,
+                             File& file,
+                             const CancelCallback& isCancelled)
 {
     HttpsEndpoint endpoint;
     const OperationResult endpointResult = parseHttpsEndpoint(transcriptionUrl(settings), endpoint);
@@ -383,7 +413,7 @@ UploadResult uploadVoiceFile(const Settings& settings, File& file)
     headers += "POST " + endpoint.path + " HTTP/1.1\r\n";
     headers += "Host: " + hostHeader + "\r\n";
     headers += "Authorization: Bearer " + settings.sttApiKey + "\r\n";
-    headers += "User-Agent: CardputerAssistant/1.3\r\n";
+    headers += "User-Agent: CardMind/1.9\r\n";
     headers += "Accept: application/json\r\n";
     headers += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
     headers += "Content-Length: " + String(contentLength) + "\r\n";
@@ -397,15 +427,20 @@ UploadResult uploadVoiceFile(const Settings& settings, File& file)
     if (!client.connect(endpoint.host.c_str(), endpoint.port, 20000)) {
         return {-1, "", "Failed to establish the verified STT TLS connection"};
     }
-    OperationResult writeResult = writeString(client, headers, "request headers");
+    OperationResult writeResult = writeString(
+        client, headers, "request headers", isCancelled);
     if (writeResult.success) {
         const std::uint32_t acknowledgementDeadline = millis() + 1500U;
         while (client.available() == 0 && client.connected() &&
                static_cast<std::int32_t>(acknowledgementDeadline - millis()) > 0) {
+            if (isCancelled()) {
+                client.stop();
+                return {-1, "", "STT request canceled by user"};
+            }
             delay(2);
         }
         if (client.available() > 0) {
-            const UploadResult acknowledgement = readHttpResponse(client);
+            const UploadResult acknowledgement = readHttpResponse(client, isCancelled);
             if (acknowledgement.status != 100) {
                 client.stop();
                 return acknowledgement;
@@ -416,7 +451,7 @@ UploadResult uploadVoiceFile(const Settings& settings, File& file)
         }
     }
     if (writeResult.success) {
-        writeResult = writeString(client, prefix, "multipart metadata");
+        writeResult = writeString(client, prefix, "multipart metadata", isCancelled);
     }
     constexpr std::size_t uploadBufferSize = 1024;
     std::unique_ptr<std::uint8_t[]> buffer(new (std::nothrow) std::uint8_t[uploadBufferSize]);
@@ -426,6 +461,10 @@ UploadResult uploadVoiceFile(const Settings& settings, File& file)
     }
     std::size_t fileBytes = 0;
     while (writeResult.success && fileBytes < file.size()) {
+        if (isCancelled()) {
+            writeResult = {false, "STT request canceled by user"};
+            break;
+        }
         const std::size_t requested = std::min(uploadBufferSize, file.size() - fileBytes);
         const std::size_t readCount = file.read(buffer.get(), requested);
         if (readCount != requested) {
@@ -433,7 +472,8 @@ UploadResult uploadVoiceFile(const Settings& settings, File& file)
                                       " WAV bytes"};
             break;
         }
-        writeResult = writeFully(client, buffer.get(), readCount, "WAV upload");
+        writeResult = writeFully(
+            client, buffer.get(), readCount, "WAV upload", isCancelled);
         if (!writeResult.success) {
             writeResult.error += String(" after ") + fileBytes + "/" + file.size() +
                                  " WAV bytes";
@@ -441,36 +481,41 @@ UploadResult uploadVoiceFile(const Settings& settings, File& file)
         fileBytes += readCount;
     }
     if (writeResult.success) {
-        writeResult = writeString(client, suffix, "multipart terminator");
+        writeResult = writeString(
+            client, suffix, "multipart terminator", isCancelled);
     }
     if (!writeResult.success) {
         if (client.available() > 0) {
-            const UploadResult earlyResponse = readHttpResponse(client);
+            const UploadResult earlyResponse = readHttpResponse(client, isCancelled);
             client.stop();
             return earlyResponse;
         }
         client.stop();
         return {-1, "", writeResult.error};
     }
-    const UploadResult response = readHttpResponse(client);
+    const UploadResult response = readHttpResponse(client, isCancelled);
     client.stop();
     return response;
 }
 
 }  // namespace
 
-TranscriptionResult transcribeVoiceRecording(const Settings& settings)
+TranscriptionResult transcribeVoiceRecording(const Settings& settings,
+                                              const CancelCallback& isCancelled)
 {
     if (!voiceSettingsAreComplete(settings)) {
         return {false, {}, "Voice STT is not configured; use Fn+4 > Web setup"};
     }
     String lastError = "Voice transcription did not run";
     for (int attempt = 1; attempt <= kMaximumAttempts; ++attempt) {
+        if (isCancelled()) {
+            return {false, {}, "STT request canceled by user"};
+        }
         File file = SD.open(voiceRecordingPath(), FILE_READ);
         if (!file) {
             return {false, {}, "Failed to open temporary voice.wav from microSD"};
         }
-        const UploadResult upload = uploadVoiceFile(settings, file);
+        const UploadResult upload = uploadVoiceFile(settings, file, isCancelled);
         file.close();
 
         if (upload.status == HTTP_CODE_OK) {
@@ -498,7 +543,14 @@ TranscriptionResult transcribeVoiceRecording(const Settings& settings)
             return {false, {}, lastError};
         }
         Serial.printf("WARN event=stt_retry attempt=%d status=%d\n", attempt, upload.status);
-        delay(static_cast<std::uint32_t>(1000U << (attempt - 1)) + (esp_random() % 350U));
+        const std::uint32_t retryAt = millis() +
+            static_cast<std::uint32_t>(1000U << (attempt - 1)) + (esp_random() % 350U);
+        while (static_cast<std::int32_t>(retryAt - millis()) > 0) {
+            if (isCancelled()) {
+                return {false, {}, "STT request canceled by user"};
+            }
+            delay(10);
+        }
     }
     return {false, {}, lastError};
 }

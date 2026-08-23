@@ -23,6 +23,8 @@ OperationResult deleteChat(const String& id);
 OperationResult archiveChatMessages(const String& id,
                                     const std::vector<Message>& messages);
 OperationResult exportChatToWorkspace(const String& id, const String& filename);
+OperationResult exportChatBundleToWorkspace(const String& id, const String& filename);
+ChatDocumentResult importChatBundleFromWorkspace(const String& filename);
 ChatDocumentResult duplicateChat(const String& id);
 
 }  // namespace cardputer

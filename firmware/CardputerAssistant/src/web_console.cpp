@@ -297,7 +297,7 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 .row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}small{color:#9fb3ca}#status{color:#fde68a}</style></head><body>
 <header><strong>CardMind</strong><span id="device"></span><button id="logout">Logout</button></header>
 <main class="layout"><section class="card"><div class="row"><select id="chats"></select><button id="newChat">New chat</button></div>
-<div class="row"><button id="renameChat">Rename</button><button id="pinChat">Pin</button><button id="archiveChat">Archive</button><button id="duplicateChat">Duplicate</button><button id="exportChat">Export</button><button class="danger" id="deleteChat">Delete</button></div>
+<div class="row"><button id="renameChat">Rename</button><button id="pinChat">Pin</button><button id="archiveChat">Archive</button><button id="duplicateChat">Duplicate</button><button id="exportChat">Export Markdown</button><button id="exportBundle">Export bundle</button><button class="danger" id="deleteChat">Delete</button></div>
 <p id="status"></p><div id="messages"></div></section><section class="card"><textarea id="prompt" maxlength="1200" placeholder="Message CardMind..."></textarea>
 <div class="row"><button id="send">Send</button><button class="danger" id="stop">Stop</button><button id="retry">Retry</button><button id="refresh">Refresh</button></div></section>
 <section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section>
@@ -310,7 +310,7 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 <small>Passwords are write-only. Host fingerprints must be confirmed on the Cardputer before authentication. Private keys are stored outside the downloadable workspace.</small></section>
 <section class="card"><h2>Device diagnostics</h2><p id="diagnostics"></p></section>
 <section class="card"><h2>microSD files</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button id="downloadFile">Download</button></div>
-<div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.csv,.html,.svg"><button id="uploadFile">Upload new file</button></div>
+<div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.jsonl,.csv,.html,.svg"><button id="uploadFile">Upload new file</button><button id="importChat">Import selected chat bundle</button></div>
 <textarea class="file-editor" id="fileContent" maxlength="12288" placeholder="Select a workspace file"></textarea><p id="filePosition"></p>
 <div class="row"><button id="previousFilePage">Previous</button><button id="nextFilePage">Next</button><button id="saveFile">Save chunk</button></div>
 <div class="row"><button id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></section></main>
@@ -333,7 +333,7 @@ q('#refresh').onclick=refresh;q('#chats').onchange=async()=>{await request('/api
 q('#newChat').onclick=async()=>{await request('/api/chat/new',{method:'POST'});await refresh()};
 q('#renameChat').onclick=async()=>{const title=prompt('Chat title',state.active_chat_title);if(title){await post('/api/chat/rename',{title});await refresh()}};
 q('#pinChat').onclick=async()=>{await post('/api/chat/pin',{});await refresh()};q('#archiveChat').onclick=async()=>{await post('/api/chat/archive',{});await refresh()};
-q('#duplicateChat').onclick=async()=>{await post('/api/chat/duplicate',{});await refresh()};q('#exportChat').onclick=async()=>{await post('/api/chat/export',{});await refresh()};
+q('#duplicateChat').onclick=async()=>{await post('/api/chat/duplicate',{});await refresh()};q('#exportChat').onclick=async()=>{await post('/api/chat/export',{});await refresh()};q('#exportBundle').onclick=async()=>{await post('/api/chat/export-bundle',{});await refresh()};
 q('#deleteChat').onclick=async()=>{if(confirm(`Delete chat "${state.active_chat_title}"?`)){await post('/api/chat/delete',{});await refresh()}};
 q('#saveInstructions').onclick=async()=>{await request('/api/chat/instructions',{method:'POST',body:new URLSearchParams({instructions:q('#instructions').value})});await refresh()};
 q('#saveSettings').onclick=async()=>{await post('/api/settings',{api_base_url:q('#apiBaseUrl').value,model:q('#model').value});await refresh()};
@@ -344,6 +344,7 @@ q('#previousFilePage').onclick=()=>{if(fileBack.length)openFile(fileBack.pop(),f
 q('#saveFile').onclick=async()=>{if(!fileName)return;await post('/api/file/save',{name:fileName,offset:String(fileOffset),original_bytes:String(fileOriginalBytes),content:q('#fileContent').value});await refresh();await openFile(fileOffset,false)};
 q('#downloadFile').onclick=()=>{const name=q('#files').value;if(name)location=`/api/file/download?name=${encodeURIComponent(name)}`};
 q('#uploadFile').onclick=async()=>{const file=q('#uploadInput').files[0];if(!file)return;const data=new FormData();data.append('file',file,file.name);await request('/api/file/upload',{method:'POST',body:data});q('#uploadInput').value='';await refresh()};
+q('#importChat').onclick=async()=>{const name=q('#files').value;if(name){await post('/api/chat/import',{name});await refresh()}};
 q('#renameFile').onclick=async()=>{const name=q('#files').value,newName=prompt('New filename',name);if(newName&&newName!==name){await post('/api/file/rename',{name,new_name:newName});fileName='';await refresh()}};
 q('#deleteFile').onclick=async()=>{const name=q('#files').value;if(name&&confirm(`Delete ${name}?`)){await post('/api/file/delete',{name});fileName='';q('#fileContent').value='';q('#filePosition').textContent='';await refresh()}};
 async function sendPrompt(){const prompt=q('#prompt').value.trim();if(!prompt)return;lastPrompt=prompt;q('#send').disabled=true;q('#status').textContent='Streaming...';activeRequest=new AbortController();
@@ -489,13 +490,14 @@ void handleState()
     sendJson(200, document);
 }
 
-ToolExecutionResult executeConsoleTool(const ToolCall& call)
+ToolExecutionResult executeConsoleTool(const ToolCall& call,
+                                       const CancelCallback& isCancelled)
 {
     if (isWebSearchToolName(call.name)) {
-        return executeWebSearchTool(consoleSettings, call);
+        return executeWebSearchTool(consoleSettings, call, isCancelled);
     }
     if (isWebFetchToolName(call.name)) {
-        return executeWebFetchTool(consoleSettings, call);
+        return executeWebFetchTool(consoleSettings, call, isCancelled);
     }
     if (call.name == "list_files" || call.name == "read_file" ||
         call.name == "write_file" || call.name == "append_file") {
@@ -581,7 +583,10 @@ void handlePrompt()
     markOperation(useWorkspace || useSearch ? "web_console_tools" : "web_console_chat");
     const ChatResult result = useWorkspace || useSearch
         ? streamChatCompletionWithTools(consoleSettings, activeChat.messages,
-                                        activeChat.instructions, onText, executeConsoleTool,
+                                        activeChat.instructions, onText,
+                                        [&isCancelled](const ToolCall& call) {
+                                            return executeConsoleTool(call, isCancelled);
+                                        },
                                         isCancelled)
         : streamChatCompletion(consoleSettings, activeChat.messages,
                                activeChat.instructions, onText, isCancelled);
@@ -810,6 +815,51 @@ void handleExportChat()
     JsonDocument document;
     document["ok"] = true;
     document["filename"] = filename;
+    sendJson(200, document);
+}
+
+void handleExportChatBundle()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const String filename = "chat_" + activeChat.summary.id + ".chat.jsonl";
+    const OperationResult exported = exportChatBundleToWorkspace(
+        activeChat.summary.id, filename);
+    if (!exported.success) {
+        sendJsonError(400, exported.error);
+        return;
+    }
+    consoleStatus = "Chat bundle exported as " + filename;
+    JsonDocument document;
+    document["ok"] = true;
+    document["filename"] = filename;
+    sendJson(200, document);
+}
+
+void handleImportChatBundle()
+{
+    if (!requestHasValidCsrf()) {
+        sendJsonError(401, "Authentication required");
+        return;
+    }
+    const ChatDocumentResult imported = importChatBundleFromWorkspace(server.arg("name"));
+    if (!imported.success) {
+        sendJsonError(400, imported.error);
+        return;
+    }
+    activeChat = imported.chat;
+    const OperationResult refreshed = refreshChats();
+    if (!refreshed.success) {
+        sendJsonError(500, refreshed.error);
+        return;
+    }
+    consoleStatus = "Chat imported";
+    renderConsoleChat();
+    JsonDocument document;
+    document["ok"] = true;
+    document["chat_id"] = activeChat.summary.id;
     sendJson(200, document);
 }
 
@@ -1274,6 +1324,8 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.on("/api/chat/archive", HTTP_POST, handleArchiveChat);
         server.on("/api/chat/duplicate", HTTP_POST, handleDuplicateChat);
         server.on("/api/chat/export", HTTP_POST, handleExportChat);
+        server.on("/api/chat/export-bundle", HTTP_POST, handleExportChatBundle);
+        server.on("/api/chat/import", HTTP_POST, handleImportChatBundle);
         server.on("/api/chat/delete", HTTP_POST, handleDeleteChat);
         server.on("/api/settings", HTTP_POST, handleSettings);
         server.on("/api/ssh/settings", HTTP_POST, handleSshSettings);
