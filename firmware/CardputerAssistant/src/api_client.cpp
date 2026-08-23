@@ -327,13 +327,17 @@ String buildToolChatRequest(const Settings& settings,
 
 class SseStream final : public Stream {
 public:
-    explicit SseStream(const std::function<void(const std::string&)>& onText)
-        : onText_(onText)
+    SseStream(const ChatTextCallback& onText, const CancelCallback& isCancelled)
+        : onText_(onText), isCancelled_(isCancelled)
     {
     }
 
     std::size_t write(std::uint8_t byte) override
     {
+        if (isCancelled_()) {
+            error_ = "Request canceled by user";
+            return 0;
+        }
         if (byte == '\n') {
             processLine();
         } else {
@@ -345,7 +349,9 @@ public:
     std::size_t write(const std::uint8_t* buffer, std::size_t size) override
     {
         for (std::size_t index = 0; index < size; ++index) {
-            write(buffer[index]);
+            if (write(buffer[index]) != 1) {
+                return index;
+            }
         }
         return size;
     }
@@ -455,7 +461,8 @@ private:
         onText_(text);
     }
 
-    std::function<void(const std::string&)> onText_;
+    ChatTextCallback onText_;
+    CancelCallback isCancelled_;
     std::string line_;
     std::vector<ToolCall> toolCalls_;
     String error_;
@@ -580,10 +587,14 @@ namespace {
 
 CompletionTurnResult streamCompletionTurn(const Settings& settings,
                                           const String& payload,
-                                          const ChatTextCallback& onText)
+                                          const ChatTextCallback& onText,
+                                          const CancelCallback& isCancelled)
 {
     String lastError = "Chat request was not attempted";
     for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+        if (isCancelled()) {
+            return {false, "", {}, "Request canceled by user"};
+        }
         WiFiClientSecure client;
         configureSecureClient(client);
         HTTPClient http;
@@ -626,19 +637,21 @@ CompletionTurnResult streamCompletionTurn(const Settings& settings,
         }
 
         std::string completeResponse;
-        SseStream sink([&completeResponse, &onText](const std::string& text) {
-            completeResponse += text;
-            onText(text);
-        });
+        SseStream sink(
+            [&completeResponse, &onText](const std::string& text) {
+                completeResponse += text;
+                onText(text);
+            },
+            isCancelled);
         const int bytesWritten = http.writeToStream(&sink);
         sink.finish();
         http.end();
+        if (sink.failed()) {
+            return {false, completeResponse, {}, sink.error()};
+        }
         if (bytesWritten < 0) {
             return {false, completeResponse, {},
                     String("SSE transport failed after response started: ") + HTTPClient::errorToString(bytesWritten)};
-        }
-        if (sink.failed()) {
-            return {false, completeResponse, {}, sink.error()};
         }
         if (!sink.receivedText() && sink.toolCalls().empty()) {
             if (sink.receivedAnthropicEvents()) {
@@ -670,7 +683,8 @@ CompletionTurnResult streamCompletionTurn(const Settings& settings,
 ChatResult streamChatCompletion(const Settings& settings,
                                 const std::vector<Message>& history,
                                 const std::string& instructions,
-                                const ChatTextCallback& onText)
+                                const ChatTextCallback& onText,
+                                const CancelCallback& isCancelled)
 {
     if (history.empty() || history.back().role != "user") {
         return {false, "", "Chat request requires a final user message"};
@@ -682,7 +696,8 @@ ChatResult streamChatCompletion(const Settings& settings,
     if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
         return {false, "", "Chat payload left less than 70000 bytes of free heap; start a new chat"};
     }
-    const CompletionTurnResult turn = streamCompletionTurn(settings, payload, onText);
+    const CompletionTurnResult turn = streamCompletionTurn(
+        settings, payload, onText, isCancelled);
     if (!turn.success) {
         return {false, turn.response, turn.error};
     }
@@ -698,7 +713,8 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const std::vector<Message>& history,
                                          const std::string& instructions,
                                          const ChatTextCallback& onText,
-                                         const ToolExecutor& executeTool)
+                                         const ToolExecutor& executeTool,
+                                         const CancelCallback& isCancelled)
 {
     if (history.empty() || history.back().role != "user") {
         return {false, "", "Chat request requires a final user message"};
@@ -720,7 +736,8 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
             [&completeResponse, &onText](const std::string& text) {
                 completeResponse += text;
                 onText(text);
-            });
+            },
+            isCancelled);
         if (!turn.success) {
             return {false, completeResponse, turn.error};
         }
@@ -741,6 +758,9 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
         round.calls = std::move(turn.toolCalls);
         round.results.reserve(round.calls.size());
         for (const auto& call : round.calls) {
+            if (isCancelled()) {
+                return {false, completeResponse, "Request canceled by user"};
+            }
             ToolExecutionResult result = executeTool(call);
             if (result.output.empty() || !isValidUtf8(result.output)) {
                 return {false, completeResponse,
