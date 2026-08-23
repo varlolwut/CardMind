@@ -62,6 +62,13 @@ SshClient webSshClient;
 SshProfile webSshProfile = {"", "", 22, "", "", SshAuthMode::Password, ""};
 bool webSshAwaitingTrust = false;
 bool webSshTerminalOpen = false;
+bool consoleEscapeConsumed = false;
+
+bool consoleEscapePressed()
+{
+    const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+    return keys.esc || std::find(keys.word.begin(), keys.word.end(), '`') != keys.word.end();
+}
 
 bool parseUnsignedArgument(const String& value, std::uint32_t& result)
 {
@@ -187,6 +194,7 @@ void sendJson(int statusCode, const JsonDocument& document)
 {
     String output;
     serializeJson(document, output);
+    server.sendHeader("Cache-Control", "no-store");
     server.send(statusCode, "application/json; charset=utf-8", output);
 }
 
@@ -294,45 +302,42 @@ String consolePage()
     String page = R"HTML(<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CardMind Console</title><style>
-:root{color-scheme:dark}body{margin:0;font:15px system-ui;background:#07111e;color:#edf6ff}
-header{position:sticky;top:0;background:#10233b;padding:12px 16px;display:flex;gap:10px;align-items:center}
-header strong{flex:1;color:#67e8f9}.layout{max-width:900px;margin:auto;padding:14px;display:grid;gap:12px}
-.card{background:#111f33;border:1px solid #29405e;border-radius:14px;padding:14px}
-#messages{min-height:42vh;max-height:60vh;overflow:auto}.message{white-space:pre-wrap;padding:10px;border-radius:10px;margin:8px 0}
-.user{background:#123b4a}.assistant{background:#25284a}.stream{color:#fde68a}
-textarea,input,select,button{box-sizing:border-box;background:#081524;color:#fff;border:1px solid #405b7d;border-radius:8px;padding:10px}
-textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;background:#5eead4;color:#06201c;border:0;font-weight:800}
-.danger{background:#fb7185;color:#300}.file-editor{min-height:260px;font:14px ui-monospace,monospace}
-.terminal{background:#020617;color:#d1fae5;border:1px solid #405b7d;border-radius:8px;padding:10px;min-height:280px;max-height:65vh;overflow:auto;white-space:pre-wrap;font:14px ui-monospace,monospace;outline:none}
-.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}small{color:#9fb3ca}#status{color:#fde68a}</style></head><body>
-<header><strong>CardMind</strong><span id="device"></span><button id="logout">Logout</button></header>
-<main class="layout"><section class="card"><div class="row"><select id="chats"></select><button id="newChat">New chat</button></div>
-<div class="row"><button id="renameChat">Rename</button><button id="pinChat">Pin</button><button id="archiveChat">Archive</button><button id="duplicateChat">Duplicate</button><button id="exportChat">Export Markdown</button><button id="exportBundle">Export bundle</button><button class="danger" id="deleteChat">Delete</button></div>
-<p id="status"></p><div id="messages"></div></section><section class="card"><textarea id="prompt" maxlength="1200" placeholder="Message CardMind..."></textarea>
-<div class="row"><button id="send">Send</button><button class="danger" id="stop">Stop</button><button id="retry">Retry</button><button id="refresh">Refresh</button></div></section>
-<section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section>
-<section class="card"><h2>Connection</h2><label>OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180">
-<label>Model</label><input id="model" maxlength="120"><button id="saveSettings">Save non-secret settings</button><small>API keys remain write-only and are never sent to this page.</small></section>
-<section class="card"><h2>SSH terminal and SFTP</h2><div class="row"><select id="sshProfiles"></select><input id="sshName" maxlength="32" placeholder="Profile name"><button id="newSsh">New</button><button class="danger" id="deleteSsh">Delete</button></div><div class="row"><input id="sshHost" maxlength="253" placeholder="Host"><input id="sshPort" type="number" min="1" max="65535" placeholder="Port"></div>
-<input id="sshUser" maxlength="64" placeholder="Username"><select id="sshAuth"><option value="password">Password</option><option value="key">Private key</option></select>
-<input id="sshPassword" type="password" maxlength="192" placeholder="New password (leave blank to keep)"><input id="sshPassphrase" type="password" maxlength="192" placeholder="New key passphrase (leave blank to keep)">
-<button id="saveSsh">Save SSH profile</button><div class="row"><input id="sshKeyInput" type="file" accept=".pem,.key"><button id="uploadSshKey">Install private key</button></div>
-<div class="row"><button id="connectSsh">Connect</button><button id="disconnectSsh" class="danger">Disconnect</button><button id="clearSsh">Clear display</button><button id="fullSsh">Fullscreen</button></div>
-<pre id="sshTerminal" class="terminal" tabindex="0">Click Connect, then focus this terminal and type.</pre>
-<div class="row"><input id="sshInput" maxlength="512" placeholder="Command (Enter sends)"><button id="sendSshInput">Send</button></div>
-<div class="row"><input id="sftpPath" value="/" maxlength="511"><button id="listSftp">List SFTP</button><select id="sftpEntries"></select></div>
-<div class="row"><button id="sftpOpen">Open directory</button><button id="sftpDownload">Download to SD workspace</button><select id="sftpLocal"></select><button id="sftpUpload">Upload to current path</button></div>
-<small>Passwords are write-only. A new or changed host fingerprint must be explicitly confirmed. Transferred files stay on the device microSD; browser terminal output is held in this page.</small></section>
-<section class="card"><h2>Device diagnostics</h2><p id="diagnostics"></p></section>
-<section class="card"><h2>microSD files</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button id="downloadFile">Download</button></div>
-<div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.jsonl,.csv,.html,.svg"><button id="uploadFile">Upload new file</button><button id="importChat">Import selected chat bundle</button></div>
-<textarea class="file-editor" id="fileContent" maxlength="12288" placeholder="Select a workspace file"></textarea><p id="filePosition"></p>
-<div class="row"><button id="previousFilePage">Previous</button><button id="nextFilePage">Next</button><button id="saveFile">Save chunk</button></div>
-<div class="row"><button id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></section></main>
+:root{color-scheme:dark;--bg:#06101c;--surface:#0e1d30;--raised:#13263d;--line:#294968;--text:#edf6ff;--muted:#9db2c8;--accent:#5eead4;--warn:#fde68a;--danger:#fb7185}
+*{box-sizing:border-box}body{margin:0;font:15px system-ui;background:radial-gradient(circle at top,#102b47 0,var(--bg) 36rem);color:var(--text)}
+header{position:sticky;top:0;z-index:4;background:#0a192acc;backdrop-filter:blur(14px);border-bottom:1px solid var(--line);padding:10px max(14px,calc((100vw - 1120px)/2));display:flex;gap:10px;align-items:center}
+header strong{font-size:19px;letter-spacing:.04em;color:#67e8f9}.spacer{flex:1}.device-pill{color:var(--muted);font-size:13px}
+.shell{max-width:1120px;margin:auto;padding:0 14px 24px}.tabs{position:sticky;top:54px;z-index:3;display:flex;gap:8px;overflow-x:auto;padding:10px 0;background:#081523e6;backdrop-filter:blur(12px)}
+.tab{white-space:nowrap;background:#142840;color:var(--muted);border:1px solid var(--line)}.tab.active{background:var(--accent);color:#06201c;border-color:var(--accent)}
+.statusbar{min-height:20px;margin:4px 2px 10px;color:var(--warn)}main{display:block}.panel{display:none}.panel.active{display:grid;gap:12px}.grid{display:grid;gap:12px}
+.card{background:linear-gradient(145deg,#13243a,#0d1b2d);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 12px 30px #0003}.card h2{margin:0 0 12px;font-size:18px}.card h3{margin:8px 0;font-size:15px;color:#bae6fd}
+#messages{min-height:42vh;max-height:62vh;overflow:auto;scrollbar-color:#45637e transparent}.message{white-space:pre-wrap;padding:11px 12px;border-radius:12px;margin:8px 0;line-height:1.45}.user{background:#123b4a}.assistant{background:#262b50}.stream{color:var(--warn)}
+textarea,input,select,button{font:inherit;background:#081524;color:#fff;border:1px solid #405b7d;border-radius:9px;padding:10px;min-width:0}input,select{width:100%}textarea{width:100%;min-height:96px;resize:vertical}button{cursor:pointer;background:var(--accent);color:#06201c;border:0;font-weight:800}button.secondary{background:#25415f;color:#e5f3ff}.danger{background:var(--danger);color:#300}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.row>*{flex:1 1 150px}.compact>*{flex:0 1 auto}label{display:block;color:#c5d7e8;margin:10px 0 5px}small,.muted{color:var(--muted)}details{margin-top:10px}summary{cursor:pointer;color:#bae6fd;padding:6px 0}.file-editor{min-height:340px;font:14px ui-monospace,monospace}
+.terminal{background:#020617;color:#d1fae5;border:1px solid #405b7d;border-radius:10px;padding:12px;min-height:360px;max-height:68vh;overflow:auto;white-space:pre-wrap;font:14px ui-monospace,monospace;outline:none}.terminal:focus{border-color:var(--accent);box-shadow:0 0 0 2px #5eead433}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.metric{background:#091827;border:1px solid #233e59;border-radius:10px;padding:10px}.metric b{display:block;color:#67e8f9;font-size:18px}.metric span{color:var(--muted);font-size:12px}
+@media(min-width:800px){.grid.two{grid-template-columns:minmax(0,1.5fr) minmax(280px,.7fr)}.grid.equal{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){header{flex-wrap:wrap}.device-pill{order:3;width:100%}.tabs{top:82px}.shell{padding-inline:10px}.card{padding:12px;border-radius:12px}.row>*{flex-basis:100%}.compact>*{flex-basis:auto}.terminal{min-height:48vh}.metrics{grid-template-columns:1fr 1fr}}
+</style></head><body>
+<header><strong>CardMind</strong><span class="spacer"></span><span class="device-pill" id="device"></span><button class="secondary" id="logout">Logout</button></header>
+<div class="shell"><nav class="tabs" aria-label="Console sections"><button class="tab active" data-panel="chat">Chat</button><button class="tab" data-panel="files">Files</button><button class="tab" data-panel="ssh">SSH &amp; SFTP</button><button class="tab" data-panel="settings">Settings</button></nav><p id="status" class="statusbar"></p>
+<main><section class="panel active" data-view="chat"><div class="grid two"><section class="card"><div class="row"><select id="chats" aria-label="Chat"></select><button id="newChat">New chat</button></div>
+<details><summary>Chat actions</summary><div class="row compact"><button class="secondary" id="renameChat">Rename</button><button class="secondary" id="pinChat">Pin</button><button class="secondary" id="archiveChat">Archive</button><button class="secondary" id="duplicateChat">Duplicate</button><button class="secondary" id="exportChat">Export Markdown</button><button class="secondary" id="exportBundle">Export bundle</button><button class="danger" id="deleteChat">Delete</button></div></details><div id="messages"></div></section>
+<div class="grid"><section class="card"><h2>Prompt</h2><textarea id="prompt" maxlength="1200" placeholder="Message CardMind..."></textarea><div class="row"><button id="send">Send</button><button class="danger" id="stop">Stop</button><button class="secondary" id="retry">Retry</button><button class="secondary" id="refresh">Refresh</button></div></section>
+<section class="card"><h2>Chat instructions</h2><textarea id="instructions" maxlength="2048" placeholder="Instructions used only in this chat"></textarea><button id="saveInstructions">Save instructions</button></section></div></div></section>
+<section class="panel" data-view="files"><section class="card"><h2>microSD workspace</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button class="secondary" id="downloadFile">Download</button></div><div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.jsonl,.csv,.html,.svg"><button id="uploadFile">Upload new file</button><button class="secondary" id="importChat">Import chat bundle</button></div><textarea class="file-editor" id="fileContent" maxlength="12288" placeholder="Select a workspace file"></textarea><p class="muted" id="filePosition"></p><div class="row"><button class="secondary" id="previousFilePage">Previous</button><button class="secondary" id="nextFilePage">Next</button><button id="saveFile">Save chunk</button></div><div class="row compact"><button class="secondary" id="renameFile">Rename</button><button class="danger" id="deleteFile">Delete</button></div></section></section>
+<section class="panel" data-view="ssh"><div class="grid equal"><section class="card"><h2>SSH profile</h2><div class="row"><select id="sshProfiles"></select><input id="sshName" maxlength="32" placeholder="Profile name"></div><div class="row compact"><button class="secondary" id="newSsh">New profile</button><button class="danger" id="deleteSsh">Delete profile</button></div><div class="row"><input id="sshHost" maxlength="253" placeholder="Host"><input id="sshPort" type="number" min="1" max="65535" placeholder="Port"></div><input id="sshUser" maxlength="64" placeholder="Username"><select id="sshAuth"><option value="password">Password</option><option value="key">Private key</option></select><input id="sshPassword" type="password" maxlength="192" placeholder="New password (leave blank to keep)"><input id="sshPassphrase" type="password" maxlength="192" placeholder="New key passphrase (leave blank to keep)"><button id="saveSsh">Save profile</button><div class="row"><input id="sshKeyInput" type="file" accept=".pem,.key"><button class="secondary" id="uploadSshKey">Install private key</button></div><small>Secrets are write-only. New or changed host fingerprints require explicit confirmation.</small></section>
+<section class="card"><h2>SFTP</h2><div class="row"><input id="sftpPath" value="/" maxlength="511"><button id="listSftp">List path</button></div><select id="sftpEntries" size="8"></select><div class="row"><button class="secondary" id="sftpOpen">Open directory</button><button id="sftpDownload">Download to workspace</button></div><label>Workspace file to upload</label><div class="row"><select id="sftpLocal"></select><button id="sftpUpload">Upload here</button></div><small>Transferred files stay on the Cardputer microSD.</small></section></div>
+<section class="card"><div class="row compact"><button id="connectSsh">Connect</button><button id="disconnectSsh" class="danger">Disconnect</button><button class="secondary" id="clearSsh">Clear</button><button class="secondary" id="fullSsh">Fullscreen</button></div><pre id="sshTerminal" class="terminal" tabindex="0">Connect, focus this terminal, then type.</pre><div class="row"><input id="sshInput" maxlength="512" placeholder="Command for touch keyboards"><button id="sendSshInput">Send command</button></div><small>Physical keyboards can type directly into the focused terminal. Browser output is held only in this page.</small></section></section>
+<section class="panel" data-view="settings"><div class="grid equal"><section class="card"><h2>Connection</h2><label>OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180"><label>Model</label><input id="model" maxlength="120"><button id="saveSettings">Save non-secret settings</button><small>API keys remain write-only and are never sent to this page.</small></section><section class="card"><h2>Device status</h2><div id="diagnostics" class="metrics"></div></section></div></section></main></div>
 <script>)HTML";
     page += "const csrf='" + csrfToken + "';\n";
     page += R"HTML(
 const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[],activeRequest=null,lastPrompt='',sshConnected=false,sshPoll=null,sftpState=[],sshCreating=false;
+function showPanel(name){const target=['chat','files','ssh','settings'].includes(name)?name:'chat';for(const p of document.querySelectorAll('.panel'))p.classList.toggle('active',p.dataset.view===target);for(const b of document.querySelectorAll('.tab'))b.classList.toggle('active',b.dataset.panel===target);history.replaceState(null,'','#'+target)}
+for(const b of document.querySelectorAll('.tab'))b.onclick=()=>showPanel(b.dataset.panel);showPanel(location.hash.slice(1)||'chat');
+function showError(error){q('#status').textContent=error instanceof Error?error.message:String(error)}
+window.addEventListener('unhandledrejection',event=>{showError(event.reason);event.preventDefault()});
+q('#prompt').addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();q('#send').click()}});
 async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}if(!r.ok){let message=`HTTP ${r.status}`;try{message=(await r.json()).error||message}catch{}throw new Error(message)}return r}
 function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;q('#status').textContent=s.status||'';
 q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=`${c.pinned?'📌 ':c.archived?'📦 ':''}${c.title} · ${c.total_messages}`;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
@@ -340,7 +345,7 @@ q('#messages').innerHTML='';for(const m of s.messages){const d=document.createEl
 q('#instructions').value=s.instructions||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
 q('#sshProfiles').innerHTML='';for(const [i,p] of (s.ssh_profiles||[]).entries()){const o=document.createElement('option');o.value=i;o.textContent=`${i===s.ssh_selected?'★ ':''}${p.name} · ${p.username}@${p.host}`;o.selected=i===s.ssh_selected;q('#sshProfiles').append(o)}
 q('#sshName').value=s.ssh_name||'';q('#sshHost').value=s.ssh_host||'';q('#sshPort').value=s.ssh_port||22;q('#sshUser').value=s.ssh_username||'';q('#sshAuth').value=s.ssh_auth_mode||'password';sshConnected=!!s.ssh_terminal_open;
-q('#diagnostics').textContent=`Wi-Fi ${s.wifi_rssi} dBm · heap ${s.free_heap} B · largest ${s.largest_heap} B · SD ${s.sd_used_bytes}/${s.sd_total_bytes} B`;
+const metrics=[['Battery',`${s.battery}%`],['Wi-Fi',`${s.wifi_rssi} dBm`],['Free heap',`${Math.round(s.free_heap/1024)} KiB`],['Largest block',`${Math.round(s.largest_heap/1024)} KiB`],['microSD used',`${Math.round(s.sd_used_bytes/1048576)} MiB`],['microSD total',`${Math.round(s.sd_total_bytes/1048576)} MiB`]];q('#diagnostics').textContent='';for(const [label,value] of metrics){const d=document.createElement('div'),b=document.createElement('b'),span=document.createElement('span');d.className='metric';b.textContent=value;span.textContent=label;d.append(b,span);q('#diagnostics').append(d)}
 const selected=q('#files').value;q('#files').innerHTML='';q('#sftpLocal').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#files').append(o);q('#sftpLocal').append(o.cloneNode(true))}q('#messages').scrollTop=q('#messages').scrollHeight}
 async function refresh(){const r=await request('/api/state');render(await r.json())}
 async function post(path,values){return request(path,{method:'POST',body:new URLSearchParams(values)})}
@@ -390,6 +395,7 @@ q('#logout').onclick=async()=>{await request('/logout',{method:'POST'});location
 
 void sendLoginPage()
 {
+    server.sendHeader("Cache-Control", "no-store");
     server.send(200, "text/html; charset=utf-8", loginPage(""));
 }
 
@@ -623,7 +629,11 @@ void handlePrompt()
     const bool useSearch = webSearchSettingsAreComplete(consoleSettings);
     const CancelCallback isCancelled = []() {
         M5Cardputer.update();
-        return M5Cardputer.Keyboard.keysState().esc || !server.client().connected();
+        if (consoleEscapePressed()) {
+            consoleEscapeConsumed = true;
+            return true;
+        }
+        return !server.client().connected();
     };
     markOperation(useWorkspace || useSearch ? "web_console_tools" : "web_console_chat");
     const ChatResult result = useWorkspace || useSearch
@@ -1631,6 +1641,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     csrfToken = "";
     consoleStatus = "";
     exitRequested = false;
+    consoleEscapeConsumed = false;
     loginFailures = 0;
     loginLockedUntil = 0;
     if (!routesConfigured) {
@@ -1685,15 +1696,27 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         server.handleClient();
         updateConsoleSerial();
         M5Cardputer.update();
-        const bool escapePressed = M5Cardputer.Keyboard.keysState().esc;
-        if (escapePressed && !escapeHeld) {
-            exitRequested = true;
+        const bool escapePressed = consoleEscapePressed();
+        if (consoleEscapeConsumed) {
+            escapeHeld = escapePressed;
+            if (!escapePressed) {
+                consoleEscapeConsumed = false;
+            }
+        } else {
+            if (escapePressed && !escapeHeld) {
+                exitRequested = true;
+            }
+            escapeHeld = escapePressed;
         }
-        escapeHeld = escapePressed;
         delay(2);
     }
+    showBusyScreen("WEB CONSOLE", "Closing browser and SSH sessions...");
     server.stop();
     clearConsoleSecrets();
+    while (!M5Cardputer.Keyboard.keyList().empty()) {
+        M5Cardputer.update();
+        delay(5);
+    }
     Serial.println("WEB_CONSOLE result=stopped");
     return {true, activeChat.summary.id, ""};
 }

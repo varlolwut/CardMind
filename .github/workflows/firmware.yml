@@ -33,6 +33,7 @@ jobs:
             firmware/CardputerAssistant/src/ssh_terminal.cpp \
             -o build/host-tests
           ./build/host-tests
+          node tests/web_console_ui_test.mjs
 
       - name: Install Arduino CLI
         uses: arduino/setup-arduino-cli@v2
