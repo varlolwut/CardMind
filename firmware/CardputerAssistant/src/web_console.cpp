@@ -279,10 +279,11 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 <main class="layout"><section class="card"><div class="row"><select id="chats"></select><button id="newChat">New chat</button></div>
 <div class="row"><button id="renameChat">Rename</button><button class="danger" id="deleteChat">Delete</button></div>
 <p id="status"></p><div id="messages"></div></section><section class="card"><textarea id="prompt" maxlength="1200" placeholder="Message CardMind..."></textarea>
-<div class="row"><button id="send">Send</button><button id="refresh">Refresh</button></div></section>
+<div class="row"><button id="send">Send</button><button class="danger" id="stop">Stop</button><button id="retry">Retry</button><button id="refresh">Refresh</button></div></section>
 <section class="card"><label>Chat instructions</label><textarea id="instructions" maxlength="2048"></textarea><button id="saveInstructions">Save instructions</button></section>
 <section class="card"><h2>Connection</h2><label>OpenAI-compatible base URL</label><input id="apiBaseUrl" maxlength="180">
 <label>Model</label><input id="model" maxlength="120"><button id="saveSettings">Save non-secret settings</button><small>API keys remain write-only and are never sent to this page.</small></section>
+<section class="card"><h2>Device diagnostics</h2><p id="diagnostics"></p></section>
 <section class="card"><h2>microSD files</h2><div class="row"><select id="files"></select><button id="openFile">Open</button><button id="downloadFile">Download</button></div>
 <div class="row"><input id="uploadInput" type="file" accept=".txt,.md,.json,.csv,.html,.svg"><button id="uploadFile">Upload new file</button></div>
 <textarea class="file-editor" id="fileContent" maxlength="12288" placeholder="Select a workspace file"></textarea><p id="filePosition"></p>
@@ -291,12 +292,13 @@ textarea{width:100%;min-height:88px;resize:vertical}button{cursor:pointer;backgr
 <script>)HTML";
     page += "const csrf='" + csrfToken + "';\n";
     page += R"HTML(
-const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[];
+const q=s=>document.querySelector(s);let state=null,fileName='',fileOffset=0,fileNextOffset=0,fileOriginalBytes=0,fileEof=true,fileBack=[],activeRequest=null,lastPrompt='';
 async function request(path,options={}){options.headers={...(options.headers||{}),'X-CardMind-CSRF':csrf};const r=await fetch(path,options);if(r.status===401){location='/';throw new Error('Session expired')}if(!r.ok){let message=`HTTP ${r.status}`;try{message=(await r.json()).error||message}catch{}throw new Error(message)}return r}
 function render(s){state=s;q('#device').textContent=`${s.ip} · ${s.battery}%`;q('#status').textContent=s.status||'';
 q('#chats').innerHTML='';for(const c of s.chats){const o=document.createElement('option');o.value=c.id;o.textContent=c.title;o.selected=c.id===s.active_chat_id;q('#chats').append(o)}
 q('#messages').innerHTML='';for(const m of s.messages){const d=document.createElement('div');d.className='message '+m.role;d.textContent=(m.role==='user'?'You: ':'AI: ')+m.content;q('#messages').append(d)}
 q('#instructions').value=s.instructions||'';q('#apiBaseUrl').value=s.api_base_url||'';q('#model').value=s.model||'';
+q('#diagnostics').textContent=`Wi-Fi ${s.wifi_rssi} dBm · heap ${s.free_heap} B · largest ${s.largest_heap} B · SD ${s.sd_used_bytes}/${s.sd_total_bytes} B`;
 const selected=q('#files').value;q('#files').innerHTML='';for(const f of s.files){const o=document.createElement('option');o.value=f.name;o.textContent=`${f.name} · ${f.size} B`;o.selected=f.name===selected;q('#files').append(o)}q('#messages').scrollTop=q('#messages').scrollHeight}
 async function refresh(){const r=await request('/api/state');render(await r.json())}
 async function post(path,values){return request(path,{method:'POST',body:new URLSearchParams(values)})}
@@ -314,11 +316,12 @@ q('#downloadFile').onclick=()=>{const name=q('#files').value;if(name)location=`/
 q('#uploadFile').onclick=async()=>{const file=q('#uploadInput').files[0];if(!file)return;const data=new FormData();data.append('file',file,file.name);await request('/api/file/upload',{method:'POST',body:data});q('#uploadInput').value='';await refresh()};
 q('#renameFile').onclick=async()=>{const name=q('#files').value,newName=prompt('New filename',name);if(newName&&newName!==name){await post('/api/file/rename',{name,new_name:newName});fileName='';await refresh()}};
 q('#deleteFile').onclick=async()=>{const name=q('#files').value;if(name&&confirm(`Delete ${name}?`)){await post('/api/file/delete',{name});fileName='';q('#fileContent').value='';q('#filePosition').textContent='';await refresh()}};
-q('#send').onclick=async()=>{const prompt=q('#prompt').value.trim();if(!prompt)return;q('#send').disabled=true;q('#status').textContent='Streaming...';
+async function sendPrompt(){const prompt=q('#prompt').value.trim();if(!prompt)return;lastPrompt=prompt;q('#send').disabled=true;q('#status').textContent='Streaming...';activeRequest=new AbortController();
 const d=document.createElement('div');d.className='message assistant stream';d.textContent='AI: ';q('#messages').append(d);
-try{const r=await request('/api/prompt',{method:'POST',body:new URLSearchParams({prompt})});const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';
+try{const r=await request('/api/prompt',{method:'POST',body:new URLSearchParams({prompt}),signal:activeRequest.signal});const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';
 while(true){const x=await reader.read();if(x.done)break;buffer+=decoder.decode(x.value,{stream:true});const events=buffer.split('\n\n');buffer=events.pop();for(const e of events){if(!e.startsWith('data:'))continue;const v=JSON.parse(e.slice(5));if(v.delta)d.textContent+=v.delta;if(v.error)q('#status').textContent=v.error}}
-q('#prompt').value=''}finally{q('#send').disabled=false;await refresh()}};
+q('#prompt').value=''}catch(e){if(e.name==='AbortError')q('#status').textContent='Canceled';else throw e}finally{activeRequest=null;q('#send').disabled=false;await refresh()}}
+q('#send').onclick=sendPrompt;q('#stop').onclick=()=>{if(activeRequest)activeRequest.abort()};q('#retry').onclick=()=>{if(lastPrompt){q('#prompt').value=lastPrompt;sendPrompt()}};
 q('#logout').onclick=async()=>{await request('/logout',{method:'POST'});location='/'};refresh();
 </script></body></html>)HTML";
     return page;
@@ -393,6 +396,9 @@ void handleState()
     document["battery"] = M5Cardputer.Power.getBatteryLevel();
     document["free_heap"] = ESP.getFreeHeap();
     document["largest_heap"] = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    document["wifi_rssi"] = WiFi.RSSI();
+    document["sd_total_bytes"] = SD.totalBytes();
+    document["sd_used_bytes"] = SD.usedBytes();
     document["active_chat_id"] = activeChat.summary.id;
     document["active_chat_title"] = activeChat.summary.title;
     document["instructions"] = activeChat.instructions;
@@ -511,7 +517,7 @@ void handlePrompt()
     const bool useSearch = webSearchSettingsAreComplete(consoleSettings);
     const CancelCallback isCancelled = []() {
         M5Cardputer.update();
-        return M5Cardputer.Keyboard.keysState().esc;
+        return M5Cardputer.Keyboard.keysState().esc || !server.client().connected();
     };
     markOperation(useWorkspace || useSearch ? "web_console_tools" : "web_console_chat");
     const ChatResult result = useWorkspace || useSearch
