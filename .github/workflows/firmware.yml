@@ -4,13 +4,18 @@ on:
   push:
     branches:
       - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: firmware-main
+  group: firmware-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,6 +30,12 @@ jobs:
         run: |
           mkdir -p build
           python -m py_compile tools/package_firmware.py
+          python -m py_compile tools/firmware_metrics.py tools/verify_third_party.py
+          python tools/verify_third_party.py \
+            --manifest third_party/manifest.json \
+            --workflow .github/workflows/firmware.yml \
+            --notices THIRD_PARTY_NOTICES.md \
+            --repository-root .
           python -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in Path('micropython/vfs').glob('*.py')]"
           python tests/micropython_supervisor_test.py
           g++ -std=c++17 -Wall -Wextra -Werror \
@@ -59,7 +70,8 @@ jobs:
           git clone --filter=blob:none https://github.com/m5stack/M5GFX.git .ci-libs/M5GFX
           git -C .ci-libs/M5GFX checkout 93b480bb349749202c8a2a953065c8ae95f58320
           git clone --branch v7.2.1 --depth 1 https://github.com/bblanchon/ArduinoJson.git .ci-libs/ArduinoJson
-          git clone --branch libssh2-1.11.1 --depth 1 https://github.com/libssh2/libssh2.git .ci-libssh2-source
+          git clone --filter=blob:none https://github.com/libssh2/libssh2.git .ci-libssh2-source
+          git -C .ci-libssh2-source checkout a312b43325e3383c865a87bb1d26cb52e3292641
           python tools/prepare_libssh2.py .ci-libssh2-source .ci-libs/libssh2-arduino
 
       - name: Compile Cardputer ADV firmware
@@ -70,6 +82,27 @@ jobs:
             --libraries .ci-libs \
             --output-dir build/release \
             firmware/CardputerAssistant
+
+      - name: Measure firmware memory
+        run: |
+          SIZE_TOOL="$(find "$HOME/.arduino15/packages/m5stack/tools/esp-x32" -type f -name xtensa-esp-elf-size -print -quit)"
+          test -x "$SIZE_TOOL"
+          python tools/firmware_metrics.py \
+            --size-tool "$SIZE_TOOL" \
+            --elf build/release/CardputerAssistant.ino.elf \
+            --app-bin build/release/CardputerAssistant.ino.bin \
+            --partitions firmware/CardputerAssistant/partitions.csv \
+            --baseline ci/firmware-baseline-v1.12.0.json \
+            --budget ci/firmware-budget.json \
+            --output build/release/firmware-metrics.json
+
+      - name: Upload firmware memory report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CardMind-firmware-metrics
+          path: build/release/firmware-metrics.json
+          if-no-files-found: warn
 
       - name: Package CardMind and MicroPython
         run: |
@@ -89,6 +122,8 @@ jobs:
             --micropython-app build/release/micropython.app-bin \
             --vfs-image build/release/micropython-vfs.bin \
             --output-dir dist
+          zip -r dist/CardMind-third-party-licenses.zip \
+            THIRD_PARTY_NOTICES.md third_party
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -98,6 +133,10 @@ jobs:
             dist/CardMind-cardputer-adv.bin
             dist/CardMind-cardputer-adv-full.bin
             dist/SHA256SUMS.txt
+            dist/CardMind-third-party-licenses.zip
+            build/release/firmware-metrics.json
+            THIRD_PARTY_NOTICES.md
+            third_party/manifest.json
           if-no-files-found: error
 
       - name: Publish version release
@@ -113,12 +152,20 @@ jobs:
               dist/CardMind-cardputer-adv.bin \
               dist/CardMind-cardputer-adv-full.bin \
               dist/SHA256SUMS.txt \
+              dist/CardMind-third-party-licenses.zip \
+              build/release/firmware-metrics.json \
+              THIRD_PARTY_NOTICES.md \
+              third_party/manifest.json \
               --clobber
           else
             gh release create "$TAG" \
               dist/CardMind-cardputer-adv.bin \
               dist/CardMind-cardputer-adv-full.bin \
               dist/SHA256SUMS.txt \
+              dist/CardMind-third-party-licenses.zip \
+              build/release/firmware-metrics.json \
+              THIRD_PARTY_NOTICES.md \
+              third_party/manifest.json \
               --target "$GITHUB_SHA" \
               --title "CardMind $TAG" \
               --generate-notes

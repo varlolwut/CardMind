@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "baseline_version": "1.12.0",
+  "warning_growth_percent": 5.0,
+  "limits": {
+    "app_binary_bytes": 3670016,
+    "app_free_bytes_minimum": 524288,
+    "flash_text_bytes": 1900000,
+    "flash_rodata_bytes": 1450000,
+    "static_dram_bytes": 83000,
+    "iram_bytes": 101000
+  },
+  "rationale": "Hard budgets retain at least 512 KiB of the CardMind app partition and approximately 30 percent headroom over the v1.12.0 section baseline. The linker remains the final authority for SoC memory-region capacity."
+}

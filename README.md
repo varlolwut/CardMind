@@ -74,4 +74,6 @@ configuration, security, limits, and troubleshooting.
 ## License
 
 CardMind is distributed under the [MIT License](LICENSE). Third-party board packages
-and libraries retain their own licenses.
+and libraries retain their own licenses; see the
+[third-party notices](THIRD_PARTY_NOTICES.md) for the components included in release
+images.
