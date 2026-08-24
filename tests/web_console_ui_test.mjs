@@ -28,6 +28,10 @@ const requiredFragments = [
     'id="fileContent"',
     'id="workspaceFiles"',
     'id="sshTerminal"',
+    'role="textbox" aria-label="Interactive SSH terminal"',
+    'id="sshKeyState"',
+    'id="uploadSshKey" hidden',
+    'class="row mobile-terminal-input"',
     'id="diagnostics"',
     'id="actionDialog"',
     'id="chatDetails"',
@@ -67,6 +71,10 @@ const requiredFragments = [
     "x.address+'handoff?token='",
     'handoff_token',
     'sshPollBusy',
+    'output_base64',
+    "event.type==='notice'",
+    "userMessage.textContent='You: '+prompt",
+    'pointer-events:none',
     "q('#connectSsh').disabled=sshConnected",
 ];
 
@@ -118,6 +126,10 @@ const promptStreamCompletionError = readArrowFunction(
     "promptStreamCompletionError",
     ";\nasync function sendPrompt",
 );
+const summarizeSseEvents = readArrowFunction(
+    "summarizeSseEvents",
+    ";const promptStreamCompletionError=",
+);
 
 const firstChunk = parseSseChunk(
     "",
@@ -158,5 +170,14 @@ if (!promptStreamCompletionError("", "", "").includes("before CardMind")) {
 }
 if (promptStreamCompletionError("", "error", "API failed") !== "API failed") {
     throw new Error("An SSE error event did not preserve its message");
+}
+const summaryWithNotice = summarizeSseEvents([
+    { type: "notice", error: "SSH terminal disconnected" },
+    { type: "delta", delta: "OK" },
+    { type: "done" },
+], "", "");
+if (summaryWithNotice.notice !== "SSH terminal disconnected" ||
+    summaryWithNotice.delta !== "OK" || summaryWithNotice.terminalType !== "done") {
+    throw new Error("An SSE notice was not preserved alongside streamed text");
 }
 console.log("WEB_CONSOLE_UI_TEST result=pass");

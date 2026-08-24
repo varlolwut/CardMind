@@ -5,6 +5,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp32-hal-cpu.h>
+#include <hal/usb_serial_jtag_ll.h>
 
 #include "src/api_client.h"
 #include "src/app_types.h"
@@ -61,7 +62,6 @@ enum class Screen {
     WebConsoleMenu,
     DeviceMenu,
     UtilitiesMenu,
-    SystemMonitor,
     TimerMenu,
     Calculator,
     QrEntry,
@@ -230,7 +230,6 @@ bool timerRunning = false;
 std::uint32_t timerEndsAt = 0;
 std::uint32_t timerDurationSeconds = 0;
 std::uint32_t lastTimerRenderAt = 0;
-std::uint32_t lastSystemMonitorRenderAt = 0;
 
 void ensureNetworkReady();
 void render();
@@ -243,7 +242,6 @@ void renderControlsHelp();
 void renderWebConsoleMenu();
 void renderDeviceMenu();
 void renderUtilitiesMenu();
-void renderSystemMonitor();
 void renderTimerMenu();
 void renderCalculator();
 void renderQrEntry();
@@ -633,9 +631,6 @@ void render()
         return;
     case Screen::UtilitiesMenu:
         renderUtilitiesMenu();
-        return;
-    case Screen::SystemMonitor:
-        renderSystemMonitor();
         return;
     case Screen::TimerMenu:
         renderTimerMenu();
@@ -1093,6 +1088,7 @@ void runUiSearchEndToEndTest()
 
 void setup()
 {
+    usb_serial_jtag_ll_phy_enable_external(false);
     Serial.begin(115200);
     delay(200);
     Serial.printf("BOOT firmware=%s reset_reason=%d\n",
@@ -1268,10 +1264,6 @@ void loop()
                millis() - lastTimerRenderAt >= 1000U) {
         lastTimerRenderAt = millis();
         renderTimerMenu();
-    }
-    if (currentScreen == Screen::SystemMonitor &&
-        millis() - lastSystemMonitorRenderAt >= 1000U) {
-        renderSystemMonitor();
     }
     if (currentScreen == Screen::Chat && inputBuffer != persistedDraft &&
         millis() - lastDraftAutosaveAt >= kDraftAutosaveIntervalMs) {

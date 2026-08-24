@@ -29,6 +29,8 @@ constexpr const char* kSshPrivateKeyVfsPath = "/sd/assistant/ssh/id.pem";
 constexpr const char* kSshKnownHostsPath = "/assistant/ssh/known_hosts";
 constexpr const char* kSshKnownHostsTemporaryPath = "/assistant/ssh/known_hosts.tmp";
 constexpr std::size_t kMaximumKnownHostsBytes = 16384;
+constexpr unsigned int kTerminalWindowBytes = 64 * 1024;
+constexpr unsigned int kTerminalPacketBytes = 8 * 1024;
 
 struct SshAllocatorState {
     std::size_t failedAllocationBytes;
@@ -975,7 +977,9 @@ OperationResult SshClient::openTerminal(std::uint32_t columns, std::uint32_t row
     const std::uint32_t deadline = millis() + timeoutMs;
     while (implementation_->channel == nullptr &&
            static_cast<std::int32_t>(deadline - millis()) > 0) {
-        implementation_->channel = libssh2_channel_open_session(implementation_->session);
+        implementation_->channel = libssh2_channel_open_ex(
+            implementation_->session, "session", sizeof("session") - 1,
+            kTerminalWindowBytes, kTerminalPacketBytes, nullptr, 0);
         if (implementation_->channel == nullptr &&
             libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) {
             const int errorCode = libssh2_session_last_errno(implementation_->session);

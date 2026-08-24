@@ -1,5 +1,7 @@
 #include "web_console.h"
 
+#include <base64.h>
+
 #include "api_client.h"
 #include "chat_storage.h"
 #include "crash_journal.h"
@@ -103,6 +105,15 @@ bool parseUnsignedArgument(const String& value, std::uint32_t& result)
     return true;
 }
 
+void closeWebSshConnection()
+{
+    webSshClient.close();
+    webSshAwaitingTrust = false;
+    webSshTerminalOpen = false;
+    webSshProfile.password = String();
+    webSshProfile.privateKeyPassphrase = String();
+}
+
 String normalizedBaseUrl(String value)
 {
     value.trim();
@@ -114,10 +125,8 @@ String normalizedBaseUrl(String value)
 
 void releaseConsoleSessionState()
 {
-    webSshClient.close();
+    closeWebSshConnection();
     webSshProfile = SshProfile{"", "", 22, "", "", SshAuthMode::Password, ""};
-    webSshAwaitingTrust = false;
-    webSshTerminalOpen = false;
     consoleEscapeConsumed = false;
     passwordRevealUntil = 0;
     if (sshKeyUploadFile) {
@@ -417,24 +426,26 @@ void handlePrompt()
         sendWebJsonError(server, 400, "Prompt must be valid UTF-8 between 1 and 1200 bytes");
         return;
     }
+    const bool sshWasOpen = webSshTerminalOpen || webSshAwaitingTrust;
+    if (sshWasOpen) {
+        closeWebSshConnection();
+    }
     server.sendHeader("Cache-Control", "no-store");
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/event-stream; charset=utf-8", "");
+    if (sshWasOpen) {
+        sendWebSse(server, "notice", "",
+                   "SSH terminal was disconnected to free memory for the AI request");
+    }
     std::vector<Message> requestMessages = activeChat.messages;
     requestMessages.push_back({"user", prompt});
     HistoryFitResult requestFit = fitHistoryToActiveContext(requestMessages);
     activeResponse.clear();
     consoleStatus = "Streaming from web console...";
     renderConsoleScreen();
-    std::uint32_t lastRenderAt = 0;
-    const ChatTextCallback onText = [&lastRenderAt](const std::string& text) {
+    const ChatTextCallback onText = [](const std::string& text) {
         activeResponse += text;
         sendWebSse(server, "delta", text, "");
-        const std::uint32_t now = millis();
-        if (lastRenderAt == 0 || now - lastRenderAt >= 120) {
-            renderConsoleScreen();
-            lastRenderAt = now;
-        }
     };
     const ChatToolPolicy toolPolicy = resolveChatToolPolicy(
         consoleSettings, prompt, activeChat.sshToolsEnabled, sshToolIsAvailable());
@@ -1155,13 +1166,10 @@ void handleSshDelete()
 
 OperationResult finishWebSshStart()
 {
-    OperationResult result = webSshClient.authenticate(webSshProfile, 60000);
-    if (result.success) result = webSshClient.openTerminal(120, 36, 30000);
+    OperationResult result = webSshClient.authenticate(webSshProfile, 10000);
+    if (result.success) result = webSshClient.openTerminal(120, 36, 10000);
     if (!result.success) {
-        webSshClient.close();
-        webSshProfile.password = "";
-        webSshProfile.privateKeyPassphrase = "";
-        webSshTerminalOpen = false;
+        closeWebSshConnection();
         return result;
     }
     webSshAwaitingTrust = false;
@@ -1180,15 +1188,13 @@ void handleSshStart()
                          "SSH terminal is already open; disconnect it before reconnecting");
         return;
     }
-    webSshClient.close();
-    webSshTerminalOpen = false;
-    webSshAwaitingTrust = false;
+    closeWebSshConnection();
     const OperationResult loaded = loadSshProfile(webSshProfile);
     if (!loaded.success || !sshProfileIsComplete(webSshProfile)) {
         sendWebJsonError(server, 400, loaded.success ? String("Selected SSH profile is incomplete") : loaded.error);
         return;
     }
-    OperationResult result = webSshClient.connect(webSshProfile, 60000);
+    OperationResult result = webSshClient.connect(webSshProfile, 10000);
     if (!result.success) {
         sendWebJsonError(server, 502, result.error);
         return;
@@ -1196,7 +1202,7 @@ void handleSshStart()
     const SshTrustResult trust = checkTrustedSshHost(
         webSshProfile.host, webSshProfile.port, webSshClient.fingerprint());
     if (!trust.success) {
-        webSshClient.close();
+        closeWebSshConnection();
         sendWebJsonError(server, 500, trust.error);
         return;
     }
@@ -1277,8 +1283,7 @@ void handleSshOutput()
     std::uint8_t buffer[2048] = {};
     const int readBytes = webSshTerminalOpen ? webSshClient.read(buffer, sizeof(buffer)) : 0;
     if (readBytes < 0) {
-        webSshClient.close();
-        webSshTerminalOpen = false;
+        closeWebSshConnection();
         sendWebJsonError(server, 502, "SSH terminal read failed with code " + String(readBytes));
         return;
     }
@@ -1287,13 +1292,15 @@ void handleSshOutput()
     const bool open = webSshTerminalOpen && webSshClient.isOpen();
     document["open"] = open;
     if (readBytes > 0) {
-        document["output"] = String(reinterpret_cast<const char*>(buffer), readBytes);
+        const String encoded = base64::encode(buffer, static_cast<std::size_t>(readBytes));
+        if (encoded == "-FAIL-") {
+            sendWebJsonError(server, 500, "Failed to encode SSH terminal output");
+            return;
+        }
+        document["output_base64"] = encoded;
     }
     if (!open) {
-        webSshClient.close();
-        webSshTerminalOpen = false;
-        webSshProfile.password = "";
-        webSshProfile.privateKeyPassphrase = "";
+        closeWebSshConnection();
     }
     sendWebJson(server, 200, document);
 }
@@ -1304,11 +1311,7 @@ void handleSshStop()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    webSshClient.close();
-    webSshTerminalOpen = false;
-    webSshAwaitingTrust = false;
-    webSshProfile.password = "";
-    webSshProfile.privateKeyPassphrase = "";
+    closeWebSshConnection();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
