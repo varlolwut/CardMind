@@ -97,4 +97,49 @@ if (scriptMatch === null) {
 }
 
 new Function(scriptMatch[1]);
+
+function readArrowFunction(name, nextMarker) {
+    const marker = `const ${name}=`;
+    const start = page.indexOf(marker);
+    const end = page.indexOf(nextMarker, start + marker.length);
+    if (start < 0 || end < 0) {
+        throw new Error(`Cannot extract ${name} from the Web Console`);
+    }
+    return new Function(`return (${page.slice(start + marker.length, end)})`)();
+}
+
+const parseSseChunk = readArrowFunction(
+    "parseSseChunk",
+    ";const promptStreamCompletionError=",
+);
+const promptStreamCompletionError = readArrowFunction(
+    "promptStreamCompletionError",
+    ";\nasync function sendPrompt",
+);
+
+const firstChunk = parseSseChunk("", 'data: {"type":"delta","delta":"Hel');
+if (firstChunk.events.length !== 0 || firstChunk.buffer.length === 0) {
+    throw new Error("A partial SSE event was committed before its frame ended");
+}
+const secondChunk = parseSseChunk(
+    firstChunk.buffer,
+    'lo"}\n\ndata: {"type":"done"}\n\n',
+);
+if (secondChunk.buffer !== "" || secondChunk.events.length !== 2 ||
+    secondChunk.events[0].delta !== "Hello" ||
+    secondChunk.events[1].type !== "done") {
+    throw new Error("Split SSE events were not reassembled correctly");
+}
+if (promptStreamCompletionError("", "done", "") !== "") {
+    throw new Error("A completed SSE stream was rejected");
+}
+if (!promptStreamCompletionError(firstChunk.buffer, "", "").includes("incomplete")) {
+    throw new Error("A partial final SSE event was accepted");
+}
+if (!promptStreamCompletionError("", "", "").includes("before CardMind")) {
+    throw new Error("EOF without a terminal SSE event was accepted");
+}
+if (promptStreamCompletionError("", "error", "API failed") !== "API failed") {
+    throw new Error("An SSE error event did not preserve its message");
+}
 console.log("WEB_CONSOLE_UI_TEST result=pass");
