@@ -1,24 +1,24 @@
 import { readFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 
-const sourcePath = new URL("../firmware/CardputerAssistant/src/web_console.cpp", import.meta.url);
-const source = readFileSync(sourcePath, "utf8");
-const functionStartMatch = /void sendConsolePage\(\)\r?\n\{/.exec(source);
-const functionStart = functionStartMatch?.index ?? -1;
-const functionEndMatch = /\r?\nvoid sendLoginPage\(\)/g;
-functionEndMatch.lastIndex = Math.max(functionStart, 0);
-const functionEnd = functionEndMatch.exec(source)?.index ?? -1;
-
-if (functionStart < 0 || functionEnd < 0) {
-    throw new Error("Could not locate sendConsolePage in web_console.cpp");
+const pagePath = new URL(
+    "../firmware/CardputerAssistant/assets/web_console.html",
+    import.meta.url,
+);
+const headerPath = new URL(
+    "../firmware/CardputerAssistant/src/web_console_asset.h",
+    import.meta.url,
+);
+const page = readFileSync(pagePath, "utf8");
+const header = readFileSync(headerPath, "utf8");
+const compressed = Buffer.from(
+    [...header.matchAll(/0x([0-9a-f]{2})/g)]
+        .map((match) => Number.parseInt(match[1], 16)),
+);
+const embeddedPage = gunzipSync(compressed).toString("utf8");
+if (embeddedPage !== page) {
+    throw new Error("Generated Web Console asset is stale");
 }
-
-const functionSource = source.slice(functionStart, functionEnd);
-const literals = [...functionSource.matchAll(/R"HTML\(([\s\S]*?)\)HTML"/g)];
-if (literals.length !== 2) {
-    throw new Error(`Expected two console HTML literals, found ${literals.length}`);
-}
-
-const page = `${literals[0][1]}const csrf='host-test';\n${literals[1][1]}`;
 const requiredFragments = [
     'data-view="chat"',
     'data-view="files"',
@@ -41,6 +41,8 @@ const requiredFragments = [
     'id="wifiSsid"',
     'id="refreshModels"',
     'id="startPython"',
+    "fetch('/api/session'",
+    "let csrf=''",
     'const changedSecrets=new Set()',
     'data-1p-ignore',
     'id="exportDiagnostics"',
