@@ -76,4 +76,5 @@ configuration, security, limits, and troubleshooting.
 CardMind is distributed under the [MIT License](LICENSE). Third-party board packages
 and libraries retain their own licenses; see the
 [third-party notices](THIRD_PARTY_NOTICES.md) for the components included in release
-images.
+images. Releases include a license bundle and the exact LGPL-covered Arduino core
+source archive used to build the firmware.
