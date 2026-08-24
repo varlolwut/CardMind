@@ -10,7 +10,10 @@ const outputUrl = new URL(
     import.meta.url,
 );
 
-const source = readFileSync(sourceUrl);
+const source = Buffer.from(
+    readFileSync(sourceUrl, "utf8").replace(/\r\n/g, "\n"),
+    "utf8",
+);
 const compressed = gzipSync(source, { level: 9, mtime: 0 });
 const rows = [];
 for (let offset = 0; offset < compressed.length; offset += 16) {
