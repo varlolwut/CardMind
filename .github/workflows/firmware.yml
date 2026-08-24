@@ -133,10 +133,13 @@ jobs:
             "$HOME/.arduino15/packages/m5stack/tools/esp32-arduino-libs/idf-release_v5.4-2f7dcd86-v1/versions.txt"
           zip -r dist/CardMind-third-party-licenses.zip \
             LICENSE THIRD_PARTY_NOTICES.md third_party
-          sha256sum \
-            dist/CardMind-m5stack-esp32-3.2.1-source.zip \
-            dist/CardMind-third-party-licenses.zip \
-            >> dist/SHA256SUMS.txt
+          (
+            cd dist
+            sha256sum \
+              CardMind-m5stack-esp32-3.2.1-source.zip \
+              CardMind-third-party-licenses.zip \
+              >> SHA256SUMS.txt
+          )
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
