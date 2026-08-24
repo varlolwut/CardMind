@@ -146,7 +146,8 @@ def prepare(source_root: Path, output_root: Path) -> None:
     private_text = private_path.read_text(encoding="utf-8")
     private_text = private_text.replace(
         "#define MAX_SSH_PACKET_LEN 35000",
-        "#define MAX_SSH_PACKET_LEN 24576",
+        "#define MAX_SSH_PACKET_LEN 24576\n"
+        "#define MAX_SSH_OUT_PACKET_LEN 16384",
     ).replace(
         "unsigned char buf[PACKETBUFSIZE];",
         "unsigned char *buf;",
@@ -155,6 +156,16 @@ def prepare(source_root: Path, output_root: Path) -> None:
         "unsigned char *outbuf; /* separately allocated outgoing data */",
     )
     private_path.write_text(private_text, encoding="utf-8", newline="\n")
+
+    transport_path = destination / "transport.c"
+    transport_text = transport_path.read_text(encoding="utf-8").replace(
+        "MAX_SSH_PACKET_LEN-5-256",
+        "MAX_SSH_OUT_PACKET_LEN-5-256",
+    ).replace(
+        "MAX_SSH_PACKET_LEN-0x100",
+        "MAX_SSH_OUT_PACKET_LEN-0x100",
+    )
+    transport_path.write_text(transport_text, encoding="utf-8", newline="\n")
 
     public_path = destination / "libssh2.h"
     public_text = public_path.read_text(encoding="utf-8").replace(
@@ -169,7 +180,7 @@ def prepare(source_root: Path, output_root: Path) -> None:
         "session->packet_read_timeout = LIBSSH2_DEFAULT_READ_TIMEOUT;",
         "session->packet_read_timeout = LIBSSH2_DEFAULT_READ_TIMEOUT;\n"
         "        session->packet.buf = LIBSSH2_ALLOC(session, PACKETBUFSIZE);\n"
-        "        session->packet.outbuf = LIBSSH2_ALLOC(session, MAX_SSH_PACKET_LEN);\n"
+        "        session->packet.outbuf = LIBSSH2_ALLOC(session, MAX_SSH_OUT_PACKET_LEN);\n"
         "        if(session->packet.buf == NULL || session->packet.outbuf == NULL) {\n"
         "            if(session->packet.buf != NULL)\n"
         "                LIBSSH2_FREE(session, session->packet.buf);\n"

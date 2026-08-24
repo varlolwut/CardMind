@@ -41,9 +41,10 @@ void sendWebSse(WebServer& server, const char* type, const std::string& delta,
     if (!error.isEmpty()) {
         document["error"] = error;
     }
-    server.sendContent("data: ");
-    serializeJson(document, server.client());
-    server.sendContent("\n\n");
+    String output;
+    output.reserve(delta.size() + error.length() + 48);
+    serializeJson(document, output);
+    server.sendContent("data:" + output + "\n\n");
 }
 
 }  // namespace cardputer
