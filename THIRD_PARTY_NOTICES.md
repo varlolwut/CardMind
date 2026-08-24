@@ -7,7 +7,8 @@ in [`third_party/manifest.json`](third_party/manifest.json).
 
 | Component | Pinned version | License |
 | --- | --- | --- |
-| M5Stack Arduino ESP32 board package | 3.2.1 (Arduino-ESP32 3.2.0) | LGPL-2.1-or-later and component-specific licenses |
+| M5Stack Arduino ESP32 board package | 3.2.1 (Arduino-ESP32 3.2.0) | LGPL-2.1-or-later |
+| ESP-IDF runtime libraries | 5.4.1, commit `2f7dcd86…` | Apache-2.0 with component-specific permissive terms |
 | M5Cardputer | commit `f1392858…` | MIT; bundled Adafruit TCA8418 code is BSD-3-Clause |
 | M5Unified | commit `774d920c…` | MIT |
 | M5GFX | commit `93b480bb…` | MIT; the linked eFont glyph data is BSD-3-Clause |
@@ -20,7 +21,11 @@ The MicroPython binary included in a full CardMind image is accepted only when
 its SHA-256 digest matches the manifest. The release workflow verifies the same
 pins and digest before publishing artifacts.
 
-Arduino-ESP32 and MicroPython aggregate additional upstream components. Their
-authoritative license inventories and complete corresponding sources are
-available at the pinned source links in the manifest. CardMind does not modify
-the downloaded MicroPython application image.
+Every release also provides the exact M5Stack Arduino ESP32 3.2.1 source archive
+next to the firmware binaries. Together with the CardMind source archive and
+build workflow on the same release page, this lets recipients rebuild CardMind
+with a modified LGPL-covered Arduino core.
+
+ESP-IDF and MicroPython aggregate additional upstream components. Their official
+license inventories and exact source revisions are linked from the manifest.
+CardMind does not modify the downloaded MicroPython application image.

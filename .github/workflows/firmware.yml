@@ -35,6 +35,7 @@ jobs:
             --manifest third_party/manifest.json \
             --workflow .github/workflows/firmware.yml \
             --notices THIRD_PARTY_NOTICES.md \
+            --project-license LICENSE \
             --repository-root .
           python -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in Path('micropython/vfs').glob('*.py')]"
           python tests/micropython_supervisor_test.py
@@ -122,8 +123,20 @@ jobs:
             --micropython-app build/release/micropython.app-bin \
             --vfs-image build/release/micropython-vfs.bin \
             --output-dir dist
+          curl --fail --location --silent --show-error \
+            https://static-cdn.m5stack.com/resource/arduino/m5stack-3.2.1.zip \
+            --output dist/CardMind-m5stack-esp32-3.2.1-source.zip
+          echo "d1e647456f4b6f050a727ad5aac4cd4e4eded0911f80fb4786cdd4dce722cd46  dist/CardMind-m5stack-esp32-3.2.1-source.zip" \
+            | sha256sum --check --strict
+          ESP_IDF_COMMIT="2f7dcd862a62ec7380abe3e64c952d8038661463"
+          grep -F "esp-idf: release/v5.4 ${ESP_IDF_COMMIT:0:10}" \
+            "$HOME/.arduino15/packages/m5stack/tools/esp32-arduino-libs/idf-release_v5.4-2f7dcd86-v1/versions.txt"
           zip -r dist/CardMind-third-party-licenses.zip \
-            THIRD_PARTY_NOTICES.md third_party
+            LICENSE THIRD_PARTY_NOTICES.md third_party
+          sha256sum \
+            dist/CardMind-m5stack-esp32-3.2.1-source.zip \
+            dist/CardMind-third-party-licenses.zip \
+            >> dist/SHA256SUMS.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -134,6 +147,7 @@ jobs:
             dist/CardMind-cardputer-adv-full.bin
             dist/SHA256SUMS.txt
             dist/CardMind-third-party-licenses.zip
+            dist/CardMind-m5stack-esp32-3.2.1-source.zip
             build/release/firmware-metrics.json
             THIRD_PARTY_NOTICES.md
             third_party/manifest.json
@@ -153,6 +167,7 @@ jobs:
               dist/CardMind-cardputer-adv-full.bin \
               dist/SHA256SUMS.txt \
               dist/CardMind-third-party-licenses.zip \
+              dist/CardMind-m5stack-esp32-3.2.1-source.zip \
               build/release/firmware-metrics.json \
               THIRD_PARTY_NOTICES.md \
               third_party/manifest.json \
@@ -163,6 +178,7 @@ jobs:
               dist/CardMind-cardputer-adv-full.bin \
               dist/SHA256SUMS.txt \
               dist/CardMind-third-party-licenses.zip \
+              dist/CardMind-m5stack-esp32-3.2.1-source.zip \
               build/release/firmware-metrics.json \
               THIRD_PARTY_NOTICES.md \
               third_party/manifest.json \

@@ -5,11 +5,29 @@
       "name": "M5Stack Arduino ESP32 board package",
       "version": "3.2.1",
       "framework_version": "3.2.0",
-      "source": "https://github.com/espressif/arduino-esp32/tree/3.2.0",
+      "source": "https://static-cdn.m5stack.com/resource/arduino/m5stack-3.2.1.zip",
+      "upstream_source": "https://github.com/espressif/arduino-esp32/tree/3.2.0",
       "license": "LGPL-2.1-or-later",
       "license_file": "third_party/licenses/LGPL-2.1.txt",
       "pin": "m5stack:esp32@3.2.1",
-      "workflow_markers": ["m5stack:esp32@3.2.1"]
+      "source_archive": {
+        "url": "https://static-cdn.m5stack.com/resource/arduino/m5stack-3.2.1.zip",
+        "sha256": "d1e647456f4b6f050a727ad5aac4cd4e4eded0911f80fb4786cdd4dce722cd46"
+      },
+      "workflow_markers": [
+        "m5stack:esp32@3.2.1",
+        "m5stack-3.2.1.zip",
+        "d1e647456f4b6f050a727ad5aac4cd4e4eded0911f80fb4786cdd4dce722cd46"
+      ]
+    },
+    {
+      "name": "ESP-IDF runtime libraries",
+      "version": "5.4.1",
+      "source": "https://github.com/espressif/esp-idf/tree/2f7dcd862a62ec7380abe3e64c952d8038661463",
+      "license": "Apache-2.0 with component-specific permissive terms",
+      "license_file": "third_party/licenses/ESP-IDF-Apache-2.0.txt",
+      "pin": "2f7dcd862a62ec7380abe3e64c952d8038661463",
+      "workflow_markers": ["2f7dcd862a62ec7380abe3e64c952d8038661463"]
     },
     {
       "name": "M5Cardputer",
