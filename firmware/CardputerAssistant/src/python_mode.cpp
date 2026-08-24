@@ -1,6 +1,7 @@
 #include "python_mode.h"
 
 #include <Preferences.h>
+#include <SD.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 
@@ -11,6 +12,7 @@ namespace cardputer {
 namespace {
 
 constexpr const char* kPythonNamespace = "cardmind_py";
+constexpr const char* kPythonHandoffPath = "/assistant/.python-open-web";
 constexpr const char* kCardMindPartitionLabel = "cardmind";
 constexpr const char* kPythonPartitionLabel = "python";
 constexpr std::uint32_t kMinimumCardMindPartitionBytes = 0x330000U;
@@ -173,6 +175,32 @@ OperationResult activatePythonMode()
         ? OperationResult{true, ""}
         : OperationResult{false, String("Failed to select MicroPython partition: ESP error ") +
                                  static_cast<int>(result)};
+}
+
+PythonHandoffRequest consumePythonHandoffRequest()
+{
+    Preferences preferences;
+    if (!preferences.begin(kPythonNamespace, false)) {
+        return {false, false, "Failed to open Python handoff state in NVS"};
+    }
+    const bool requested = preferences.getInt("open_web", 0) == 1;
+    if (requested && !preferences.remove("open_web")) {
+        preferences.end();
+        return {false, false, "Failed to consume Python Web Console handoff"};
+    }
+    preferences.end();
+    return {true, requested, ""};
+}
+
+PythonHandoffRequest consumePythonSdHandoffRequest()
+{
+    if (!SD.exists(kPythonHandoffPath)) {
+        return {true, false, ""};
+    }
+    if (!SD.remove(kPythonHandoffPath)) {
+        return {false, false, "Failed to consume Python Web Console marker from microSD"};
+    }
+    return {true, true, ""};
 }
 
 OperationResult stageCardMindUpdateForPython(std::uint32_t firmwareBytes,

@@ -22,4 +22,21 @@ OperationResult buildWebConsoleState(const Settings& settings,
                                      const WebConsoleRuntimeState& runtime,
                                      JsonDocument& document);
 
+void buildWebConsoleStatusState(const WebConsoleRuntimeState& runtime,
+                                JsonDocument& document);
+
+void buildWebConsoleChatState(const Settings& settings,
+                              const ChatDocument& activeChat,
+                              const std::vector<ChatSummary>& chats,
+                              JsonDocument& document);
+
+OperationResult buildWebConsoleFilesState(JsonDocument& document);
+
+OperationResult buildWebConsoleSshState(const WebConsoleRuntimeState& runtime,
+                                        JsonDocument& document);
+
+void buildWebConsoleSettingsState(const Settings& settings,
+                                  const WebConsoleRuntimeState& runtime,
+                                  JsonDocument& document);
+
 }  // namespace cardputer

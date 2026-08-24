@@ -19,6 +19,7 @@ struct Settings {
     String apiKey;
     String apiBaseUrl;
     String model;
+    String globalInstructions;
     String sttApiKey;
     String sttBaseUrl;
     String sttModel;

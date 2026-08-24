@@ -45,6 +45,7 @@ const requiredFragments = [
     'id="wifiSsid"',
     'id="refreshModels"',
     'id="startPython"',
+    'id="globalInstructions"',
     "fetch('/api/session'",
     "let csrf=''",
     'const changedSecrets=new Set()',
@@ -76,6 +77,17 @@ const requiredFragments = [
     "userMessage.textContent='You: '+prompt",
     'pointer-events:none',
     "q('#connectSsh').disabled=sshConnected",
+    '/api/state?view=',
+    '/api/ssh/resize',
+    "e.key==='Backspace')d='\\x7f'",
+    "e.key==='ArrowUp')d='\\x1b[A'",
+    'new ResizeObserver(queueTerminalResize)',
+    'function terminalFeed(value)',
+    'function renderStatusState(s)',
+    'function renderChatState(s)',
+    'function renderFilesState(s)',
+    'function renderSshState(s)',
+    'function renderSettingsState(s)',
 ];
 
 for (const fragment of requiredFragments) {
@@ -179,5 +191,30 @@ const summaryWithNotice = summarizeSseEvents([
 if (summaryWithNotice.notice !== "SSH terminal disconnected" ||
     summaryWithNotice.delta !== "OK" || summaryWithNotice.terminalType !== "done") {
     throw new Error("An SSE notice was not preserved alongside streamed text");
+}
+
+const terminalStart = page.indexOf("const terminalScreen=");
+const terminalEnd = page.indexOf("function appendTerminalRun", terminalStart);
+if (terminalStart < 0 || terminalEnd < 0) {
+    throw new Error("Cannot extract the SSH terminal parser");
+}
+const terminalHarness = new Function(
+    "function renderTerminal(){}\n" +
+    page.slice(terminalStart, terminalEnd) +
+    ";return {screen:terminalScreen,feed:terminalFeed,reset:terminalReset};",
+)();
+terminalHarness.reset();
+terminalHarness.feed("hello\bX\r\n\x1b[31mred\x1b[0m");
+if (terminalHarness.screen.lines[0].map((cell) => cell.character).join("") !== "hellX") {
+    throw new Error("SSH terminal backspace did not overwrite the previous cell");
+}
+if (terminalHarness.screen.lines[1].map((cell) => cell.character).join("") !== "red" ||
+    terminalHarness.screen.lines[1][0].style !== "ansi-red") {
+    throw new Error("SSH terminal ANSI color state was not applied");
+}
+terminalHarness.feed("\x1b[2J\x1b[Hready");
+if (terminalHarness.screen.lines.length !== 1 ||
+    terminalHarness.screen.lines[0].map((cell) => cell.character).join("") !== "ready") {
+    throw new Error("SSH terminal clear-screen and cursor-home handling failed");
 }
 console.log("WEB_CONSOLE_UI_TEST result=pass");
