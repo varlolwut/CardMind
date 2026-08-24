@@ -79,7 +79,9 @@ enum class Screen {
     DeleteFileConfirm,
     Diagnostics,
     ControlsHelp,
+    AiMenu,
     ModelPicker,
+    GlobalInstructions,
     ChatList,
     ChatActions,
     ArchivedChatViewer,
@@ -151,6 +153,8 @@ String selectedChatTitle;
 bool selectedChatSshToolsEnabled = false;
 std::string instructionsInput;
 String instructionsStatus;
+std::string globalInstructionsInput;
+String globalInstructionsStatus;
 String deleteChatId;
 String deleteChatTitle;
 Screen deleteChatReturnScreen = Screen::ChatList;
@@ -166,6 +170,7 @@ std::size_t workspaceFileIndex = 0;
 std::size_t fileActionsIndex = 0;
 std::size_t diagnosticsIndex = 0;
 std::size_t controlsHelpIndex = 0;
+std::size_t aiMenuIndex = 0;
 std::size_t modelPickerIndex = 0;
 std::size_t wifiPickerIndex = 0;
 std::vector<cardputer::WifiNetwork> scannedWifiNetworks;
@@ -220,6 +225,8 @@ String crashJournalError;
 bool sshStorageReady = false;
 String sshStorageError;
 std::uint32_t lastUserActivityAt = 0;
+bool webConsoleStartupPending = false;
+std::uint32_t webConsoleStartupNotBefore = 0;
 bool displaySleeping = false;
 cardputer::FirmwareUpdateInfo pendingFirmwareUpdate = {};
 std::string calculatorInput;
@@ -239,6 +246,8 @@ void renderChatInstructions();
 void renderSearchSources();
 void renderChatList();
 void renderControlsHelp();
+void renderAiMenu();
+void renderGlobalInstructions();
 void renderWebConsoleMenu();
 void renderDeviceMenu();
 void renderUtilitiesMenu();
@@ -259,6 +268,7 @@ void renderWifiPassword();
 void renderWifiPicker();
 void renderWorkspaceFileList();
 void openSelectedWorkspaceFile();
+void openAiMenu();
 void openWebConsole(Screen returnScreen);
 cardputer::OperationResult runSshTerminal();
 cardputer::OperationResult runSshTool();
@@ -688,8 +698,14 @@ void render()
     case Screen::ControlsHelp:
         renderControlsHelp();
         return;
+    case Screen::AiMenu:
+        renderAiMenu();
+        return;
     case Screen::ModelPicker:
         renderModelPicker();
+        return;
+    case Screen::GlobalInstructions:
+        renderGlobalInstructions();
         return;
     case Screen::ChatList:
         renderChatList();
@@ -1132,6 +1148,12 @@ void setup()
             delay(1000);
         }
     }
+    cardputer::PythonHandoffRequest pythonHandoff =
+        cardputer::consumePythonHandoffRequest();
+    if (!pythonHandoff.success) {
+        Serial.printf("ERROR event=python_handoff reason=%s\n",
+                      pythonHandoff.error.c_str());
+    }
     const cardputer::OperationResult deviceSettingsResult = applyDisplayAndCpuSettings(settings);
     if (!deviceSettingsResult.success) {
         cardputer::showFatalError(deviceSettingsResult.error);
@@ -1152,6 +1174,17 @@ void setup()
     voiceStorageReady = voiceStorageResult.success;
     voiceStorageError = voiceStorageResult.success ? String() : voiceStorageResult.error;
     Serial.printf("VOICE_STORAGE result=%s\n", voiceStorageReady ? "ready" : "failed");
+    if (voiceStorageReady && pythonHandoff.success) {
+        const cardputer::PythonHandoffRequest sdHandoff =
+            cardputer::consumePythonSdHandoffRequest();
+        if (!sdHandoff.success) {
+            pythonHandoff = sdHandoff;
+            Serial.printf("ERROR event=python_sd_handoff reason=%s\n",
+                          sdHandoff.error.c_str());
+        } else if (sdHandoff.openWebConsole) {
+            pythonHandoff.openWebConsole = true;
+        }
+    }
 
     const cardputer::OperationResult chatResult = voiceStorageReady
         ? initializeChats()
@@ -1184,7 +1217,9 @@ void setup()
     Serial.printf("SSH_STORAGE result=%s\n", sshStorageReady ? "ready" : "failed");
 
     carouselIndex = 0;
-    menuStatus = !fileWorkspaceReady
+    menuStatus = !pythonHandoff.success
+        ? pythonHandoff.error
+        : !fileWorkspaceReady
         ? fileWorkspaceError
         : (!crashJournalReady ? crashJournalError
                               : (sshStorageReady ? String() : sshStorageError));
@@ -1199,12 +1234,25 @@ void setup()
         renderCarousel();
         Serial.println("ERROR event=wifi_power_setting result=failed");
     }
+    if (pythonHandoff.success && pythonHandoff.openWebConsole) {
+        webConsoleStartupPending = true;
+        webConsoleStartupNotBefore = millis() + 750U;
+        Serial.println("PYTHON_HANDOFF action=queue_web_console");
+    }
     Serial.println("READY");
 }
 
 void loop()
 {
     M5Cardputer.update();
+    if (webConsoleStartupPending &&
+        static_cast<std::int32_t>(millis() - webConsoleStartupNotBefore) >= 0 &&
+        M5Cardputer.Keyboard.keyList().empty()) {
+        webConsoleStartupPending = false;
+        Serial.println("PYTHON_HANDOFF action=open_web_console");
+        openWebConsole(Screen::MainCarousel);
+        return;
+    }
     const bool inputActivity = M5Cardputer.Keyboard.isChange() || M5Cardputer.BtnA.wasPressed();
     if (inputActivity) {
         lastUserActivityAt = millis();

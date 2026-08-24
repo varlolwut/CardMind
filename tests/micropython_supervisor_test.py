@@ -43,6 +43,21 @@ def main() -> None:
         raise RuntimeError("MicroPython handoff token comparison rejected an exact match")
     if constant_time_equals("A1b2", "A1b3") or constant_time_equals("A1b2", "A1b20"):
         raise RuntimeError("MicroPython handoff token comparison accepted a mismatch")
+    send_response = load_function(source_path, "_send")
+
+    class PartialConnection:
+        def __init__(self) -> None:
+            self.payload = bytearray()
+
+        def send(self, value: bytes) -> int:
+            chunk = value[:7]
+            self.payload.extend(chunk)
+            return len(chunk)
+
+    partial_connection = PartialConnection()
+    send_response(partial_connection, "200 OK", "text/plain", "ready", {})
+    if not bytes(partial_connection.payload).endswith(b"\r\n\r\nready"):
+        raise RuntimeError("MicroPython HTTP writer lost a partial socket write")
     safe_script_name = load_function(source_path, "_safe_script_name")
     if not safe_script_name("hello_world-2.py"):
         raise RuntimeError("MicroPython script name validation rejected an ASCII filename")
@@ -61,6 +76,10 @@ def main() -> None:
         "output.scrollTop=output.scrollHeight",
         "Open CardMind WebUI",
         "fetch('/api/session'",
+        'namespace.set_i32("open_web", 1)',
+        'with open(_CARDMIND_HANDOFF_PATH, "w") as marker:',
+        "os.sync()",
+        "namespace.commit()",
     ):
         if required not in source:
             raise RuntimeError("MicroPython browser workspace is missing " + required)
@@ -68,6 +87,17 @@ def main() -> None:
     first_statement = ast.unparse(start.body[0])
     if first_statement != "esp32.Partition.mark_app_valid_cancel_rollback()":
         raise RuntimeError("MicroPython supervisor must confirm the OTA image before startup")
+    handle_api_source = ast.unparse(load_function_node(source_path, "_handle_api"))
+    handle_api = load_function_node(source_path, "_handle_api")
+    if [argument.arg for argument in handle_api.args.args][-1] != "namespace":
+        raise RuntimeError("MicroPython API handler does not receive its NVS namespace")
+    if "machine.reset()" in handle_api_source:
+        raise RuntimeError("MicroPython API handler resets before its response is closed")
+    serve_source = ast.unparse(load_function_node(source_path, "_serve"))
+    if "_handle_api(connection, method, target, headers, body, namespace)" not in serve_source:
+        raise RuntimeError("MicroPython server does not pass NVS to the API handler")
+    if serve_source.index("connection.close()") > serve_source.index("machine.reset()"):
+        raise RuntimeError("MicroPython handoff resets before closing its HTTP response")
     print("MICROPYTHON_SUPERVISOR_TEST result=pass")
 
 

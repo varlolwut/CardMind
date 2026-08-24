@@ -149,10 +149,22 @@ String buildChatRequest(const Settings& settings,
     document["stream"] = true;
     document["max_tokens"] = 1024;
     JsonArray messages = document["messages"].to<JsonArray>();
-    if (!instructions.empty()) {
+    if (!settings.globalInstructions.isEmpty() || !instructions.empty()) {
         JsonObject system = messages.add<JsonObject>();
         system["role"] = "system";
-        system["content"] = instructions;
+        String combined;
+        if (!settings.globalInstructions.isEmpty()) {
+            combined = "Global instructions supplied by the user:\n";
+            combined += settings.globalInstructions;
+        }
+        if (!instructions.empty()) {
+            if (!combined.isEmpty()) {
+                combined += "\n\n";
+            }
+            combined += "Chat-specific instructions override conflicting global instructions:\n";
+            combined += instructions.c_str();
+        }
+        system["content"] = combined;
     }
     for (const auto& message : history) {
         JsonObject item = messages.add<JsonObject>();
@@ -321,8 +333,13 @@ String buildToolChatRequest(const Settings& settings,
             "Use ssh_command only for remote-machine work requested by the user. Report the command's "
             "non-zero exit status and never claim success when its output says otherwise.";
     }
+    if (!settings.globalInstructions.isEmpty()) {
+        systemPrompt += "\n\nGlobal instructions supplied by the user:\n";
+        systemPrompt += settings.globalInstructions;
+    }
     if (!instructions.empty()) {
-        systemPrompt += "\n\nChat-specific instructions supplied by the user:\n";
+        systemPrompt +=
+            "\n\nChat-specific instructions override conflicting global instructions:\n";
         systemPrompt += instructions.c_str();
     }
     system["content"] = systemPrompt;
