@@ -789,7 +789,11 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
     std::vector<ToolRound> rounds;
     std::string completeResponse;
     std::size_t toolOutputBytes = 0;
-    for (std::size_t roundIndex = 0; roundIndex <= kMaximumToolRounds; ++roundIndex) {
+    std::size_t roundIndex = 0;
+    std::size_t missingRequiredToolRetries = 0;
+    const bool requiresInitialWorkspaceTool =
+        requestsWorkspaceAccess(history.back().content);
+    while (roundIndex <= kMaximumToolRounds) {
         if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
             return {false, completeResponse, "Not enough free heap to continue tool request safely"};
         }
@@ -799,21 +803,41 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
             return {false, completeResponse,
                     "Tool payload left less than 70000 bytes of free heap; start a new chat"};
         }
+        const bool bufferInitialText = requiresInitialWorkspaceTool && rounds.empty();
+        std::string bufferedText;
         CompletionTurnResult turn = streamCompletionTurn(
             settings, payload,
-            [&completeResponse, &onText](const std::string& text) {
-                completeResponse += text;
-                onText(text);
+            [&bufferedText, &completeResponse, &onText,
+             bufferInitialText](const std::string& text) {
+                if (bufferInitialText) {
+                    bufferedText += text;
+                } else {
+                    completeResponse += text;
+                    onText(text);
+                }
             },
             isCancelled);
         if (!turn.success) {
             return {false, completeResponse, turn.error};
         }
         if (turn.toolCalls.empty()) {
+            if (bufferInitialText && missingRequiredToolRetries == 0) {
+                ++missingRequiredToolRetries;
+                Serial.println("WARN event=required_workspace_tool result=missing retry=1");
+                continue;
+            }
+            if (bufferInitialText) {
+                return {false, completeResponse,
+                        "Model did not call the required workspace tool after 2 attempts"};
+            }
             if (turn.response.empty()) {
                 return {false, completeResponse, "Tool-enabled completion ended without response text"};
             }
             return {true, completeResponse, ""};
+        }
+        if (bufferInitialText && !bufferedText.empty()) {
+            completeResponse += bufferedText;
+            onText(bufferedText);
         }
         if (roundIndex == kMaximumToolRounds) {
             return {false, completeResponse, "Model exceeded the limit of 4 consecutive tool rounds"};
@@ -848,6 +872,7 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
             round.results.push_back(std::move(result));
         }
         rounds.push_back(std::move(round));
+        ++roundIndex;
     }
     return {false, completeResponse, "Tool orchestration ended unexpectedly"};
 }

@@ -112,10 +112,12 @@ function Invoke-TimedSerialCommand {
     )
 
     Sync-SerialChannel -Serial $Serial -Operation $Name
+    Start-Sleep -Milliseconds 40
     $Serial.ReadExisting() | Out-Null
     $Serial.WriteLine($Command)
     $Serial.BaseStream.Flush()
     $pending = ""
+    $lastLine = ""
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         Start-Sleep -Milliseconds 40
@@ -125,6 +127,7 @@ function Invoke-TimedSerialCommand {
             if ($line.Length -eq 0) {
                 continue
             }
+            $lastLine = $line
             Assert-SafeDeviceLine -Line $line -Operation $Name
             if ($line -match $CompletionPattern) {
                 if ($line -notmatch $PassPattern) {
@@ -137,7 +140,8 @@ function Invoke-TimedSerialCommand {
             }
         }
     }
-    throw "Timed out after $TimeoutSeconds seconds waiting for '$Name'"
+    $detail = if ($lastLine.Length -eq 0) { "no serial output" } else { $lastLine }
+    throw "Timed out after $TimeoutSeconds seconds waiting for '$Name'; last line: $detail"
 }
 
 function Convert-StatusLine {
@@ -248,7 +252,7 @@ $limits = Read-DeviceLimits -Path $BudgetPath
 
 try {
     $serial.Open()
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 12
     $serial.ReadExisting() | Out-Null
 
     $initialParameters = @{
@@ -378,6 +382,9 @@ try {
     Write-Host ("DEVICE_BASELINE result=pass cycles={0} output={1}" -f $ConsoleCycles, $resolvedOutputPath)
 } finally {
     if ($serial.IsOpen) {
+        $serial.WriteLine("EXIT")
+        $serial.BaseStream.Flush()
+        Start-Sleep -Milliseconds 500
         $serial.Close()
     }
     $serial.Dispose()

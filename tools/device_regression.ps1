@@ -7,7 +7,7 @@ param(
     [int]$BaudRate,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("offline", "online", "full")]
+    [ValidateSet("offline", "online", "p1", "full")]
     [string]$Suite,
 
     [Parameter(Mandatory = $true)]
@@ -115,6 +115,7 @@ function Invoke-RegressionCase {
     if (-not $synced) {
         throw "Serial channel did not answer PING before '$($Case.Name)'"
     }
+    Start-Sleep -Milliseconds 40
     $Serial.ReadExisting() | Out-Null
     $Serial.WriteLine($Case.Command)
     $Serial.BaseStream.Flush()
@@ -200,6 +201,22 @@ $onlineCases = @(
     (New-RegressionCase -Name "OTA download and digest" -Command "OTADOWNLOADTEST" -CompletionPattern "^OTADOWNLOADTEST result=" -PassPattern "^OTADOWNLOADTEST result=pass" -TimeoutSeconds 300)
 )
 
+$p1Cases = @(
+    (New-RegressionCase -Name "chat API" -Command "APITEST" -CompletionPattern "^APITEST result=" -PassPattern "^APITEST result=pass" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "model file tool" -Command "TOOLTEST" -CompletionPattern "^TOOLTEST result=" -PassPattern "^TOOLTEST result=pass" -TimeoutSeconds 180),
+    (New-RegressionCase -Name "web search API" -Command "WEBTEST" -CompletionPattern "^WEBTEST result=" -PassPattern "^WEBTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "web contents API" -Command "FETCHTEST" -CompletionPattern "^FETCHTEST result=" -PassPattern "^FETCHTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "search sources cache" -Command "SEARCHCACHETEST" -CompletionPattern "^SEARCHCACHETEST result=" -PassPattern "^SEARCHCACHETEST result=pass" -TimeoutSeconds 30),
+    (New-RegressionCase -Name "model search tool round trip" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=pass.*search_called=yes" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "UI search path" -Command "E2ETEST" -CompletionPattern "^E2ETEST result=" -PassPattern "^E2ETEST result=pass.*response=yes.*cleanup=yes" -TimeoutSeconds 300),
+    (New-RegressionCase -Name "STT TLS" -Command "STTTLS" -CompletionPattern "^STTTLS result=" -PassPattern "^STTTLS result=pass$" -TimeoutSeconds 90),
+    (New-RegressionCase -Name "STT authentication" -Command "STTAUTH" -CompletionPattern "^STTAUTH result=" -PassPattern "^STTAUTH result=pass$" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "TTS TLS" -Command "TTSTLS" -CompletionPattern "^TTSTLS result=" -PassPattern "^TTSTLS result=pass$" -TimeoutSeconds 90),
+    (New-RegressionCase -Name "TTS authentication" -Command "TTSAUTH" -CompletionPattern "^TTSAUTH result=" -PassPattern "^TTSAUTH result=pass" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "TTS synthesis and playback" -Command "TTSTEST" -CompletionPattern "^TTSTEST result=" -PassPattern "^TTSTEST result=pass" -TimeoutSeconds 180),
+    (New-RegressionCase -Name "post-P1 responsiveness" -Command "STATUS" -CompletionPattern "^STATUS version=" -PassPattern "wifi=connected.*heap=[1-9][0-9]+" -TimeoutSeconds 15)
+)
+
 $resolvedLogPath = [System.IO.Path]::GetFullPath($LogPath)
 $logDirectory = [System.IO.Path]::GetDirectoryName($resolvedLogPath)
 if (-not [string]::IsNullOrEmpty($logDirectory)) {
@@ -219,11 +236,14 @@ try {
     Start-Sleep -Seconds 12
     $serial.ReadExisting() | Out-Null
     $cases = [System.Collections.Generic.List[object]]::new()
-    if ($Suite -ne "online") {
+    if ($Suite -eq "offline" -or $Suite -eq "full") {
         $cases.AddRange([object[]]$offlineCases)
     }
-    if ($Suite -ne "offline") {
+    if ($Suite -eq "online" -or $Suite -eq "full") {
         $cases.AddRange([object[]]$onlineCases)
+    }
+    if ($Suite -eq "p1") {
+        $cases.AddRange([object[]]$p1Cases)
     }
     foreach ($case in $cases) {
         Invoke-RegressionCase -Serial $serial -Case $case -LogPath $resolvedLogPath
@@ -232,6 +252,9 @@ try {
     Write-Host ("CARDMIND_REGRESSION result=pass cases={0} log={1}" -f $cases.Count, $resolvedLogPath)
 } finally {
     if ($serial.IsOpen) {
+        $serial.WriteLine("EXIT")
+        $serial.BaseStream.Flush()
+        Start-Sleep -Milliseconds 500
         $serial.Close()
     }
     $serial.Dispose()
