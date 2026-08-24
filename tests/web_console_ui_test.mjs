@@ -110,25 +110,40 @@ function readArrowFunction(name, nextMarker) {
 
 const parseSseChunk = readArrowFunction(
     "parseSseChunk",
-    ";const promptStreamCompletionError=",
+    ";const summarizeSseEvents=",
 );
 const promptStreamCompletionError = readArrowFunction(
     "promptStreamCompletionError",
     ";\nasync function sendPrompt",
 );
 
-const firstChunk = parseSseChunk("", 'data: {"type":"delta","delta":"Hel');
+const firstChunk = parseSseChunk(
+    "",
+    'data: {"type":"delta","delta":"Hel',
+    false,
+);
 if (firstChunk.events.length !== 0 || firstChunk.buffer.length === 0) {
     throw new Error("A partial SSE event was committed before its frame ended");
 }
 const secondChunk = parseSseChunk(
     firstChunk.buffer,
-    'lo"}\n\ndata: {"type":"done"}\n\n',
+    'lo"}\r\n\r\ndata: {"type":"done"}\r\n\r\n',
+    false,
 );
 if (secondChunk.buffer !== "" || secondChunk.events.length !== 2 ||
     secondChunk.events[0].delta !== "Hello" ||
     secondChunk.events[1].type !== "done") {
     throw new Error("Split SSE events were not reassembled correctly");
+}
+const flushedFinalEvent = parseSseChunk(
+    "",
+    'data: {"type":"done"}',
+    true,
+);
+if (flushedFinalEvent.buffer !== "" ||
+    flushedFinalEvent.events.length !== 1 ||
+    flushedFinalEvent.events[0].type !== "done") {
+    throw new Error("A complete terminal event was lost at EOF");
 }
 if (promptStreamCompletionError("", "done", "") !== "") {
     throw new Error("A completed SSE stream was rejected");

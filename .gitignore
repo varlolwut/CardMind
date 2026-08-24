@@ -3,6 +3,7 @@ vendor/
 ROADMAP.md
 .repo-git/
 .secrets/
+.agents/
 toolchain/arduino-cli.yaml
 toolchain/data/
 toolchain/downloads/

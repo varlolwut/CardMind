@@ -406,30 +406,9 @@ void handlePrompt()
     server.sendHeader("Cache-Control", "no-store");
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/event-stream; charset=utf-8", "");
-    std::vector<Message> pending = activeChat.messages;
-    pending.push_back({"user", prompt});
-    HistoryFitResult pendingFit = fitHistoryToActiveContext(pending);
-    if (!pendingFit.archived.empty()) {
-        const OperationResult archived = archiveChatMessages(
-            activeChat.summary.id, pendingFit.archived);
-        if (!archived.success) {
-            sendWebSse(server, "error", "", archived.error);
-            return;
-        }
-        activeChat.summary.archivedMessageCount += pendingFit.archived.size();
-    }
-    activeChat.messages = std::move(pendingFit.retained);
-    activeChat.draft.clear();
-    if (activeChat.summary.messageCount == 0) {
-        activeChat.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
-    }
-    activeChat.summary.messageCount = activeChat.messages.size();
-    activeChat.summary.updatedAt = currentTimestamp();
-    OperationResult saved = saveChat(activeChat);
-    if (!saved.success) {
-        sendWebSse(server, "error", "", saved.error);
-        return;
-    }
+    std::vector<Message> requestMessages = activeChat.messages;
+    requestMessages.push_back({"user", prompt});
+    HistoryFitResult requestFit = fitHistoryToActiveContext(requestMessages);
     activeResponse.clear();
     consoleStatus = "Streaming from web console...";
     renderConsoleChat();
@@ -456,7 +435,7 @@ void handlePrompt()
     markOperation(chatToolPolicyIsEnabled(toolPolicy)
         ? "web_console_tools" : "web_console_chat");
     const ChatResult result = chatToolPolicyIsEnabled(toolPolicy)
-        ? streamChatCompletionWithTools(consoleSettings, activeChat.messages,
+        ? streamChatCompletionWithTools(consoleSettings, requestFit.retained,
                                         activeChat.instructions, toolPolicy.sshEnabled,
                                         onText,
                                         [&toolPolicy, &isCancelled](const ToolCall& call) {
@@ -465,7 +444,7 @@ void handlePrompt()
                                                 isCancelled);
                                         },
                                         isCancelled)
-        : streamChatCompletion(consoleSettings, activeChat.messages,
+        : streamChatCompletion(consoleSettings, requestFit.retained,
                                activeChat.instructions, onText, isCancelled);
     markOperation("idle");
     if (!result.success) {
@@ -475,11 +454,16 @@ void handlePrompt()
         renderConsoleChat();
         return;
     }
-    activeChat.messages.push_back({"assistant", result.response});
-    HistoryFitResult finalFit = fitHistoryToActiveContext(activeChat.messages);
-    if (!finalFit.archived.empty()) {
+    requestFit.retained.push_back({"assistant", result.response});
+    HistoryFitResult finalFit = fitHistoryToActiveContext(requestFit.retained);
+    std::vector<Message> archivedMessages = std::move(requestFit.archived);
+    archivedMessages.reserve(archivedMessages.size() + finalFit.archived.size());
+    for (Message& message : finalFit.archived) {
+        archivedMessages.push_back(std::move(message));
+    }
+    if (!archivedMessages.empty()) {
         const OperationResult archived = archiveChatMessages(
-            activeChat.summary.id, finalFit.archived);
+            activeChat.summary.id, archivedMessages);
         if (!archived.success) {
             activeResponse.clear();
             consoleStatus = archived.error;
@@ -487,12 +471,16 @@ void handlePrompt()
             renderConsoleChat();
             return;
         }
-        activeChat.summary.archivedMessageCount += finalFit.archived.size();
+        activeChat.summary.archivedMessageCount += archivedMessages.size();
     }
     activeChat.messages = std::move(finalFit.retained);
+    activeChat.draft.clear();
+    if (activeChat.summary.messageCount == 0) {
+        activeChat.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
+    }
     activeChat.summary.messageCount = activeChat.messages.size();
     activeChat.summary.updatedAt = currentTimestamp();
-    saved = saveChat(activeChat);
+    const OperationResult saved = saveChat(activeChat);
     activeResponse.clear();
     consoleStatus = saved.success ? String("Saved") : saved.error;
     if (saved.success) {
