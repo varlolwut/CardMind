@@ -1,5 +1,4 @@
 #include "web_console.h"
-#include "web_console_asset.h"
 
 #include "api_client.h"
 #include "chat_storage.h"
@@ -12,6 +11,9 @@
 #include "text_utils.h"
 #include "tool_router.h"
 #include "ui.h"
+#include "web_console_routes.h"
+#include "web_console_state.h"
+#include "web_console_transport.h"
 #include "web_search_client.h"
 
 #include <ArduinoJson.h>
@@ -35,7 +37,6 @@ constexpr std::uint32_t kSessionIdleMs = 15U * 60U * 1000U;
 constexpr std::uint32_t kLoginLockMs = 30U * 1000U;
 constexpr std::size_t kMaximumLoginFailures = 5;
 constexpr std::size_t kMaximumPromptBytes = 1200;
-constexpr std::size_t kMaximumStateHistoryBytes = 12000;
 constexpr std::size_t kMaximumWebFileChunkBytes = 12288;
 
 WebServer server(80);
@@ -110,29 +111,47 @@ String normalizedBaseUrl(String value)
     return value;
 }
 
-void clearConsoleSecrets()
+void releaseConsoleSessionState()
 {
     webSshClient.close();
-    webSshProfile.password = "";
-    webSshProfile.privateKeyPassphrase = "";
+    webSshProfile = SshProfile{"", "", 22, "", "", SshAuthMode::Password, ""};
     webSshAwaitingTrust = false;
     webSshTerminalOpen = false;
+    consoleEscapeConsumed = false;
     if (sshKeyUploadFile) {
         sshKeyUploadFile.close();
     }
+    if (uploadFile) {
+        uploadFile.close();
+    }
+    if (uploadCreated && !uploadStorageName.isEmpty()) {
+        SD.remove(workspaceFilePath(uploadStorageName));
+    }
     SD.remove(kSshKeyUploadPath);
-    sshKeyUploadError = "";
+    sshKeyUploadError = String();
     sshKeyUploadBytes = 0;
-    accessPassword = "";
-    sessionToken = "";
-    csrfToken = "";
-    consoleSettings.apiKey = "";
-    consoleSettings.wifiPassword = "";
-    consoleSettings.sttApiKey = "";
-    consoleSettings.webSearchApiKey = "";
-    consoleSettings.ttsApiKey = "";
-    consoleQrPayload = "";
-    firmwareVersion = "";
+    uploadName = String();
+    uploadStorageName = String();
+    uploadError = String();
+    uploadBytes = 0;
+    uploadCreated = false;
+    uploadReplacing = false;
+    accessPassword = String();
+    sessionToken = String();
+    csrfToken = String();
+    consoleStatus = String();
+    consoleSerialInput = String();
+    consoleQrPayload = String();
+    firmwareVersion = String();
+    sessionLastActivityAt = 0;
+    loginLockedUntil = 0;
+    loginFailures = 0;
+    exitRequested = false;
+    pythonRestartRequested = false;
+    consoleSettings = Settings{};
+    activeChat = ChatDocument{};
+    std::vector<ChatSummary>().swap(consoleChats);
+    std::string().swap(activeResponse);
 }
 
 void failUpload(const String& error)
@@ -212,22 +231,6 @@ bool requestHasValidCsrf()
            constantTimeEquals(server.header("X-CardMind-CSRF"), csrfToken);
 }
 
-void sendJson(int statusCode, const JsonDocument& document)
-{
-    server.sendHeader("Cache-Control", "no-store");
-    server.setContentLength(measureJson(document));
-    server.send(statusCode, "application/json; charset=utf-8", "");
-    serializeJson(document, server.client());
-}
-
-void sendJsonError(int statusCode, const String& error)
-{
-    JsonDocument document;
-    document["ok"] = false;
-    document["error"] = error;
-    sendJson(statusCode, document);
-}
-
 std::uint64_t currentTimestamp()
 {
     const std::time_t current = std::time(nullptr);
@@ -284,16 +287,6 @@ String loginPage(const String& error)
     return page;
 }
 
-void sendConsolePage()
-{
-    server.sendHeader("Cache-Control", "no-store");
-    server.sendHeader("Content-Encoding", "gzip");
-    server.setContentLength(kWebConsolePageGzipSize);
-    server.send(200, "text/html; charset=utf-8", "");
-    server.sendContent_P(reinterpret_cast<PGM_P>(kWebConsolePageGzip),
-                         kWebConsolePageGzipSize);
-}
-
 void sendLoginPage()
 {
     server.sendHeader("Cache-Control", "no-store");
@@ -307,19 +300,19 @@ void sendRoot()
         return;
     }
     server.sendHeader("Cache-Control", "no-store");
-    sendConsolePage();
+    sendWebConsolePage(server);
 }
 
 void handleSession()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     JsonDocument document;
     document["ok"] = true;
     document["csrf"] = csrfToken;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleLogin()
@@ -353,7 +346,7 @@ void handleLogin()
 void handleLogout()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     sessionToken = "";
@@ -361,173 +354,53 @@ void handleLogout()
     server.sendHeader("Set-Cookie", "cm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleCloseConsole()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     JsonDocument document;
     document["ok"] = true;
     document["message"] = "Web Console is closing";
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
     exitRequested = true;
 }
 
 void handleState()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     JsonDocument document;
-    document["ok"] = true;
-    document["ip"] = WiFi.localIP().toString();
-    document["battery"] = M5Cardputer.Power.getBatteryLevel();
-    document["free_heap"] = ESP.getFreeHeap();
-    document["largest_heap"] = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    document["wifi_rssi"] = WiFi.RSSI();
-    document["sd_total_bytes"] = SD.totalBytes();
-    document["sd_used_bytes"] = SD.usedBytes();
-    document["active_chat_id"] = activeChat.summary.id;
-    document["active_chat_title"] = activeChat.summary.title;
-    document["active_context_messages"] = activeChat.summary.messageCount;
-    document["archived_messages"] = activeChat.summary.archivedMessageCount;
-    std::size_t activeContextBytes = 0;
-    for (const auto& message : activeChat.messages) {
-        activeContextBytes += message.content.size();
-    }
-    document["active_context_bytes"] = activeContextBytes;
-    document["maximum_context_messages"] = kMaximumStoredMessages;
-    document["maximum_context_bytes"] = kMaximumStoredHistoryBytes;
-    document["instructions"] = activeChat.instructions;
-    document["ssh_tools_enabled"] = activeChat.sshToolsEnabled;
-    document["status"] = consoleStatus;
-    document["firmware_version"] = firmwareVersion;
-    document["uptime_ms"] = millis();
-    document["minimum_heap"] = ESP.getMinFreeHeap();
-    document["stack_free"] = uxTaskGetStackHighWaterMark(nullptr);
-    document["cpu_mhz"] = getCpuFrequencyMhz();
-    document["reset_reason"] = static_cast<int>(esp_reset_reason());
-    document["wifi_ssid"] = consoleSettings.wifiSsid;
-    document["model"] = consoleSettings.model;
-    document["api_base_url"] = consoleSettings.apiBaseUrl;
-    document["api_key_configured"] = consoleSettings.apiKey.length() >= 8;
-    document["stt_base_url"] = consoleSettings.sttBaseUrl;
-    document["stt_model"] = consoleSettings.sttModel;
-    document["stt_key_configured"] = consoleSettings.sttApiKey.length() >= 8;
-    document["search_base_url"] = consoleSettings.webSearchBaseUrl;
-    document["search_key_configured"] = consoleSettings.webSearchApiKey.length() >= 8;
-    document["tts_base_url"] = consoleSettings.ttsBaseUrl;
-    document["tts_model"] = consoleSettings.ttsModel;
-    document["tts_voice"] = consoleSettings.ttsVoice;
-    document["tts_key_configured"] = consoleSettings.ttsApiKey.length() >= 8;
-    document["tts_auto_play"] = consoleSettings.ttsAutoPlay;
-    document["tts_volume"] = consoleSettings.ttsVolume;
-    document["display_brightness"] = consoleSettings.displayBrightness;
-    document["screen_sleep_minutes"] = consoleSettings.screenSleepMinutes;
-    document["keyboard_repeat_ms"] = consoleSettings.keyboardRepeatMs;
-    document["power_profile"] = consoleSettings.powerProfile;
-    const PythonModeStatus python = inspectPythonMode();
-    document["python_layout_ready"] = python.partitionLayoutReady;
-    document["python_image_ready"] = python.pythonImageReady;
-    document["python_error"] = python.error;
-    document["python_runtime_error"] = python.lastRuntimeError;
-    std::vector<SshProfile> sshProfiles;
-    std::size_t sshSelected = 0;
-    const OperationResult sshProfileResult = loadSshProfiles(sshProfiles, sshSelected);
-    if (!sshProfileResult.success) {
-        sendJsonError(500, sshProfileResult.error);
+    const WebConsoleRuntimeState runtime = {
+        consoleStatus,
+        firmwareVersion,
+        webSshTerminalOpen && webSshClient.isOpen(),
+    };
+    const OperationResult result = buildWebConsoleState(
+        consoleSettings, activeChat, consoleChats, runtime, document);
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
         return;
     }
-    const SshProfile sshProfile = sshProfiles.empty()
-        ? SshProfile{"", "", 22, "", "", SshAuthMode::Password, ""}
-        : sshProfiles[sshSelected];
-    document["ssh_name"] = sshProfile.name;
-    document["ssh_host"] = sshProfile.host;
-    document["ssh_port"] = sshProfile.port;
-    document["ssh_username"] = sshProfile.username;
-    document["ssh_auth_mode"] = sshProfile.authMode == SshAuthMode::PrivateKey ? "key" : "password";
-    document["ssh_selected"] = sshSelected;
-    document["ssh_terminal_open"] = webSshTerminalOpen && webSshClient.isOpen();
-    JsonArray sshProfileItems = document["ssh_profiles"].to<JsonArray>();
-    for (const auto& item : sshProfiles) {
-        JsonObject profileItem = sshProfileItems.add<JsonObject>();
-        profileItem["name"] = item.name;
-        profileItem["host"] = item.host;
-        profileItem["port"] = item.port;
-        profileItem["username"] = item.username;
-        profileItem["auth_mode"] = item.authMode == SshAuthMode::PrivateKey ? "key" : "password";
-    }
-    document["ssh_key_installed"] = sshPrivateKeyIsInstalled();
-    document["ssh_configured"] = sshProfileIsComplete(sshProfile);
-    JsonArray chats = document["chats"].to<JsonArray>();
-    for (const auto& chat : consoleChats) {
-        JsonObject item = chats.add<JsonObject>();
-        item["id"] = chat.id;
-        item["title"] = chat.title;
-        item["pinned"] = chat.pinned;
-        item["archived"] = chat.archived;
-        item["total_messages"] = chat.messageCount + chat.archivedMessageCount;
-    }
-    std::size_t firstMessage = activeChat.messages.size();
-    std::size_t includedBytes = 0;
-    while (firstMessage > 0) {
-        const std::size_t messageBytes = activeChat.messages[firstMessage - 1].content.size();
-        if (includedBytes + messageBytes > kMaximumStateHistoryBytes) {
-            break;
-        }
-        includedBytes += messageBytes;
-        --firstMessage;
-    }
-    JsonArray messages = document["messages"].to<JsonArray>();
-    for (std::size_t index = firstMessage; index < activeChat.messages.size(); ++index) {
-        JsonObject item = messages.add<JsonObject>();
-        item["role"] = activeChat.messages[index].role;
-        item["content"] = activeChat.messages[index].content;
-    }
-    const WorkspaceFilesResult workspace = listWorkspaceFiles();
-    if (!workspace.success) {
-        sendJsonError(500, workspace.error);
-        return;
-    }
-    JsonArray files = document["files"].to<JsonArray>();
-    for (const auto& file : workspace.files) {
-        JsonObject item = files.add<JsonObject>();
-        item["name"] = file.name;
-        item["size"] = file.size;
-    }
-    sendJson(200, document);
-}
-
-void sendSse(const char* type, const std::string& delta, const String& error)
-{
-    JsonDocument document;
-    document["type"] = type;
-    if (!delta.empty()) {
-        document["delta"] = delta;
-    }
-    if (!error.isEmpty()) {
-        document["error"] = error;
-    }
-    String output;
-    serializeJson(document, output);
-    server.sendContent("data:" + output + "\n\n");
+    sendWebJson(server, 200, document);
 }
 
 void handlePrompt()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String promptValue = server.arg("prompt");
     const std::string prompt = promptValue.c_str();
     if (prompt.empty() || prompt.size() > kMaximumPromptBytes || !isValidUtf8(prompt)) {
-        sendJsonError(400, "Prompt must be valid UTF-8 between 1 and 1200 bytes");
+        sendWebJsonError(server, 400, "Prompt must be valid UTF-8 between 1 and 1200 bytes");
         return;
     }
     server.sendHeader("Cache-Control", "no-store");
@@ -540,7 +413,7 @@ void handlePrompt()
         const OperationResult archived = archiveChatMessages(
             activeChat.summary.id, pendingFit.archived);
         if (!archived.success) {
-            sendSse("error", "", archived.error);
+            sendWebSse(server, "error", "", archived.error);
             return;
         }
         activeChat.summary.archivedMessageCount += pendingFit.archived.size();
@@ -554,7 +427,7 @@ void handlePrompt()
     activeChat.summary.updatedAt = currentTimestamp();
     OperationResult saved = saveChat(activeChat);
     if (!saved.success) {
-        sendSse("error", "", saved.error);
+        sendWebSse(server, "error", "", saved.error);
         return;
     }
     activeResponse.clear();
@@ -563,7 +436,7 @@ void handlePrompt()
     std::uint32_t lastRenderAt = 0;
     const ChatTextCallback onText = [&lastRenderAt](const std::string& text) {
         activeResponse += text;
-        sendSse("delta", text, "");
+        sendWebSse(server, "delta", text, "");
         const std::uint32_t now = millis();
         if (lastRenderAt == 0 || now - lastRenderAt >= 120) {
             renderConsoleChat();
@@ -598,7 +471,7 @@ void handlePrompt()
     if (!result.success) {
         consoleStatus = result.error;
         activeResponse = result.response;
-        sendSse("error", "", result.error);
+        sendWebSse(server, "error", "", result.error);
         renderConsoleChat();
         return;
     }
@@ -610,7 +483,7 @@ void handlePrompt()
         if (!archived.success) {
             activeResponse.clear();
             consoleStatus = archived.error;
-            sendSse("error", "", archived.error);
+            sendWebSse(server, "error", "", archived.error);
             renderConsoleChat();
             return;
         }
@@ -624,9 +497,9 @@ void handlePrompt()
     consoleStatus = saved.success ? String("Saved") : saved.error;
     if (saved.success) {
         refreshChats();
-        sendSse("done", "", "");
+        sendWebSse(server, "done", "", "");
     } else {
-        sendSse("error", "", saved.error);
+        sendWebSse(server, "error", "", saved.error);
     }
     renderConsoleChat();
 }
@@ -634,63 +507,63 @@ void handlePrompt()
 void handleSelectChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String id = server.arg("id");
     const OperationResult result = loadActiveChat(id);
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     consoleStatus = "Chat selected";
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleNewChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const ChatDocumentResult created = createChat("New chat");
     if (!created.success) {
-        sendJsonError(400, created.error);
+        sendWebJsonError(server, 400, created.error);
         return;
     }
     activeChat = created.chat;
     OperationResult result = refreshChats();
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = "New chat created";
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleInstructions()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String value = server.arg("instructions");
     const std::string instructions = value.c_str();
     if (instructions.size() > kMaximumChatInstructionsBytes || !isValidUtf8(instructions)) {
-        sendJsonError(400, "Instructions must be valid UTF-8 up to 2048 bytes");
+        sendWebJsonError(server, 400, "Instructions must be valid UTF-8 up to 2048 bytes");
         return;
     }
     activeChat.instructions = instructions;
     activeChat.summary.updatedAt = currentTimestamp();
     const OperationResult saved = saveChat(activeChat);
     if (!saved.success) {
-        sendJsonError(500, saved.error);
+        sendWebJsonError(server, 500, saved.error);
         return;
     }
     consoleStatus = instructions.empty() ? String("Instructions disabled")
@@ -698,18 +571,18 @@ void handleInstructions()
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleChatPermissions()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String requested = server.arg("ssh_tools_enabled");
     if (requested != "0" && requested != "1") {
-        sendJsonError(400, "SSH tool permission must be either 0 or 1");
+        sendWebJsonError(server, 400, "SSH tool permission must be either 0 or 1");
         return;
     }
     if (requested == "1") {
@@ -719,7 +592,7 @@ void handleChatPermissions()
         profile.password = "";
         profile.privateKeyPassphrase = "";
         if (!complete) {
-            sendJsonError(409, loaded.success
+            sendWebJsonError(server, 409, loaded.success
                 ? String("A complete selected SSH profile is required") : loaded.error);
             return;
         }
@@ -728,7 +601,7 @@ void handleChatPermissions()
     activeChat.summary.updatedAt = currentTimestamp();
     const OperationResult saved = saveChat(activeChat);
     if (!saved.success) {
-        sendJsonError(500, saved.error);
+        sendWebJsonError(server, 500, saved.error);
         return;
     }
     consoleStatus = activeChat.sshToolsEnabled
@@ -736,18 +609,18 @@ void handleChatPermissions()
         : String("Model SSH access disabled for this chat");
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleRenameChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const std::string requestedTitle = server.arg("title").c_str();
     if (requestedTitle.empty() || requestedTitle.size() > 256 || !isValidUtf8(requestedTitle)) {
-        sendJsonError(400, "Chat title must be valid UTF-8 between 1 and 256 bytes");
+        sendWebJsonError(server, 400, "Chat title must be valid UTF-8 between 1 and 256 bytes");
         return;
     }
     activeChat.summary.title = makeChatTitle(requestedTitle, kMaximumChatTitleCells).c_str();
@@ -757,20 +630,20 @@ void handleRenameChat()
         result = refreshChats();
     }
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = "Chat renamed";
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handlePinChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     activeChat.summary.pinned = !activeChat.summary.pinned;
@@ -782,19 +655,19 @@ void handlePinChat()
         result = refreshChats();
     }
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = activeChat.summary.pinned ? String("Chat pinned") : String("Chat unpinned");
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleArchiveChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     activeChat.summary.archived = !activeChat.summary.archived;
@@ -806,95 +679,95 @@ void handleArchiveChat()
         result = refreshChats();
     }
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = activeChat.summary.archived ? String("Chat archived")
                                                 : String("Chat restored");
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleDuplicateChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const ChatDocumentResult duplicated = duplicateChat(activeChat.summary.id);
     if (!duplicated.success) {
-        sendJsonError(500, duplicated.error);
+        sendWebJsonError(server, 500, duplicated.error);
         return;
     }
     activeChat = duplicated.chat;
     const OperationResult refreshed = refreshChats();
     if (!refreshed.success) {
-        sendJsonError(500, refreshed.error);
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     consoleStatus = "Chat duplicated";
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleExportChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String filename = "chat_" + activeChat.summary.id + ".md";
     const OperationResult exported = exportChatToWorkspace(
         activeChat.summary.id, filename);
     if (!exported.success) {
-        sendJsonError(400, exported.error);
+        sendWebJsonError(server, 400, exported.error);
         return;
     }
     consoleStatus = "Chat exported as " + filename;
     JsonDocument document;
     document["ok"] = true;
     document["filename"] = filename;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleExportChatBundle()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String filename = "chat_" + activeChat.summary.id + ".chat.jsonl";
     const OperationResult exported = exportChatBundleToWorkspace(
         activeChat.summary.id, filename);
     if (!exported.success) {
-        sendJsonError(400, exported.error);
+        sendWebJsonError(server, 400, exported.error);
         return;
     }
     consoleStatus = "Chat bundle exported as " + filename;
     JsonDocument document;
     document["ok"] = true;
     document["filename"] = filename;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleImportChatBundle()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const ChatDocumentResult imported = importChatBundleFromWorkspace(server.arg("name"));
     if (!imported.success) {
-        sendJsonError(400, imported.error);
+        sendWebJsonError(server, 400, imported.error);
         return;
     }
     activeChat = imported.chat;
     const OperationResult refreshed = refreshChats();
     if (!refreshed.success) {
-        sendJsonError(500, refreshed.error);
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     consoleStatus = "Chat imported";
@@ -902,13 +775,13 @@ void handleImportChatBundle()
     JsonDocument document;
     document["ok"] = true;
     document["chat_id"] = activeChat.summary.id;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleDeleteChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     OperationResult result = deleteChat(activeChat.summary.id);
@@ -916,13 +789,13 @@ void handleDeleteChat()
         result = refreshChats();
     }
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     if (consoleChats.empty()) {
         const ChatDocumentResult created = createChat("New chat");
         if (!created.success) {
-            sendJsonError(500, created.error);
+            sendWebJsonError(server, 500, created.error);
             return;
         }
         activeChat = created.chat;
@@ -931,27 +804,27 @@ void handleDeleteChat()
         result = loadActiveChat(consoleChats.front().id);
     }
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = "Chat deleted";
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSettings()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     Settings updated = consoleSettings;
     const String wifiSsid = server.arg("wifi_ssid");
     const String wifiPassword = server.arg("wifi_password");
     if (wifiSsid.isEmpty() || wifiSsid.length() > 32 || wifiPassword.length() > 63) {
-        sendJsonError(400, "Wi-Fi SSID must contain 1-32 bytes and password at most 63 bytes");
+        sendWebJsonError(server, 400, "Wi-Fi SSID must contain 1-32 bytes and password at most 63 bytes");
         return;
     }
     if (wifiSsid != updated.wifiSsid) {
@@ -969,7 +842,7 @@ void handleSettings()
     updated.model = server.arg("model");
     updated.model.trim();
     if (updated.model.length() > 120) {
-        sendJsonError(400, "Model id must not exceed 120 characters");
+        sendWebJsonError(server, 400, "Model id must not exceed 120 characters");
         return;
     }
     String sttKey = server.arg("stt_api_key");
@@ -1014,7 +887,7 @@ void handleSettings()
         repeatMs > UINT16_MAX ||
         !parseUnsignedArgument(server.arg("power_profile"), powerProfile) ||
         powerProfile > 2) {
-        sendJsonError(400, "Device preference values are outside their supported ranges");
+        sendWebJsonError(server, 400, "Device preference values are outside their supported ranges");
         return;
     }
     updated.ttsVolume = static_cast<std::uint8_t>(volume);
@@ -1024,20 +897,20 @@ void handleSettings()
     updated.powerProfile = static_cast<std::uint8_t>(powerProfile);
     const OperationResult result = saveSettings(updated);
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     consoleSettings = updated;
     consoleStatus = "Settings saved; Wi-Fi changes apply after closing the console";
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleClearChat()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     OperationResult result = clearChatHistory(activeChat.summary.id);
@@ -1048,31 +921,31 @@ void handleClearChat()
         result = refreshChats();
     }
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = "Chat messages cleared";
     renderConsoleChat();
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleArchivedMessages()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     std::uint32_t offset = 0;
     if (!parseUnsignedArgument(server.arg("offset"), offset)) {
-        sendJsonError(400, "Archive offset must be an unsigned integer");
+        sendWebJsonError(server, 400, "Archive offset must be an unsigned integer");
         return;
     }
     const ArchivedMessagesPageResult result = readArchivedChatMessages(
         activeChat.summary.id, offset, 8, 12000);
     if (!result.success) {
-        sendJsonError(500, result.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     JsonDocument document;
@@ -1085,18 +958,18 @@ void handleArchivedMessages()
         item["role"] = message.role;
         item["content"] = message.content;
     }
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleModels()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const ModelsResult result = fetchModels(consoleSettings);
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     JsonDocument document;
@@ -1105,13 +978,13 @@ void handleModels()
     for (const auto& model : result.models) {
         models.add(model);
     }
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleDiagnosticsDownload()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     String report;
@@ -1143,12 +1016,12 @@ void handleDiagnosticsDownload()
 void handlePythonStart()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const PythonModeStatus status = inspectPythonMode();
     if (!status.partitionLayoutReady || !status.pythonImageReady) {
-        sendJsonError(409, status.error);
+        sendWebJsonError(server, 409, status.error);
         return;
     }
     String password;
@@ -1165,7 +1038,7 @@ void handlePythonStart()
         result = activatePythonMode();
     }
     if (!result.success) {
-        sendJsonError(409, result.error);
+        sendWebJsonError(server, 409, result.error);
         return;
     }
     JsonDocument document;
@@ -1173,7 +1046,7 @@ void handlePythonStart()
     document["restarting"] = true;
     document["address"] = "http://" + WiFi.localIP().toString() + "/";
     document["handoff_token"] = handoffToken;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
     handoffToken = "";
     pythonRestartRequested = true;
 }
@@ -1181,19 +1054,19 @@ void handlePythonStart()
 void handleSshSettings()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     std::uint32_t port = 0;
     if (!parseUnsignedArgument(server.arg("port"), port) || port == 0 || port > 65535) {
-        sendJsonError(400, "SSH port must be between 1 and 65535");
+        sendWebJsonError(server, 400, "SSH port must be between 1 and 65535");
         return;
     }
     const bool create = server.arg("create") == "1";
     SshProfile profile = {"", "", 22, "", "", SshAuthMode::Password, ""};
     const OperationResult loaded = create ? OperationResult{true, ""} : loadSshProfile(profile);
     if (!loaded.success) {
-        sendJsonError(500, loaded.error);
+        sendWebJsonError(server, 500, loaded.error);
         return;
     }
     profile.name = server.arg("name");
@@ -1206,7 +1079,7 @@ void handleSshSettings()
     } else if (authMode == "key") {
         profile.authMode = SshAuthMode::PrivateKey;
     } else {
-        sendJsonError(400, "SSH auth mode must be 'password' or 'key'");
+        sendWebJsonError(server, 400, "SSH auth mode must be 'password' or 'key'");
         return;
     }
     if (server.arg("replace_password") == "1") {
@@ -1227,55 +1100,55 @@ void handleSshSettings()
     profile.password = "";
     profile.privateKeyPassphrase = "";
     if (!saved.success) {
-        sendJsonError(400, saved.error);
+        sendWebJsonError(server, 400, saved.error);
         return;
     }
     consoleStatus = "SSH profile saved";
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSshSelect()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     std::uint32_t index = 0;
     if (!parseUnsignedArgument(server.arg("index"), index)) {
-        sendJsonError(400, "SSH profile index must be an unsigned integer");
+        sendWebJsonError(server, 400, "SSH profile index must be an unsigned integer");
         return;
     }
     const OperationResult result = selectSshProfile(index);
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSshDelete()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     std::uint32_t index = 0;
     if (!parseUnsignedArgument(server.arg("index"), index)) {
-        sendJsonError(400, "SSH profile index must be an unsigned integer");
+        sendWebJsonError(server, 400, "SSH profile index must be an unsigned integer");
         return;
     }
     const OperationResult result = deleteSshProfile(index);
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 OperationResult finishWebSshStart()
@@ -1297,7 +1170,7 @@ OperationResult finishWebSshStart()
 void handleSshStart()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     webSshClient.close();
@@ -1305,19 +1178,19 @@ void handleSshStart()
     webSshAwaitingTrust = false;
     const OperationResult loaded = loadSshProfile(webSshProfile);
     if (!loaded.success || !sshProfileIsComplete(webSshProfile)) {
-        sendJsonError(400, loaded.success ? String("Selected SSH profile is incomplete") : loaded.error);
+        sendWebJsonError(server, 400, loaded.success ? String("Selected SSH profile is incomplete") : loaded.error);
         return;
     }
     OperationResult result = webSshClient.connect(webSshProfile, 60000);
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     const SshTrustResult trust = checkTrustedSshHost(
         webSshProfile.host, webSshProfile.port, webSshClient.fingerprint());
     if (!trust.success) {
         webSshClient.close();
-        sendJsonError(500, trust.error);
+        sendWebJsonError(server, 500, trust.error);
         return;
     }
     JsonDocument document;
@@ -1331,67 +1204,67 @@ void handleSshStart()
         document["key_type"] = webSshClient.hostKeyType();
         document["fingerprint"] = webSshClient.fingerprint();
         document["open"] = false;
-        sendJson(200, document);
+        sendWebJson(server, 200, document);
         return;
     }
     result = finishWebSshStart();
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     document["open"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSshTrust()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     if (!webSshAwaitingTrust || server.arg("fingerprint") != webSshClient.fingerprint()) {
-        sendJsonError(409, "SSH trust request does not match the pending connection");
+        sendWebJsonError(server, 409, "SSH trust request does not match the pending connection");
         return;
     }
     OperationResult result = trustSshHost(webSshProfile.host, webSshProfile.port,
                                           webSshClient.fingerprint());
     if (result.success) result = finishWebSshStart();
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
     document["open"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSshInput()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String data = server.arg("data");
     if (!webSshTerminalOpen || !webSshClient.isOpen() || data.isEmpty() || data.length() > 512) {
-        sendJsonError(409, "SSH terminal is closed or input is outside the 1-512 byte limit");
+        sendWebJsonError(server, 409, "SSH terminal is closed or input is outside the 1-512 byte limit");
         return;
     }
     const OperationResult result = webSshClient.write(
         reinterpret_cast<const std::uint8_t*>(data.c_str()), data.length(), 5000);
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSshOutput()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     std::uint8_t buffer[2048] = {};
@@ -1399,7 +1272,7 @@ void handleSshOutput()
     if (readBytes < 0) {
         webSshClient.close();
         webSshTerminalOpen = false;
-        sendJsonError(502, "SSH terminal read failed with code " + String(readBytes));
+        sendWebJsonError(server, 502, "SSH terminal read failed with code " + String(readBytes));
         return;
     }
     JsonDocument document;
@@ -1415,13 +1288,13 @@ void handleSshOutput()
         webSshProfile.password = "";
         webSshProfile.privateKeyPassphrase = "";
     }
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSshStop()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     webSshClient.close();
@@ -1431,7 +1304,7 @@ void handleSshStop()
     webSshProfile.privateKeyPassphrase = "";
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 OperationResult ensureWebSftp()
@@ -1445,17 +1318,17 @@ OperationResult ensureWebSftp()
 void handleSftpList()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const OperationResult opened = ensureWebSftp();
     if (!opened.success) {
-        sendJsonError(409, opened.error);
+        sendWebJsonError(server, 409, opened.error);
         return;
     }
     const SftpEntriesResult result = webSshClient.listSftpDirectory(server.arg("path"), 30000);
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     JsonDocument document;
@@ -1467,43 +1340,43 @@ void handleSftpList()
         item["directory"] = entry.directory;
         item["size"] = entry.size;
     }
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSftpDownload()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     OperationResult result = ensureWebSftp();
     if (result.success) result = webSshClient.downloadSftpFile(
         server.arg("path"), server.arg("name"), 60000);
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSftpUpload()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     OperationResult result = ensureWebSftp();
     if (result.success) result = webSshClient.uploadSftpFile(
         server.arg("name"), server.arg("path"), 60000);
     if (!result.success) {
-        sendJsonError(502, result.error);
+        sendWebJsonError(server, 502, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleSshKeyUploadData()
@@ -1575,31 +1448,31 @@ void handleSshKeyUploadData()
 void handleSshKeyUploadComplete()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     if (!sshKeyUploadError.isEmpty()) {
-        sendJsonError(400, sshKeyUploadError);
+        sendWebJsonError(server, 400, sshKeyUploadError);
         return;
     }
     consoleStatus = "SSH private key installed";
     JsonDocument document;
     document["ok"] = true;
     document["bytes"] = sshKeyUploadBytes;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleQrShow()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String content = server.arg("content");
     const std::string payload = content.c_str();
     if (payload.empty() || payload.size() > kMaximumQrPayloadBytes ||
         !isValidUtf8(payload)) {
-        sendJsonError(400, "QR content must be valid UTF-8 between 1 and 320 bytes");
+        sendWebJsonError(server, 400, "QR content must be valid UTF-8 between 1 and 320 bytes");
         return;
     }
     consoleQrPayload = content;
@@ -1607,24 +1480,24 @@ void handleQrShow()
     JsonDocument document;
     document["ok"] = true;
     document["bytes"] = payload.size();
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleQrFile()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const WorkspaceChunkResult result = readWorkspaceFileChunk(
         server.arg("name"), 0, kMaximumQrPayloadBytes + 1);
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     if (!result.eof || result.totalBytes == 0 ||
         result.totalBytes > kMaximumQrPayloadBytes) {
-        sendJsonError(400, "Selected file must contain 1 to 320 UTF-8 bytes for QR display");
+        sendWebJsonError(server, 400, "Selected file must contain 1 to 320 UTF-8 bytes for QR display");
         return;
     }
     consoleQrPayload = result.content.c_str();
@@ -1633,37 +1506,37 @@ void handleQrFile()
     document["ok"] = true;
     document["content"] = result.content;
     document["bytes"] = result.totalBytes;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleQrClose()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     consoleQrPayload = "";
     showWebConsoleAccess("http://" + WiFi.localIP().toString(), accessPassword);
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleFileRead()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     std::uint32_t offset = 0;
     if (!parseUnsignedArgument(server.arg("offset"), offset)) {
-        sendJsonError(400, "File offset must be an unsigned integer");
+        sendWebJsonError(server, 400, "File offset must be an unsigned integer");
         return;
     }
     const WorkspaceChunkResult result = readWorkspaceFileChunk(
         server.arg("name"), offset, kMaximumWebFileChunkBytes);
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     JsonDocument document;
@@ -1673,87 +1546,87 @@ void handleFileRead()
     document["next_offset"] = result.nextOffset;
     document["total_bytes"] = result.totalBytes;
     document["eof"] = result.eof;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleFileSave()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     std::uint32_t offset = 0;
     std::uint32_t originalBytes = 0;
     if (!parseUnsignedArgument(server.arg("offset"), offset) ||
         !parseUnsignedArgument(server.arg("original_bytes"), originalBytes)) {
-        sendJsonError(400, "File offsets must be unsigned integers");
+        sendWebJsonError(server, 400, "File offsets must be unsigned integers");
         return;
     }
     const std::string content = server.arg("content").c_str();
     if (content.size() > kMaximumWebFileChunkBytes || !isValidUtf8(content)) {
-        sendJsonError(400, "File chunk must be valid UTF-8 up to 12288 bytes");
+        sendWebJsonError(server, 400, "File chunk must be valid UTF-8 up to 12288 bytes");
         return;
     }
     const OperationResult result = replaceWorkspaceFileRange(
         server.arg("name"), offset, originalBytes, content);
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     consoleStatus = "File chunk saved";
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleFileRename()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const OperationResult result = renameWorkspaceFile(server.arg("name"), server.arg("new_name"));
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     consoleStatus = "File renamed";
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleFileDelete()
 {
     if (!requestHasValidCsrf()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const OperationResult result = deleteWorkspaceFile(server.arg("name"));
     if (!result.success) {
-        sendJsonError(400, result.error);
+        sendWebJsonError(server, 400, result.error);
         return;
     }
     consoleStatus = "File deleted";
     JsonDocument document;
     document["ok"] = true;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void handleFileDownload()
 {
     if (!sessionIsActive()) {
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     const String name = server.arg("name");
     if (!isValidWorkspaceFilename(name.c_str())) {
-        sendJsonError(400, "Invalid workspace filename");
+        sendWebJsonError(server, 400, "Invalid workspace filename");
         return;
     }
     File file = SD.open(workspaceFilePath(name), FILE_READ);
     if (!file) {
-        sendJsonError(404, "Workspace file does not exist: " + name);
+        sendWebJsonError(server, 404, "Workspace file does not exist: " + name);
         return;
     }
     server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
@@ -1848,11 +1721,11 @@ void handleFileUploadComplete()
 {
     if (!requestHasValidCsrf()) {
         failUpload("Authentication required");
-        sendJsonError(401, "Authentication required");
+        sendWebJsonError(server, 401, "Authentication required");
         return;
     }
     if (!uploadError.isEmpty()) {
-        sendJsonError(400, uploadError);
+        sendWebJsonError(server, 400, uploadError);
         return;
     }
     consoleStatus = uploadReplacing ? "File saved" : "File uploaded";
@@ -1860,7 +1733,7 @@ void handleFileUploadComplete()
     document["ok"] = true;
     document["name"] = uploadName;
     document["bytes"] = uploadBytes;
-    sendJson(200, document);
+    sendWebJson(server, 200, document);
 }
 
 void updateConsoleSerial()
@@ -1905,7 +1778,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     firmwareVersion = version;
     OperationResult result = loadSetupAccessPointPassword(accessPassword);
     if (!result.success || accessPassword.isEmpty()) {
-        clearConsoleSecrets();
+        releaseConsoleSessionState();
         return {false, initialChatId,
                 result.success ? String("Installation password is missing") : result.error};
     }
@@ -1913,7 +1786,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     Serial.flush();
     result = refreshChats();
     if (!result.success) {
-        clearConsoleSecrets();
+        releaseConsoleSessionState();
         return {false, initialChatId, result.error};
     }
     Serial.println("WEB_CONSOLE stage=load_chat");
@@ -1932,7 +1805,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         }
     }
     if (!result.success) {
-        clearConsoleSecrets();
+        releaseConsoleSessionState();
         return {false, initialChatId, result.error};
     }
     sessionToken = "";
@@ -1944,57 +1817,58 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     loginFailures = 0;
     loginLockedUntil = 0;
     if (!routesConfigured) {
-        const char* headers[] = {"Cookie", "X-CardMind-CSRF"};
-        server.collectHeaders(headers, 2);
-        server.on("/", HTTP_GET, sendRoot);
-        server.on("/login", HTTP_POST, handleLogin);
-        server.on("/logout", HTTP_POST, handleLogout);
-        server.on("/api/session", HTTP_GET, handleSession);
-        server.on("/api/console/close", HTTP_POST, handleCloseConsole);
-        server.on("/api/state", HTTP_GET, handleState);
-        server.on("/api/prompt", HTTP_POST, handlePrompt);
-        server.on("/api/chat/select", HTTP_POST, handleSelectChat);
-        server.on("/api/chat/new", HTTP_POST, handleNewChat);
-        server.on("/api/chat/instructions", HTTP_POST, handleInstructions);
-        server.on("/api/chat/permissions", HTTP_POST, handleChatPermissions);
-        server.on("/api/chat/rename", HTTP_POST, handleRenameChat);
-        server.on("/api/chat/pin", HTTP_POST, handlePinChat);
-        server.on("/api/chat/archive", HTTP_POST, handleArchiveChat);
-        server.on("/api/chat/duplicate", HTTP_POST, handleDuplicateChat);
-        server.on("/api/chat/export", HTTP_POST, handleExportChat);
-        server.on("/api/chat/export-bundle", HTTP_POST, handleExportChatBundle);
-        server.on("/api/chat/import", HTTP_POST, handleImportChatBundle);
-        server.on("/api/chat/delete", HTTP_POST, handleDeleteChat);
-        server.on("/api/chat/clear", HTTP_POST, handleClearChat);
-        server.on("/api/chat/archived", HTTP_GET, handleArchivedMessages);
-        server.on("/api/settings", HTTP_POST, handleSettings);
-        server.on("/api/models", HTTP_GET, handleModels);
-        server.on("/api/diagnostics", HTTP_GET, handleDiagnosticsDownload);
-        server.on("/api/python/start", HTTP_POST, handlePythonStart);
-        server.on("/api/ssh/settings", HTTP_POST, handleSshSettings);
-        server.on("/api/ssh/select", HTTP_POST, handleSshSelect);
-        server.on("/api/ssh/delete", HTTP_POST, handleSshDelete);
-        server.on("/api/ssh/start", HTTP_POST, handleSshStart);
-        server.on("/api/ssh/trust", HTTP_POST, handleSshTrust);
-        server.on("/api/ssh/input", HTTP_POST, handleSshInput);
-        server.on("/api/ssh/output", HTTP_GET, handleSshOutput);
-        server.on("/api/ssh/stop", HTTP_POST, handleSshStop);
-        server.on("/api/ssh/sftp/list", HTTP_GET, handleSftpList);
-        server.on("/api/ssh/sftp/download", HTTP_POST, handleSftpDownload);
-        server.on("/api/ssh/sftp/upload", HTTP_POST, handleSftpUpload);
-        server.on("/api/ssh/key", HTTP_POST,
-                  handleSshKeyUploadComplete, handleSshKeyUploadData);
-        server.on("/api/qr/show", HTTP_POST, handleQrShow);
-        server.on("/api/qr/file", HTTP_GET, handleQrFile);
-        server.on("/api/qr/close", HTTP_POST, handleQrClose);
-        server.on("/api/file", HTTP_GET, handleFileRead);
-        server.on("/api/file/save", HTTP_POST, handleFileSave);
-        server.on("/api/file/rename", HTTP_POST, handleFileRename);
-        server.on("/api/file/delete", HTTP_POST, handleFileDelete);
-        server.on("/api/file/download", HTTP_GET, handleFileDownload);
-        server.on("/api/file/upload", HTTP_POST,
-                  handleFileUploadComplete, handleFileUploadData);
-        server.onNotFound([]() { sendJsonError(404, "Not found"); });
+        const WebConsoleRouteHandlers handlers = {{
+            sendRoot,
+            handleLogin,
+            handleLogout,
+            handleSession,
+            handleCloseConsole,
+            handleState,
+            handlePrompt,
+            handleSelectChat,
+            handleNewChat,
+            handleInstructions,
+            handleChatPermissions,
+            handleRenameChat,
+            handlePinChat,
+            handleArchiveChat,
+            handleDuplicateChat,
+            handleExportChat,
+            handleExportChatBundle,
+            handleImportChatBundle,
+            handleDeleteChat,
+            handleClearChat,
+            handleArchivedMessages,
+            handleSettings,
+            handleModels,
+            handleDiagnosticsDownload,
+            handlePythonStart,
+            handleSshSettings,
+            handleSshSelect,
+            handleSshDelete,
+            handleSshStart,
+            handleSshTrust,
+            handleSshInput,
+            handleSshOutput,
+            handleSshStop,
+            handleSftpList,
+            handleSftpDownload,
+            handleSftpUpload,
+            handleSshKeyUploadComplete,
+            handleSshKeyUploadData,
+            handleQrShow,
+            handleQrFile,
+            handleQrClose,
+            handleFileRead,
+            handleFileSave,
+            handleFileRename,
+            handleFileDelete,
+            handleFileDownload,
+            handleFileUploadComplete,
+            handleFileUploadData,
+            []() { sendWebJsonError(server, 404, "Not found"); },
+        }};
+        configureWebConsoleRoutes(server, handlers);
         routesConfigured = true;
     }
     if (!serverStarted) {
@@ -2036,13 +1910,14 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     showBusyScreen("WEB CONSOLE", "Closing browser and SSH sessions...");
     // Keep the listener bound because repeated stop/begin cycles exhaust lwIP sockets.
     server.client().stop();
-    clearConsoleSecrets();
+    const String activeChatId = activeChat.summary.id;
+    releaseConsoleSessionState();
     while (!M5Cardputer.Keyboard.keyList().empty()) {
         M5Cardputer.update();
         delay(5);
     }
     Serial.println("WEB_CONSOLE result=stopped");
-    return {true, activeChat.summary.id, ""};
+    return {true, activeChatId, ""};
 }
 
 }  // namespace cardputer

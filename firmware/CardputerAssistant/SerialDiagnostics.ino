@@ -622,6 +622,47 @@ void runApiProbe()
                   connected ? "pass" : "failed");
 }
 
+void runUiBenchmark()
+{
+    constexpr std::size_t kIterations = 12;
+    const std::vector<cardputer::Message> sampleHistory = {
+        {"user", "Measure a representative CardMind chat frame."},
+        {"assistant", "Representative response with UTF-8: русский текст and status details."},
+    };
+    const std::uint32_t heapBefore = ESP.getFreeHeap();
+    const std::uint32_t largestHeapBefore =
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    std::uint64_t totalMicroseconds = 0;
+    std::uint32_t maximumMicroseconds = 0;
+    for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
+        const std::uint32_t startedAt = micros();
+        cardputer::showChat(sampleHistory, "Streaming response", "Input draft",
+                            cardputer::KeyboardLayout::English, "UI benchmark", "Saved",
+                            0, true, batteryLevel, batteryCharging);
+        const std::uint32_t elapsed = micros() - startedAt;
+        totalMicroseconds += elapsed;
+        if (elapsed > maximumMicroseconds) {
+            maximumMicroseconds = elapsed;
+        }
+    }
+    const std::uint32_t heapAfter = ESP.getFreeHeap();
+    const std::uint32_t largestHeapAfter =
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    const std::uint32_t averageMicroseconds = totalMicroseconds / kIterations;
+    const bool passed = averageMicroseconds <= 50000U && maximumMicroseconds <= 75000U &&
+        heapAfter >= heapBefore && largestHeapAfter >= largestHeapBefore;
+    render();
+    Serial.printf("UIBENCH result=%s iterations=%u average_us=%u maximum_us=%u heap_before=%u heap_after=%u largest_before=%u largest_after=%u\n",
+                  passed ? "pass" : "failed",
+                  static_cast<unsigned int>(kIterations),
+                  static_cast<unsigned int>(averageMicroseconds),
+                  static_cast<unsigned int>(maximumMicroseconds),
+                  static_cast<unsigned int>(heapBefore),
+                  static_cast<unsigned int>(heapAfter),
+                  static_cast<unsigned int>(largestHeapBefore),
+                  static_cast<unsigned int>(largestHeapAfter));
+}
+
 void handleSerialCommand(const String& command)
 {
     if (command == "PING") {
@@ -634,6 +675,10 @@ void handleSerialCommand(const String& command)
     }
     if (command == "SELFTEST") {
         Serial.printf("SELFTEST result=%s\n", runPureSelfTest() ? "pass" : "fail");
+        return;
+    }
+    if (command == "UIBENCH") {
+        runUiBenchmark();
         return;
     }
     if (command == "APITEST") {
