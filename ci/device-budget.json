@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "baseline_version": "1.12.0",
+  "baseline_observation": {
+    "console_cycles": 10,
+    "post_warmup_heap_bytes": 115932,
+    "largest_heap_block_bytes": 54260,
+    "minimum_heap_bytes": 100660,
+    "minimum_stack_free_bytes": 12192,
+    "maximum_command_latency_ms": 94
+  },
+  "limits": {
+    "post_cycle_heap_bytes_minimum": 100000,
+    "largest_heap_block_bytes_minimum": 45000,
+    "minimum_heap_bytes": 90000,
+    "stack_free_bytes_minimum": 10000,
+    "post_warmup_heap_loss_bytes_maximum": 2048,
+    "command_latency_ms_maximum": 250
+  },
+  "rationale": "The limits retain measurable headroom below the first 10-cycle CardMind 1.12.0 COM8 baseline while rejecting repeated-cycle heap loss, stack erosion, fragmentation and large local command latency regressions."
+}
