@@ -159,6 +159,7 @@ function Invoke-RegressionCase {
 $offlineCases = @(
     (New-RegressionCase -Name "status" -Command "STATUS" -CompletionPattern "^STATUS version=" -PassPattern "board_adv=yes.*microsd=ready.*chats=ready.*files=ready" -TimeoutSeconds 15),
     (New-RegressionCase -Name "pure functions" -Command "SELFTEST" -CompletionPattern "^SELFTEST result=" -PassPattern "^SELFTEST result=pass$" -TimeoutSeconds 15),
+    (New-RegressionCase -Name "display frame budget" -Command "UIBENCH" -CompletionPattern "^UIBENCH result=" -PassPattern "^UIBENCH result=pass" -TimeoutSeconds 20),
     (New-RegressionCase -Name "cancellation" -Command "CANCELTEST" -CompletionPattern "^CANCELTEST result=" -PassPattern "^CANCELTEST result=pass$" -TimeoutSeconds 20),
     (New-RegressionCase -Name "chat and SD storage" -Command "STORAGETEST" -CompletionPattern "^STORAGETEST result=" -PassPattern "^STORAGETEST result=pass$" -TimeoutSeconds 45),
     (New-RegressionCase -Name "chat quality-of-life" -Command "CHATQOLTEST" -CompletionPattern "^CHATQOLTEST result=" -PassPattern "^CHATQOLTEST result=pass" -TimeoutSeconds 90),

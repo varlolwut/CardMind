@@ -937,7 +937,14 @@ void submitPrompt()
         if (!listResult.success) {
             statusMessage += "; chat list: " + listResult.error;
         }
-        Serial.println("ERROR event=chat_completion result=failed");
+        String safeError = result.error;
+        safeError.replace("\r", " ");
+        safeError.replace("\n", " ");
+        if (safeError.length() > 180) {
+            safeError = safeError.substring(0, 180) + "...";
+        }
+        Serial.printf("ERROR event=chat_completion result=failed error=%s\n",
+                      safeError.c_str());
         render();
         return;
     }
@@ -1042,6 +1049,7 @@ void runUiSearchEndToEndTest()
 
     const bool responseReceived = history.size() >= 2 && history.back().role == "assistant" &&
         !history.back().content.empty();
+    const String submissionStatus = statusMessage;
     const String testChatId = activeChatId;
     const cardputer::OperationResult cleanup = cardputer::deleteChat(testChatId);
     const cardputer::ChatDocumentResult restored = cardputer::loadChat(originalChatId);
@@ -1061,13 +1069,23 @@ void runUiSearchEndToEndTest()
     const cardputer::OperationResult listResult = refreshChatList();
     const bool passed = responseReceived && cleanup.success && listResult.success;
     statusMessage = passed ? String() : String("E2E cleanup or response verification failed");
-    Serial.printf("E2ETEST result=%s response=%s cleanup=%s heap=%u largest_heap=%u stack_free=%u\n",
+    String safeError = passed ? String("none")
+        : (!responseReceived && !submissionStatus.isEmpty()
+            ? submissionStatus
+            : statusMessage);
+    safeError.replace("\r", " ");
+    safeError.replace("\n", " ");
+    if (safeError.length() > 180) {
+        safeError = safeError.substring(0, 180) + "...";
+    }
+    Serial.printf("E2ETEST result=%s response=%s cleanup=%s heap=%u largest_heap=%u stack_free=%u error=%s\n",
                   passed ? "pass" : "failed",
                   responseReceived ? "yes" : "no",
                   cleanup.success ? "yes" : "no",
                   static_cast<unsigned int>(ESP.getFreeHeap()),
                   static_cast<unsigned int>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
-                  static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)));
+                  static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+                  safeError.c_str());
     render();
 }
 
