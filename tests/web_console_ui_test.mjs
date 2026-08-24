@@ -66,6 +66,8 @@ const requiredFragments = [
     '/api/console/close',
     "x.address+'handoff?token='",
     'handoff_token',
+    'sshPollBusy',
+    "q('#connectSsh').disabled=sshConnected",
 ];
 
 for (const fragment of requiredFragments) {

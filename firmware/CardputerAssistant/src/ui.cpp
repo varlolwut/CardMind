@@ -293,7 +293,7 @@ void drawCarouselFrame(const std::vector<CarouselCard>& cards,
     canvas->setFont(&fonts::efontCN_10);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(5, 119);
-    canvas->print(status.isEmpty() ? "LEFT/RIGHT   ENTER open   ESC back"
+    canvas->print(status.isEmpty() ? "LEFT/RIGHT      ENTER open"
                                    : clippedLine(status, 43));
     canvas->pushSprite(0, 0);
 }
@@ -387,7 +387,10 @@ void showFilesPortal(const String& accessPointName, const String& accessPointPas
     canvas->pushSprite(0, 0);
 }
 
-void showWebConsoleAccess(const String& address, const String& accessPassword)
+void showWebConsoleAccess(const String& address,
+                          const String& accessPassword,
+                          bool sessionActive,
+                          bool passwordVisible)
 {
     canvas->fillScreen(TFT_BLACK);
     canvas->setFont(&fonts::efontCN_14);
@@ -396,23 +399,24 @@ void showWebConsoleAccess(const String& address, const String& accessPassword)
     canvas->setTextColor(TFT_WHITE, TFT_NAVY);
     canvas->setCursor(18, 1);
     canvas->print("WEB CONSOLE");
-    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->setTextColor(sessionActive ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
     canvas->setCursor(6, 27);
-    canvas->print("Open in browser:");
+    canvas->print(sessionActive ? "Browser session active" : "Waiting for browser");
     canvas->setTextColor(TFT_CYAN, TFT_BLACK);
     canvas->setCursor(6, 45);
     canvas->print(clippedLine(address, 29));
     canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     canvas->setCursor(6, 68);
-    canvas->print("Installation password:");
+    canvas->print(passwordVisible ? "Installation password:" : "Password hidden");
     canvas->setTextColor(TFT_YELLOW, TFT_BLACK);
     canvas->setCursor(6, 86);
-    canvas->print(clippedLine(accessPassword, 29));
+    canvas->print(passwordVisible ? clippedLine(accessPassword, 29)
+                                  : String("Press ENTER to reveal"));
     canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
     canvas->setFont(&fonts::efontCN_10);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
-    canvas->print("ESC close console");
+    canvas->print("ENTER reveal 30s    ESC close");
     canvas->pushSprite(0, 0);
 }
 
@@ -441,6 +445,34 @@ void showPythonWorkspaceAccess(const String& address, const String& accessPasswo
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
     canvas->print("ENTER start   ESC cancel");
+    canvas->pushSprite(0, 0);
+}
+
+void showPythonWorkspaceRunning(const String& address, const String& accessPassword)
+{
+    canvas->fillScreen(TFT_BLACK);
+    canvas->setFont(&fonts::efontCN_14);
+    canvas->fillRect(0, 0, 240, 18, TFT_NAVY);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->setCursor(6, 1);
+    canvas->print("PYTHON WORKSPACE");
+    canvas->setTextColor(TFT_GREEN, TFT_BLACK);
+    canvas->setCursor(6, 27);
+    canvas->print("Runtime starting");
+    canvas->setTextColor(TFT_CYAN, TFT_BLACK);
+    canvas->setCursor(6, 45);
+    canvas->print(clippedLine(address, 29));
+    canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    canvas->setCursor(6, 68);
+    canvas->print("Installation password:");
+    canvas->setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas->setCursor(6, 86);
+    canvas->print(clippedLine(accessPassword, 29));
+    canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
+    canvas->setFont(&fonts::efontCN_10);
+    canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
+    canvas->setCursor(4, 120);
+    canvas->print("Use browser to run or return");
     canvas->pushSprite(0, 0);
 }
 

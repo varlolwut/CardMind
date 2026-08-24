@@ -530,9 +530,7 @@ void handleKeyboard()
 
     if (currentScreen == Screen::MainCarousel) {
         if (cancelPressed) {
-            currentScreen = Screen::Chat;
-            menuStatus = "";
-            render();
+            return;
         } else if (leftPressed) {
             moveCarousel(cardputer::CarouselDirection::Previous);
         } else if (rightPressed) {
@@ -803,14 +801,15 @@ void handleKeyboard()
                     renderWebConsoleMenu();
                     return;
                 }
-                password = "";
                 result = cardputer::activatePythonMode();
                 if (!result.success) {
+                    password = "";
                     menuStatus = result.error;
                     renderWebConsoleMenu();
                     return;
                 }
-                cardputer::showBusyScreen("PYTHON WORKSPACE", "Restarting into MicroPython...");
+                cardputer::showPythonWorkspaceRunning(address, password);
+                password = "";
                 delay(800);
                 ESP.restart();
             } else if (webConsoleMenuIndex == 5) {
@@ -1648,6 +1647,11 @@ void handleKeyboard()
             }
             renderWifiPassword();
         }
+        return;
+    }
+
+    if (currentScreen == Screen::Chat && cancelPressed) {
+        openCarousel();
         return;
     }
 
