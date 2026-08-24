@@ -94,6 +94,77 @@ def prepare(source_root: Path, output_root: Path) -> None:
     shutil.copy2(source_dir / "agent_win.c", destination / "agent_win.inc")
     shutil.copy2(source_root / "COPYING", output_root / "COPYING")
 
+    mbedtls_path = destination / "mbedtls.inc"
+    mbedtls_text = mbedtls_path.read_text(encoding="utf-8")
+    rsa_public_key_result = (
+        "    size_t keylen = 0, mthlen = 0;\n"
+        "    int ret;\n"
+        "    mbedtls_rsa_context *rsa;"
+    )
+    if mbedtls_text.count(rsa_public_key_result) != 1:
+        raise ValueError("Unexpected libssh2 mbedTLS RSA public-key implementation")
+    mbedtls_text = mbedtls_text.replace(
+        rsa_public_key_result,
+        "    size_t keylen = 0, mthlen = 0;\n"
+        "    int ret = 0;\n"
+        "    mbedtls_rsa_context *rsa;",
+    )
+    rsa_public_key_encoding = (
+        "    uint32_t e_bytes, n_bytes;\n"
+        "    uint32_t len;\n"
+        "    unsigned char *key;\n"
+        "    unsigned char *p;\n\n"
+        "    e_bytes = (uint32_t)mbedtls_mpi_size(&rsa->MBEDTLS_PRIVATE(E));\n"
+        "    n_bytes = (uint32_t)mbedtls_mpi_size(&rsa->MBEDTLS_PRIVATE(N));\n\n"
+        "    /* Key form is \"ssh-rsa\" + e + n. */\n"
+        "    len = 4 + 7 + 4 + e_bytes + 4 + n_bytes;"
+    )
+    if mbedtls_text.count(rsa_public_key_encoding) != 1:
+        raise ValueError("Unexpected libssh2 mbedTLS RSA public-key encoding")
+    mbedtls_text = mbedtls_text.replace(
+        rsa_public_key_encoding,
+        "    uint32_t e_bytes, n_bytes;\n"
+        "    uint32_t e_pad, n_pad;\n"
+        "    uint32_t len;\n"
+        "    unsigned char *key;\n"
+        "    unsigned char *p;\n\n"
+        "    e_bytes = (uint32_t)mbedtls_mpi_size(&rsa->MBEDTLS_PRIVATE(E));\n"
+        "    n_bytes = (uint32_t)mbedtls_mpi_size(&rsa->MBEDTLS_PRIVATE(N));\n"
+        "    e_pad = mbedtls_mpi_bitlen(&rsa->MBEDTLS_PRIVATE(E)) % 8 == 0;\n"
+        "    n_pad = mbedtls_mpi_bitlen(&rsa->MBEDTLS_PRIVATE(N)) % 8 == 0;\n\n"
+        "    /* Key form is \"ssh-rsa\" + e + n. */\n"
+        "    len = 4 + 7 + 4 + e_pad + e_bytes + 4 + n_pad + n_bytes;",
+    )
+    rsa_public_key_values = (
+        "    _libssh2_htonu32(p, e_bytes);\n"
+        "    p += 4;\n"
+        "    mbedtls_mpi_write_binary(&rsa->MBEDTLS_PRIVATE(E), p, e_bytes);\n\n"
+        "    _libssh2_htonu32(p, n_bytes);\n"
+        "    p += 4;\n"
+        "    mbedtls_mpi_write_binary(&rsa->MBEDTLS_PRIVATE(N), p, n_bytes);"
+    )
+    if mbedtls_text.count(rsa_public_key_values) != 1:
+        raise ValueError("Unexpected libssh2 mbedTLS RSA public-key values")
+    mbedtls_path.write_text(
+        mbedtls_text.replace(
+            rsa_public_key_values,
+            "    _libssh2_htonu32(p, e_pad + e_bytes);\n"
+            "    p += 4;\n"
+            "    if(e_pad)\n"
+            "        *p++ = 0;\n"
+            "    mbedtls_mpi_write_binary(&rsa->MBEDTLS_PRIVATE(E), p, e_bytes);\n"
+            "    p += e_bytes;\n\n"
+            "    _libssh2_htonu32(p, n_pad + n_bytes);\n"
+            "    p += 4;\n"
+            "    if(n_pad)\n"
+            "        *p++ = 0;\n"
+            "    mbedtls_mpi_write_binary(&rsa->MBEDTLS_PRIVATE(N), p, n_bytes);\n"
+            "    p += n_bytes;",
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+
     crypto_path = destination / "crypto.c"
     crypto_path.write_text(
         crypto_path.read_text(encoding="utf-8").replace(

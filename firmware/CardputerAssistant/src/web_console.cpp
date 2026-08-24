@@ -1,5 +1,7 @@
 #include "web_console.h"
 
+#include <base64.h>
+
 #include "api_client.h"
 #include "chat_storage.h"
 #include "crash_journal.h"
@@ -72,6 +74,7 @@ SshProfile webSshProfile = {"", "", 22, "", "", SshAuthMode::Password, ""};
 bool webSshAwaitingTrust = false;
 bool webSshTerminalOpen = false;
 bool consoleEscapeConsumed = false;
+std::uint32_t passwordRevealUntil = 0;
 String consoleQrPayload;
 String firmwareVersion;
 bool pythonRestartRequested = false;
@@ -102,6 +105,15 @@ bool parseUnsignedArgument(const String& value, std::uint32_t& result)
     return true;
 }
 
+void closeWebSshConnection()
+{
+    webSshClient.close();
+    webSshAwaitingTrust = false;
+    webSshTerminalOpen = false;
+    webSshProfile.password = String();
+    webSshProfile.privateKeyPassphrase = String();
+}
+
 String normalizedBaseUrl(String value)
 {
     value.trim();
@@ -113,11 +125,10 @@ String normalizedBaseUrl(String value)
 
 void releaseConsoleSessionState()
 {
-    webSshClient.close();
+    closeWebSshConnection();
     webSshProfile = SshProfile{"", "", 22, "", "", SshAuthMode::Password, ""};
-    webSshAwaitingTrust = false;
-    webSshTerminalOpen = false;
     consoleEscapeConsumed = false;
+    passwordRevealUntil = 0;
     if (sshKeyUploadFile) {
         sshKeyUploadFile.close();
     }
@@ -209,12 +220,15 @@ bool constantTimeEquals(const String& left, const String& right)
     return difference == 0;
 }
 
+void renderConsoleScreen();
+
 bool sessionIsActive()
 {
     if (sessionToken.isEmpty() ||
         static_cast<std::uint32_t>(millis() - sessionLastActivityAt) > kSessionIdleMs) {
         sessionToken = "";
         csrfToken = "";
+        renderConsoleScreen();
         return false;
     }
     const String cookie = server.header("Cookie");
@@ -258,15 +272,18 @@ OperationResult loadActiveChat(const String& id)
     return {true, ""};
 }
 
-void renderConsoleChat()
+bool consolePasswordVisible()
 {
-    const String state = consoleStatus.isEmpty()
-        ? String("Web console: ") + WiFi.localIP().toString() + "  ESC exits"
-        : consoleStatus;
-    showChat(activeChat.messages, activeResponse, "", KeyboardLayout::English,
-             activeChat.summary.title, state, 0, WiFi.status() == WL_CONNECTED,
-             M5Cardputer.Power.getBatteryLevel(),
-             M5Cardputer.Power.isCharging() == m5::Power_Class::is_charging);
+    return static_cast<std::int32_t>(passwordRevealUntil - millis()) > 0;
+}
+
+void renderConsoleScreen()
+{
+    if (!consoleQrPayload.isEmpty()) {
+        return;
+    }
+    showWebConsoleAccess("http://" + WiFi.localIP().toString(), accessPassword,
+                         !sessionToken.isEmpty(), consolePasswordVisible());
 }
 
 String loginPage(const String& error)
@@ -333,14 +350,19 @@ void handleLogin()
         return;
     }
     loginFailures = 0;
-    sessionToken = randomHexToken();
-    csrfToken = randomHexToken();
+    const bool existingSession = !sessionToken.isEmpty() &&
+        static_cast<std::uint32_t>(millis() - sessionLastActivityAt) <= kSessionIdleMs;
+    if (!existingSession) {
+        sessionToken = randomHexToken();
+        csrfToken = randomHexToken();
+    }
     sessionLastActivityAt = millis();
     server.sendHeader("Set-Cookie", "cm_session=" + sessionToken +
                       "; HttpOnly; SameSite=Strict; Path=/; Max-Age=900");
     server.sendHeader("Location", "/");
     server.send(303, "text/plain", "Authenticated");
-    renderConsoleChat();
+    passwordRevealUntil = 0;
+    renderConsoleScreen();
 }
 
 void handleLogout()
@@ -355,6 +377,7 @@ void handleLogout()
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
+    renderConsoleScreen();
 }
 
 void handleCloseConsole()
@@ -403,24 +426,26 @@ void handlePrompt()
         sendWebJsonError(server, 400, "Prompt must be valid UTF-8 between 1 and 1200 bytes");
         return;
     }
+    const bool sshWasOpen = webSshTerminalOpen || webSshAwaitingTrust;
+    if (sshWasOpen) {
+        closeWebSshConnection();
+    }
     server.sendHeader("Cache-Control", "no-store");
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/event-stream; charset=utf-8", "");
+    if (sshWasOpen) {
+        sendWebSse(server, "notice", "",
+                   "SSH terminal was disconnected to free memory for the AI request");
+    }
     std::vector<Message> requestMessages = activeChat.messages;
     requestMessages.push_back({"user", prompt});
     HistoryFitResult requestFit = fitHistoryToActiveContext(requestMessages);
     activeResponse.clear();
     consoleStatus = "Streaming from web console...";
-    renderConsoleChat();
-    std::uint32_t lastRenderAt = 0;
-    const ChatTextCallback onText = [&lastRenderAt](const std::string& text) {
+    renderConsoleScreen();
+    const ChatTextCallback onText = [](const std::string& text) {
         activeResponse += text;
         sendWebSse(server, "delta", text, "");
-        const std::uint32_t now = millis();
-        if (lastRenderAt == 0 || now - lastRenderAt >= 120) {
-            renderConsoleChat();
-            lastRenderAt = now;
-        }
     };
     const ChatToolPolicy toolPolicy = resolveChatToolPolicy(
         consoleSettings, prompt, activeChat.sshToolsEnabled, sshToolIsAvailable());
@@ -451,7 +476,7 @@ void handlePrompt()
         consoleStatus = result.error;
         activeResponse = result.response;
         sendWebSse(server, "error", "", result.error);
-        renderConsoleChat();
+        renderConsoleScreen();
         return;
     }
     requestFit.retained.push_back({"assistant", result.response});
@@ -468,7 +493,7 @@ void handlePrompt()
             activeResponse.clear();
             consoleStatus = archived.error;
             sendWebSse(server, "error", "", archived.error);
-            renderConsoleChat();
+            renderConsoleScreen();
             return;
         }
         activeChat.summary.archivedMessageCount += archivedMessages.size();
@@ -489,7 +514,7 @@ void handlePrompt()
     } else {
         sendWebSse(server, "error", "", saved.error);
     }
-    renderConsoleChat();
+    renderConsoleScreen();
 }
 
 void handleSelectChat()
@@ -505,7 +530,7 @@ void handleSelectChat()
         return;
     }
     consoleStatus = "Chat selected";
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -529,7 +554,7 @@ void handleNewChat()
         return;
     }
     consoleStatus = "New chat created";
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -556,7 +581,7 @@ void handleInstructions()
     }
     consoleStatus = instructions.empty() ? String("Instructions disabled")
                                          : String("Instructions saved");
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -622,7 +647,7 @@ void handleRenameChat()
         return;
     }
     consoleStatus = "Chat renamed";
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -695,7 +720,7 @@ void handleDuplicateChat()
         return;
     }
     consoleStatus = "Chat duplicated";
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -759,7 +784,7 @@ void handleImportChatBundle()
         return;
     }
     consoleStatus = "Chat imported";
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     document["chat_id"] = activeChat.summary.id;
@@ -796,7 +821,7 @@ void handleDeleteChat()
         return;
     }
     consoleStatus = "Chat deleted";
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -913,7 +938,7 @@ void handleClearChat()
         return;
     }
     consoleStatus = "Chat messages cleared";
-    renderConsoleChat();
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -1141,13 +1166,10 @@ void handleSshDelete()
 
 OperationResult finishWebSshStart()
 {
-    OperationResult result = webSshClient.authenticate(webSshProfile, 60000);
-    if (result.success) result = webSshClient.openTerminal(120, 36, 30000);
+    OperationResult result = webSshClient.authenticate(webSshProfile, 10000);
+    if (result.success) result = webSshClient.openTerminal(120, 36, 10000);
     if (!result.success) {
-        webSshClient.close();
-        webSshProfile.password = "";
-        webSshProfile.privateKeyPassphrase = "";
-        webSshTerminalOpen = false;
+        closeWebSshConnection();
         return result;
     }
     webSshAwaitingTrust = false;
@@ -1161,15 +1183,18 @@ void handleSshStart()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    webSshClient.close();
-    webSshTerminalOpen = false;
-    webSshAwaitingTrust = false;
+    if (webSshTerminalOpen && webSshClient.isOpen()) {
+        sendWebJsonError(server, 409,
+                         "SSH terminal is already open; disconnect it before reconnecting");
+        return;
+    }
+    closeWebSshConnection();
     const OperationResult loaded = loadSshProfile(webSshProfile);
     if (!loaded.success || !sshProfileIsComplete(webSshProfile)) {
         sendWebJsonError(server, 400, loaded.success ? String("Selected SSH profile is incomplete") : loaded.error);
         return;
     }
-    OperationResult result = webSshClient.connect(webSshProfile, 60000);
+    OperationResult result = webSshClient.connect(webSshProfile, 10000);
     if (!result.success) {
         sendWebJsonError(server, 502, result.error);
         return;
@@ -1177,7 +1202,7 @@ void handleSshStart()
     const SshTrustResult trust = checkTrustedSshHost(
         webSshProfile.host, webSshProfile.port, webSshClient.fingerprint());
     if (!trust.success) {
-        webSshClient.close();
+        closeWebSshConnection();
         sendWebJsonError(server, 500, trust.error);
         return;
     }
@@ -1258,8 +1283,7 @@ void handleSshOutput()
     std::uint8_t buffer[2048] = {};
     const int readBytes = webSshTerminalOpen ? webSshClient.read(buffer, sizeof(buffer)) : 0;
     if (readBytes < 0) {
-        webSshClient.close();
-        webSshTerminalOpen = false;
+        closeWebSshConnection();
         sendWebJsonError(server, 502, "SSH terminal read failed with code " + String(readBytes));
         return;
     }
@@ -1268,13 +1292,15 @@ void handleSshOutput()
     const bool open = webSshTerminalOpen && webSshClient.isOpen();
     document["open"] = open;
     if (readBytes > 0) {
-        document["output"] = String(reinterpret_cast<const char*>(buffer), readBytes);
+        const String encoded = base64::encode(buffer, static_cast<std::size_t>(readBytes));
+        if (encoded == "-FAIL-") {
+            sendWebJsonError(server, 500, "Failed to encode SSH terminal output");
+            return;
+        }
+        document["output_base64"] = encoded;
     }
     if (!open) {
-        webSshClient.close();
-        webSshTerminalOpen = false;
-        webSshProfile.password = "";
-        webSshProfile.privateKeyPassphrase = "";
+        closeWebSshConnection();
     }
     sendWebJson(server, 200, document);
 }
@@ -1285,11 +1311,7 @@ void handleSshStop()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    webSshClient.close();
-    webSshTerminalOpen = false;
-    webSshAwaitingTrust = false;
-    webSshProfile.password = "";
-    webSshProfile.privateKeyPassphrase = "";
+    closeWebSshConnection();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -1504,7 +1526,7 @@ void handleQrClose()
         return;
     }
     consoleQrPayload = "";
-    showWebConsoleAccess("http://" + WiFi.localIP().toString(), accessPassword);
+    renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -1870,18 +1892,24 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     Serial.printf("WEB_CONSOLE result=ready address=http://%s/\n",
                   WiFi.localIP().toString().c_str());
     Serial.flush();
-    showWebConsoleAccess("http://" + WiFi.localIP().toString(), accessPassword);
+    passwordRevealUntil = millis() + 30000U;
+    renderConsoleScreen();
     bool escapeHeld = false;
+    bool enterHeld = false;
+    bool passwordWasVisible = consolePasswordVisible();
     while (!exitRequested) {
         server.handleClient();
         if (pythonRestartRequested) {
-            showBusyScreen("PYTHON WORKSPACE", "Restarting into MicroPython...");
+            showPythonWorkspaceRunning("http://" + WiFi.localIP().toString() + "/",
+                                       accessPassword);
             delay(500);
             ESP.restart();
         }
         updateConsoleSerial();
         M5Cardputer.update();
+        const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
         const bool escapePressed = consoleEscapePressed();
+        const bool enterPressed = keys.enter;
         if (consoleEscapeConsumed) {
             escapeHeld = escapePressed;
             if (!escapePressed) {
@@ -1892,6 +1920,16 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
                 exitRequested = true;
             }
             escapeHeld = escapePressed;
+        }
+        if (enterPressed && !enterHeld) {
+            passwordRevealUntil = millis() + 30000U;
+            renderConsoleScreen();
+        }
+        enterHeld = enterPressed;
+        const bool passwordIsVisible = consolePasswordVisible();
+        if (passwordIsVisible != passwordWasVisible) {
+            passwordWasVisible = passwordIsVisible;
+            renderConsoleScreen();
         }
         delay(2);
     }

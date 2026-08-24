@@ -141,7 +141,6 @@ std::vector<String> utilitiesMenuItems()
         "Calculator",
         "QR display",
         "SSH tool",
-        "System monitor",
         "Back to carousel",
     };
 }
@@ -419,37 +418,6 @@ String systemMonitorUptime()
                   static_cast<unsigned long>(minutes),
                   static_cast<unsigned long>(seconds));
     return String(value);
-}
-
-void renderSystemMonitor()
-{
-    refreshBatteryStatus();
-    const String battery = batteryLevel >= 0
-        ? String(batteryLevel) + "%" + (batteryCharging ? " charging" : " battery")
-        : String("unavailable");
-    const String wifi = WiFi.status() == WL_CONNECTED
-        ? String(WiFi.RSSI()) + " dBm"
-        : String("disconnected");
-    const std::uint64_t totalBytes = fileWorkspaceReady ? SD.totalBytes() : 0;
-    const std::uint64_t usedBytes = fileWorkspaceReady ? SD.usedBytes() : 0;
-    const String storage = fileWorkspaceReady
-        ? String(static_cast<unsigned long>(usedBytes / (1024U * 1024U))) + "/" +
-          String(static_cast<unsigned long>(totalBytes / (1024U * 1024U))) + " MiB"
-        : String("unavailable");
-    const auto line = [](const String& value) { return std::string(value.c_str()); };
-    const std::vector<std::string> lines = {
-        line("Battery  " + battery),
-        line("Wi-Fi    " + wifi),
-        line("Heap     " + String(ESP.getFreeHeap() / 1024U) + " KiB"),
-        line("Largest  " + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / 1024U) + " KiB"),
-        line("Stack    " + String(uxTaskGetStackHighWaterMark(nullptr)) + " B"),
-        line("microSD  " + storage),
-        line("CPU      " + String(getCpuFrequencyMhz()) + " MHz"),
-        line("Uptime   " + systemMonitorUptime()),
-    };
-    cardputer::showTextViewer("SYSTEM MONITOR", lines, 0,
-                             "Live every second  ESC back");
-    lastSystemMonitorRenderAt = millis();
 }
 
 void renderTimerMenu()

@@ -1,21 +1,11 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 
-const sourcePath = new URL("../firmware/CardputerAssistant/src/web_console.cpp", import.meta.url);
-const source = readFileSync(sourcePath, "utf8");
-const functionStartMatch = /void sendConsolePage\(\)\r?\n\{/.exec(source);
-const functionStart = functionStartMatch?.index ?? -1;
-const functionEndMatch = /\r?\nvoid sendLoginPage\(\)/g;
-functionEndMatch.lastIndex = Math.max(functionStart, 0);
-const functionEnd = functionEndMatch.exec(source)?.index ?? -1;
-if (functionStart < 0 || functionEnd < 0) {
-    throw new Error("Could not locate sendConsolePage in web_console.cpp");
-}
-
-const literals = [...source.slice(functionStart, functionEnd).matchAll(/R"HTML\(([\s\S]*?)\)HTML"/g)];
-if (literals.length !== 2) {
-    throw new Error(`Expected two console HTML literals, found ${literals.length}`);
-}
+const pagePath = new URL(
+    "../firmware/CardputerAssistant/assets/web_console.html",
+    import.meta.url,
+);
+const source = readFileSync(pagePath, "utf8");
 
 const previewState = {
     ip: "192.168.1.129",
@@ -95,8 +85,10 @@ const previewState = {
 };
 
 const stateScript = `const previewState=${JSON.stringify(previewState)};\n`;
-const scriptEnd = literals[1][1].replace(";refresh();", ";render(previewState);");
-const page = `${literals[0][1]}const csrf='preview';\n${stateScript}${scriptEnd}`;
+const page = source
+    .replace("let csrf=''", "let csrf='preview'")
+    .replace("</script>", `${stateScript}render(previewState);</script>`)
+    .replace("loadSession().then(refresh).catch(e=>showStatus(e.message));", "");
 const server = createServer((request, response) => {
     if (request.url !== "/" && request.url !== "/index.html") {
         response.writeHead(404, {"Content-Type": "text/plain; charset=utf-8"});

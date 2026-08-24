@@ -53,8 +53,17 @@ def main() -> None:
         raise RuntimeError("MicroPython one-time browser handoff is missing")
     if "machine.Pin(0" in source:
         raise RuntimeError("MicroPython must not treat the ADV G0 signal as a runtime button")
-    if "CardMind is restarting. Continue on the device." not in source:
-        raise RuntimeError("MicroPython return flow does not explain the controlled restart")
+    for required in (
+        "id=sideSplitter",
+        "id=outputSplitter",
+        "cardmind_python_side_width",
+        "cardmind_python_output_height",
+        "output.scrollTop=output.scrollHeight",
+        "Open CardMind WebUI",
+        "fetch('/api/session'",
+    ):
+        if required not in source:
+            raise RuntimeError("MicroPython browser workspace is missing " + required)
     start = load_function_node(source_path, "start")
     first_statement = ast.unparse(start.body[0])
     if first_statement != "esp32.Partition.mark_app_valid_cancel_rollback()":
