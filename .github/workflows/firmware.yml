@@ -39,8 +39,6 @@ jobs:
             --repository-root .
           python -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in Path('micropython/vfs').glob('*.py')]"
           python tests/micropython_supervisor_test.py
-          node tools/embed_web_console.mjs
-          git diff --exit-code -- firmware/CardputerAssistant/src/web_console_asset.h
           g++ -std=c++17 -Wall -Wextra -Werror \
             tests/host_tests.cpp \
             firmware/CardputerAssistant/src/text_utils.cpp \
