@@ -12,6 +12,17 @@ std::vector<String> voiceMenuItems()
     };
 }
 
+std::vector<String> aiMenuItems()
+{
+    return {
+        "Model: " + settings.model,
+        settings.globalInstructions.isEmpty()
+            ? String("Global instructions: OFF")
+            : String("Global instructions: ON"),
+        "Back to carousel",
+    };
+}
+
 String brightnessSettingLabel(std::uint8_t brightness)
 {
     const unsigned int percent =
@@ -385,6 +396,29 @@ void renderVoiceMenu()
 {
     cardputer::showSelectionList("VOICE", voiceMenuItems(), voiceMenuIndex,
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+void renderAiMenu()
+{
+    cardputer::showSelectionList("AI", aiMenuItems(), aiMenuIndex,
+                                 menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
+}
+
+void renderGlobalInstructions()
+{
+    cardputer::showTextEditor(
+        "GLOBAL INSTRUCTIONS", globalInstructionsInput, keyboardLayout,
+        cardputer::kMaximumChatInstructionsBytes, globalInstructionsStatus,
+        "Applied to every chat",
+        "ENTER save  FN+DEL clear  ESC back");
+}
+
+void openAiMenu()
+{
+    aiMenuIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::AiMenu;
+    renderAiMenu();
 }
 
 void renderWebConsoleMenu()

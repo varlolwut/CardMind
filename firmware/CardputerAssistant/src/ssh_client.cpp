@@ -1011,6 +1011,28 @@ OperationResult SshClient::openTerminal(std::uint32_t columns, std::uint32_t row
     return {true, ""};
 }
 
+OperationResult SshClient::resizeTerminal(std::uint32_t columns,
+                                          std::uint32_t rows,
+                                          std::uint32_t timeoutMs)
+{
+    if (implementation_ == nullptr || implementation_->channel == nullptr) {
+        return {false, "SSH terminal is not open"};
+    }
+    if (columns < 20 || columns > 240 || rows < 4 || rows > 100) {
+        return {false, "SSH terminal dimensions are out of range"};
+    }
+    const int result = runUntilComplete(
+        [this, columns, rows]() {
+            return libssh2_channel_request_pty_size_ex(
+                implementation_->channel, static_cast<int>(columns),
+                static_cast<int>(rows), 0, 0);
+        }, timeoutMs);
+    return result == 0
+        ? OperationResult{true, ""}
+        : OperationResult{false, sessionError(
+              implementation_->session, "SSH PTY resize", result)};
+}
+
 int SshClient::read(std::uint8_t* output, std::size_t maximumBytes)
 {
     if (implementation_ == nullptr || implementation_->channel == nullptr ||

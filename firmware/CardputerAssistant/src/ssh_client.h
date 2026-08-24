@@ -87,6 +87,8 @@ public:
                                  std::uint32_t timeoutMs);
     OperationResult openTerminal(std::uint32_t columns, std::uint32_t rows,
                                  std::uint32_t timeoutMs);
+    OperationResult resizeTerminal(std::uint32_t columns, std::uint32_t rows,
+                                   std::uint32_t timeoutMs);
     int read(std::uint8_t* output, std::size_t maximumBytes);
     OperationResult write(const std::uint8_t* data, std::size_t bytes,
                           std::uint32_t timeoutMs);

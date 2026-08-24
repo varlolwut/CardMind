@@ -399,18 +399,43 @@ void handleState()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const std::uint32_t startedAt = millis();
     JsonDocument document;
     const WebConsoleRuntimeState runtime = {
         consoleStatus,
         firmwareVersion,
         webSshTerminalOpen && webSshClient.isOpen(),
     };
-    const OperationResult result = buildWebConsoleState(
-        consoleSettings, activeChat, consoleChats, runtime, document);
+    const String view = server.arg("view");
+    OperationResult result = {true, ""};
+    if (view.isEmpty()) {
+        result = buildWebConsoleState(
+            consoleSettings, activeChat, consoleChats, runtime, document);
+    } else if (view == "status") {
+        buildWebConsoleStatusState(runtime, document);
+    } else if (view == "chat") {
+        buildWebConsoleChatState(consoleSettings, activeChat, consoleChats, document);
+    } else if (view == "files") {
+        result = buildWebConsoleFilesState(document);
+    } else if (view == "ssh") {
+        result = buildWebConsoleSshState(runtime, document);
+    } else if (view == "settings") {
+        buildWebConsoleSettingsState(consoleSettings, runtime, document);
+    } else {
+        sendWebJsonError(server, 400, "Unknown state view: " + view);
+        return;
+    }
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    const std::uint32_t durationMs = millis() - startedAt;
+    const std::size_t responseBytes = measureJson(document);
+    server.sendHeader("Server-Timing", "state;dur=" + String(durationMs));
+    server.sendHeader("X-CardMind-State-Bytes", String(responseBytes));
+    Serial.printf("WEB_API endpoint=state view=%s duration_ms=%u response_bytes=%u heap=%u\n",
+                  view.isEmpty() ? "all" : view.c_str(), durationMs,
+                  static_cast<unsigned int>(responseBytes), ESP.getFreeHeap());
     sendWebJson(server, 200, document);
 }
 
@@ -858,6 +883,14 @@ void handleSettings()
         sendWebJsonError(server, 400, "Model id must not exceed 120 characters");
         return;
     }
+    updated.globalInstructions = server.arg("global_instructions");
+    if (updated.globalInstructions.length() > 2048 ||
+        !isValidUtf8(std::string(updated.globalInstructions.c_str()))) {
+        sendWebJsonError(
+            server, 400,
+            "Global instructions must be valid UTF-8 and at most 2048 bytes");
+        return;
+    }
     String sttKey = server.arg("stt_api_key");
     sttKey.trim();
     if (server.arg("clear_stt_key") == "1") {
@@ -1265,6 +1298,31 @@ void handleSshInput()
     }
     const OperationResult result = webSshClient.write(
         reinterpret_cast<const std::uint8_t*>(data.c_str()), data.length(), 5000);
+    if (!result.success) {
+        sendWebJsonError(server, 502, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    sendWebJson(server, 200, document);
+}
+
+void handleSshResize()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    std::uint32_t columns = 0;
+    std::uint32_t rows = 0;
+    if (!webSshTerminalOpen || !webSshClient.isOpen() ||
+        !parseUnsignedArgument(server.arg("columns"), columns) ||
+        !parseUnsignedArgument(server.arg("rows"), rows)) {
+        sendWebJsonError(server, 409,
+                         "SSH terminal is closed or resize dimensions are invalid");
+        return;
+    }
+    const OperationResult result = webSshClient.resizeTerminal(columns, rows, 3000);
     if (!result.success) {
         sendWebJsonError(server, 502, result.error);
         return;
@@ -1823,7 +1881,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     consoleStatus = "";
     exitRequested = false;
     pythonRestartRequested = false;
-    consoleEscapeConsumed = false;
+    consoleEscapeConsumed = consoleEscapePressed();
     loginFailures = 0;
     loginLockedUntil = 0;
     if (!routesConfigured) {
@@ -1859,6 +1917,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleSshStart,
             handleSshTrust,
             handleSshInput,
+            handleSshResize,
             handleSshOutput,
             handleSshStop,
             handleSftpList,
@@ -1918,6 +1977,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         } else {
             if (escapePressed && !escapeHeld) {
                 exitRequested = true;
+                Serial.println("WEB_CONSOLE exit=keyboard");
             }
             escapeHeld = escapePressed;
         }

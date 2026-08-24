@@ -15,6 +15,7 @@ import vfs
 
 _CONFIG_NAMESPACE = "cardmind_py"
 _CARDMIND_LABEL = "cardmind"
+_CARDMIND_HANDOFF_PATH = "/sd/assistant/.python-open-web"
 _UPDATE_PATH = "/sd/assistant/update.bin"
 _SCRIPT_ROOT = "/sd/assistant/files"
 _MAXIMUM_SCRIPT_BYTES = 65536
@@ -351,7 +352,13 @@ def _send(connection, status, content_type, body, extra_headers):
     )
     for key, value in extra_headers.items():
         response += "{}: {}\r\n".format(key, value)
-    connection.send(response.encode() + b"\r\n" + encoded)
+    payload = response.encode() + b"\r\n" + encoded
+    sent = 0
+    while sent < len(payload):
+        written = connection.send(payload[sent:])
+        if written <= 0:
+            raise OSError("HTTP response connection closed before completion")
+        sent += written
 
 
 def _json_response(connection, status, value):
@@ -395,7 +402,7 @@ def _console_page():
     return """<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>CardMind Python</title><style>:root{color-scheme:dark;--bg:#0a0c12;--panel:#11141d;--line:#2b3140;--text:#edf1ff;--muted:#8d96aa;--accent:#ff6b45;--mint:#61e6b5;--side-width:260px;--output-height:230px}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui}.app{display:grid;grid-template-columns:var(--side-width) 7px minmax(0,1fr);height:100vh;min-height:560px;overflow:hidden}.side{padding:20px;overflow:auto}.main{padding:22px;display:grid;gap:10px;grid-template-rows:auto minmax(160px,1fr) 7px var(--output-height);min-width:0;min-height:0}h1,h2{margin:0 0 8px}small,p{color:var(--muted)}select,textarea,button,input{width:100%;background:#0d1412;color:var(--text);border:1px solid var(--line);padding:10px}button{font-weight:750;cursor:pointer}.primary{background:var(--accent);color:#111}.mint{border-color:#286552;color:var(--mint)}.row{display:flex;gap:8px}.row>*{flex:1}textarea{height:100%;min-height:0;resize:none;font:13px ui-monospace,monospace}.console-pane{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}.output{white-space:pre-wrap;min-height:0;margin:0;overflow:auto;background:#05070b;border:1px solid var(--line);padding:12px;font:12px ui-monospace,monospace;overscroll-behavior:contain}.status{color:var(--mint)}.splitter{background:#151a22;position:relative;touch-action:none}.splitter::after{content:'';position:absolute;background:#485264;border-radius:4px}.splitter:hover::after,.splitter:focus-visible::after{background:var(--mint)}.splitter-side{cursor:col-resize}.splitter-side::after{width:2px;height:44px;left:2px;top:calc(50% - 22px)}.splitter-output{cursor:row-resize}.splitter-output::after{height:2px;width:44px;left:calc(50% - 22px);top:2px}.handoff{min-height:100vh;display:grid;place-items:center;padding:18px}.handoff-card{width:min(430px,100%);padding:24px;background:var(--panel);border:1px solid var(--line)}.handoff-card button{margin-top:12px}.handoff-card button:disabled{opacity:.5}@media(max-width:720px){.app{display:block;height:auto;min-height:100vh;overflow:visible}.side{border-bottom:1px solid var(--line)}.splitter-side{display:none}.main{height:calc(100vh - 250px);min-height:620px;padding:14px;grid-template-rows:auto minmax(260px,1fr) 7px var(--output-height)}}</style><div class=app><aside class=side><small>CARDMIND / PYTHON</small><h1>Python workspace</h1><p>Scripts share the CardMind microSD workspace.</p><select id=files size=10></select><div class=row><button id=newFile>New</button><button id=loadFile>Open</button></div><button id=back class=mint>Return to CardMind</button><button id=restart>Restart Python</button></aside><div class='splitter splitter-side' id=sideSplitter role=separator aria-label='Resize file panel' tabindex=0></div><main class=main><header><h2 id=title>No script selected</h2><span class=status id=status>Ready</span></header><textarea id=source spellcheck=false placeholder='# Write a MicroPython script'></textarea><div class='splitter splitter-output' id=outputSplitter role=separator aria-label='Resize Python output' tabindex=0></div><section class=console-pane><div class=row><button id=save>Save file</button><button id=run class=primary>Run</button><button id=refresh>Refresh output</button></div><pre class=output id=output tabindex=0></pre></section></main></div><script>const q=s=>document.querySelector(s);const root=document.documentElement;let current='',leaving=false;async function api(path,options){const r=await fetch(path,options);const v=await r.json();if(!r.ok)throw Error(v.error||('HTTP '+r.status));return v}function message(v,bad){q('#status').textContent=v;q('#status').style.color=bad?'#ff897f':'#61e6b5'}function clamp(value,minimum,maximum){return Math.min(maximum,Math.max(minimum,value))}function setSideWidth(value){const width=clamp(value,190,480);root.style.setProperty('--side-width',width+'px');localStorage.setItem('cardmind_python_side_width',String(width))}function setOutputHeight(value){const height=clamp(value,140,Math.floor(innerHeight*.62));root.style.setProperty('--output-height',height+'px');localStorage.setItem('cardmind_python_output_height',String(height))}function bindSideSplitter(){const splitter=q('#sideSplitter');splitter.onpointerdown=event=>{splitter.setPointerCapture(event.pointerId);splitter.onpointermove=move=>setSideWidth(move.clientX);splitter.onpointerup=()=>splitter.onpointermove=null}}function bindOutputSplitter(){const splitter=q('#outputSplitter');splitter.onpointerdown=event=>{splitter.setPointerCapture(event.pointerId);splitter.onpointermove=move=>setOutputHeight(innerHeight-move.clientY-22);splitter.onpointerup=()=>splitter.onpointermove=null}}function restoreLayout(){const side=Number(localStorage.getItem('cardmind_python_side_width'));const output=Number(localStorage.getItem('cardmind_python_output_height'));if(Number.isFinite(side)&&side>0)setSideWidth(side);if(Number.isFinite(output)&&output>0)setOutputHeight(output)}function updateOutput(value){const output=q('#output');const pinned=output.scrollHeight-output.scrollTop-output.clientHeight<28;if(output.textContent!==value)output.textContent=value;if(pinned)output.scrollTop=output.scrollHeight}async function state(){if(leaving)return;try{const v=await api('/api/state');const selected=q('#files').value;q('#files').innerHTML=v.files.map(f=>`<option value="${f.name}">${f.name} · ${f.bytes} B</option>`).join('');if(selected)q('#files').value=selected;updateOutput(v.output);q('#run').disabled=v.running;message(v.running?'Running '+v.script:'Ready',false)}catch(e){message(e.message,true)}}q('#loadFile').onclick=async()=>{try{current=q('#files').value;if(!current)throw Error('Select a script');const v=await api('/api/file?name='+encodeURIComponent(current));q('#source').value=v.content;q('#title').textContent=current;message('Loaded',false)}catch(e){message(e.message,true)}};q('#newFile').onclick=()=>{const n=prompt('Script filename','script.py');if(n){current=n;q('#title').textContent=n;q('#source').value='';message('New unsaved script',false)}};q('#save').onclick=async()=>{try{if(!current)throw Error('Create or open a script first');await api('/api/file?name='+encodeURIComponent(current),{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:q('#source').value});message('Saved',false);await state()}catch(e){message(e.message,true)}};q('#run').onclick=async()=>{try{if(!current)throw Error('Create or open a script first');await api('/api/run?name='+encodeURIComponent(current),{method:'POST'});message('Started',false);setTimeout(state,250)}catch(e){message(e.message,true)}};function showHandoff(){document.body.innerHTML=`<main class=handoff><section class=handoff-card><small>CARDMIND / PYTHON</small><h1>Returning to CardMind</h1><p id=handoffStatus>Waiting for the main firmware to start…</p><button id=openCardMind class=primary disabled>Open CardMind WebUI</button></section></main>`;const button=q('#openCardMind'),status=q('#handoffStatus');button.onclick=()=>location.replace('/');const probe=async()=>{try{const response=await fetch('/api/session',{cache:'no-store'});if(response.status===401||response.ok){status.textContent='CardMind is ready.';button.disabled=false;button.focus();return}}catch(e){}setTimeout(probe,750)};setTimeout(probe,1200)}q('#refresh').onclick=state;q('#back').onclick=async()=>{if(!confirm('Return to CardMind firmware?'))return;leaving=true;q('#back').disabled=true;message('CardMind is restarting…',false);try{await api('/api/cardmind',{method:'POST'})}catch(e){}showHandoff()};q('#restart').onclick=async()=>{if(confirm('Restart Python mode?'))await api('/api/restart',{method:'POST'})};restoreLayout();bindSideSplitter();bindOutputSplitter();state();setInterval(state,2000)</script>"""
 
 
-def _handle_api(connection, method, target, headers, body):
+def _handle_api(connection, method, target, headers, body, namespace):
     if not _authorized(headers):
         _json_response(connection, "401 Unauthorized", {"error": "Session expired"})
         return
@@ -437,16 +444,19 @@ def _handle_api(connection, method, target, headers, body):
         _start_script(name)
         _json_response(connection, "202 Accepted", {"ok": True})
     elif method == "POST" and path == "/api/cardmind":
+        with open(_CARDMIND_HANDOFF_PATH, "w") as marker:
+            marker.write("1")
+        os.sync()
+        namespace.set_i32("open_web", 1)
+        namespace.commit()
         _json_response(connection, "202 Accepted", {"ok": True})
-        time.sleep_ms(150)
-        _cardmind_partition().set_boot()
-        machine.reset()
+        return "cardmind"
     elif method == "POST" and path == "/api/restart":
         _json_response(connection, "202 Accepted", {"ok": True})
-        time.sleep_ms(150)
-        machine.reset()
+        return "restart"
     else:
         _json_response(connection, "404 Not Found", {"error": "Unknown Python workspace endpoint"})
+    return ""
 
 
 def _serve(password, address, namespace):
@@ -460,6 +470,7 @@ def _serve(password, address, namespace):
     while True:
         connection, _ = listener.accept()
         connection.settimeout(5)
+        action = ""
         try:
             method, target, headers, body = _read_request(connection)
             path = target.split("?", 1)[0]
@@ -486,7 +497,7 @@ def _serve(password, address, namespace):
                 page = _console_page() if _authorized(headers) else _login_page("")
                 _send(connection, "200 OK", "text/html; charset=utf-8", page, {})
             elif path.startswith("/api/"):
-                _handle_api(connection, method, target, headers, body)
+                action = _handle_api(connection, method, target, headers, body, namespace)
             else:
                 _send(connection, "404 Not Found", "text/plain; charset=utf-8", "Not found", {})
         except (OSError, ValueError, RuntimeError) as error:
@@ -496,6 +507,11 @@ def _serve(password, address, namespace):
                 pass
         finally:
             connection.close()
+        if action:
+            if action == "cardmind":
+                _cardmind_partition().set_boot()
+            time.sleep_ms(1500)
+            machine.reset()
         gc.collect()
 
 

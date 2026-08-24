@@ -71,6 +71,8 @@ void configureWebConsoleRoutes(WebServer& server,
               handler(handlers, WebConsoleRouteHandler::SshTrust));
     server.on("/api/ssh/input", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::SshInput));
+    server.on("/api/ssh/resize", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::SshResize));
     server.on("/api/ssh/output", HTTP_GET,
               handler(handlers, WebConsoleRouteHandler::SshOutput));
     server.on("/api/ssh/stop", HTTP_POST,

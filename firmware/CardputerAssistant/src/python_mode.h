@@ -13,6 +13,12 @@ struct PythonModeStatus {
     String error;
 };
 
+struct PythonHandoffRequest {
+    bool success;
+    bool openWebConsole;
+    String error;
+};
+
 PythonModeStatus inspectPythonMode();
 OperationResult synchronizePythonModeSettings(const Settings& settings,
                                               const String& consolePassword,
@@ -21,5 +27,7 @@ OperationResult activatePythonMode();
 OperationResult stageCardMindUpdateForPython(std::uint32_t firmwareBytes,
                                              const String& sha256);
 OperationResult clearCardMindUpdateRequest();
+PythonHandoffRequest consumePythonHandoffRequest();
+PythonHandoffRequest consumePythonSdHandoffRequest();
 
 }  // namespace cardputer
