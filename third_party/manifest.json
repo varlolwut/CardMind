@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "name": "M5Stack Arduino ESP32 board package",
+      "version": "3.2.1",
+      "framework_version": "3.2.0",
+      "source": "https://github.com/espressif/arduino-esp32/tree/3.2.0",
+      "license": "LGPL-2.1-or-later",
+      "license_file": "third_party/licenses/LGPL-2.1.txt",
+      "pin": "m5stack:esp32@3.2.1",
+      "workflow_markers": ["m5stack:esp32@3.2.1"]
+    },
+    {
+      "name": "M5Cardputer",
+      "version": "1.1.1",
+      "source": "https://github.com/m5stack/M5Cardputer",
+      "license": "MIT AND BSD-3-Clause",
+      "license_file": "third_party/licenses/M5Cardputer.txt",
+      "pin": "f1392858b9994c3547120e602a57d3553d16ab01",
+      "workflow_markers": ["f1392858b9994c3547120e602a57d3553d16ab01"]
+    },
+    {
+      "name": "M5Unified",
+      "version": "0.2.20",
+      "source": "https://github.com/m5stack/M5Unified",
+      "license": "MIT",
+      "license_file": "third_party/licenses/M5Stack-MIT.txt",
+      "pin": "774d920cd6851a5231748b56ece1b073645f313f",
+      "workflow_markers": ["774d920cd6851a5231748b56ece1b073645f313f"]
+    },
+    {
+      "name": "M5GFX",
+      "version": "0.2.27",
+      "source": "https://github.com/m5stack/M5GFX",
+      "license": "MIT AND BSD-3-Clause",
+      "license_file": "third_party/licenses/M5GFX.txt",
+      "additional_license_files": ["third_party/licenses/M5GFX-eFont.txt"],
+      "pin": "93b480bb349749202c8a2a953065c8ae95f58320",
+      "workflow_markers": ["93b480bb349749202c8a2a953065c8ae95f58320"]
+    },
+    {
+      "name": "ArduinoJson",
+      "version": "7.2.1",
+      "source": "https://github.com/bblanchon/ArduinoJson/tree/v7.2.1",
+      "license": "MIT",
+      "license_file": "third_party/licenses/ArduinoJson.txt",
+      "pin": "v7.2.1",
+      "workflow_markers": ["--branch v7.2.1"]
+    },
+    {
+      "name": "libssh2",
+      "version": "1.11.1",
+      "source": "https://github.com/libssh2/libssh2/tree/libssh2-1.11.1",
+      "license": "BSD-3-Clause",
+      "license_file": "third_party/licenses/libssh2.txt",
+      "pin": "a312b43325e3383c865a87bb1d26cb52e3292641",
+      "workflow_markers": ["a312b43325e3383c865a87bb1d26cb52e3292641"]
+    },
+    {
+      "name": "MicroPython ESP32_GENERIC_S3 application image",
+      "version": "1.28.0",
+      "build": "20260406",
+      "source": "https://github.com/micropython/micropython/tree/v1.28.0",
+      "binary": "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20260406-v1.28.0.app-bin",
+      "sha256": "931f47de3076f51f386db204c2cc710d0ac42480ded50b1298cfb860e1bc1bfa",
+      "license": "MIT with bundled third-party components",
+      "license_file": "third_party/licenses/MicroPython.txt",
+      "pin": "v1.28.0",
+      "workflow_markers": [
+        "ESP32_GENERIC_S3-20260406-v1.28.0.app-bin",
+        "931f47de3076f51f386db204c2cc710d0ac42480ded50b1298cfb860e1bc1bfa"
+      ]
+    }
+  ]
+}

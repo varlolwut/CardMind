@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "firmware_version": "1.12.0",
+  "board_package": "m5stack:esp32@3.2.1",
+  "fqbn": "m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom",
+  "measurements": {
+    "app_binary_bytes": 2663520,
+    "app_partition_bytes": 4194304,
+    "app_free_bytes": 1530784,
+    "flash_text_bytes": 1449932,
+    "flash_rodata_bytes": 1112352,
+    "static_dram_bytes": 63820,
+    "iram_bytes": 77567
+  }
+}
