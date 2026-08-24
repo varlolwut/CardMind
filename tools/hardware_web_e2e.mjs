@@ -68,8 +68,38 @@ async function request(baseUrl, auth, path, options) {
 }
 
 async function state(baseUrl, auth) {
-  const response = await request(baseUrl, auth, '/api/state', {method: 'GET'});
-  return await response.json();
+  const statusResponse = await request(
+    baseUrl,
+    auth,
+    '/api/state?view=status',
+    {method: 'GET'},
+  );
+  const status = await statusResponse.json();
+  const sshResponse = await request(
+    baseUrl,
+    auth,
+    '/api/state?view=ssh',
+    {method: 'GET'},
+  );
+  return {...status, ...await sshResponse.json()};
+}
+
+async function timedStateView(baseUrl, auth, view) {
+  const startedAt = performance.now();
+  const response = await request(
+    baseUrl,
+    auth,
+    `/api/state?view=${encodeURIComponent(view)}`,
+    {method: 'GET'},
+  );
+  const body = await response.text();
+  const elapsedMs = Math.round(performance.now() - startedAt);
+  return {
+    view,
+    elapsed_ms: elapsedMs,
+    response_bytes: Buffer.byteLength(body, 'utf8'),
+    document: JSON.parse(body),
+  };
 }
 
 function memorySnapshot(label, document) {
@@ -114,6 +144,32 @@ async function stopSsh(baseUrl, auth) {
   });
 }
 
+async function verifyInteractiveSsh(baseUrl, auth) {
+  const marker = 'SSH-E2E-OK';
+  const editedCommand = `printf SSH-E2E-BADX${'\u007f'.repeat(4)}OK\r`;
+  await request(baseUrl, auth, '/api/ssh/input', {
+    method: 'POST',
+    body: form({data: editedCommand}),
+  });
+  const deadline = performance.now() + maximumRequestMs;
+  let output = '';
+  while (performance.now() < deadline) {
+    const response = await request(baseUrl, auth, '/api/ssh/output', {method: 'GET'});
+    const document = await response.json();
+    if (typeof document.output_base64 === 'string') {
+      output += Buffer.from(document.output_base64, 'base64').toString('utf8');
+      if (output.includes(marker)) {
+        return;
+      }
+    }
+    if (document.open !== true) {
+      throw new Error('SSH terminal closed before returning the interactive marker');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`SSH terminal did not return marker '${marker}'`);
+}
+
 function parseSse(text) {
   const events = [];
   for (const frame of text.replace(/\r\n?/g, '\n').split('\n\n')) {
@@ -154,12 +210,26 @@ async function main() {
   );
   const auth = await login(baseUrl, password);
   const measurements = [];
-  recordSnapshot(measurements, 'baseline', await state(baseUrl, auth));
+  const stateTimings = [];
+  for (const view of ['status', 'chat', 'files', 'ssh', 'settings']) {
+    const timing = await timedStateView(baseUrl, auth, view);
+    stateTimings.push({
+      view: timing.view,
+      elapsed_ms: timing.elapsed_ms,
+      response_bytes: timing.response_bytes,
+    });
+  }
+  const baseline = await state(baseUrl, auth);
+  console.log(JSON.stringify({stage: 'state_views', samples: stateTimings}));
+  recordSnapshot(measurements, 'baseline', baseline);
   let sshStarted = false;
   try {
+    const sshStartedAt = performance.now();
     await startSsh(baseUrl, auth);
+    const sshConnectMs = Math.round(performance.now() - sshStartedAt);
     sshStarted = true;
     recordSnapshot(measurements, 'ssh_open', await state(baseUrl, auth));
+    await verifyInteractiveSsh(baseUrl, auth);
     const activeSshPromptMs = await prompt(baseUrl, auth, 'WEB-E2E-SSH-OK');
     await stopSsh(baseUrl, auth);
     sshStarted = false;
@@ -167,6 +237,8 @@ async function main() {
     const closedSshPromptMs = await prompt(baseUrl, auth, 'WEB-E2E-CLOSED-OK');
     console.log(JSON.stringify({
       result: 'pass',
+      ssh_connect_ms: sshConnectMs,
+      interactive_ssh: 'pass',
       active_ssh_prompt_ms: activeSshPromptMs,
       closed_ssh_prompt_ms: closedSshPromptMs,
       measurements,

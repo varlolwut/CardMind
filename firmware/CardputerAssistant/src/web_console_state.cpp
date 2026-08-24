@@ -94,14 +94,41 @@ OperationResult buildWebConsoleState(const Settings& settings,
                                      const WebConsoleRuntimeState& runtime,
                                      JsonDocument& document)
 {
+    buildWebConsoleStatusState(runtime, document);
+    buildWebConsoleChatState(settings, activeChat, chats, document);
+    buildWebConsoleSettingsState(settings, runtime, document);
+    const OperationResult ssh = buildWebConsoleSshState(runtime, document);
+    if (!ssh.success) {
+        return ssh;
+    }
+    return buildWebConsoleFilesState(document);
+}
+
+void buildWebConsoleStatusState(const WebConsoleRuntimeState& runtime,
+                                JsonDocument& document)
+{
     document["ok"] = true;
     document["ip"] = WiFi.localIP().toString();
     document["battery"] = M5Cardputer.Power.getBatteryLevel();
     document["free_heap"] = ESP.getFreeHeap();
     document["largest_heap"] = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     document["wifi_rssi"] = WiFi.RSSI();
-    document["sd_total_bytes"] = SD.totalBytes();
-    document["sd_used_bytes"] = SD.usedBytes();
+    document["status"] = runtime.status;
+    document["firmware_version"] = runtime.firmwareVersion;
+    document["uptime_ms"] = millis();
+    document["minimum_heap"] = ESP.getMinFreeHeap();
+    document["stack_free"] = uxTaskGetStackHighWaterMark(nullptr);
+    document["cpu_mhz"] = getCpuFrequencyMhz();
+    document["reset_reason"] = static_cast<int>(esp_reset_reason());
+}
+
+void buildWebConsoleChatState(const Settings& settings,
+                              const ChatDocument& activeChat,
+                              const std::vector<ChatSummary>& chats,
+                              JsonDocument& document)
+{
+    document["ok"] = true;
+    document["model"] = settings.model;
     document["active_chat_id"] = activeChat.summary.id;
     document["active_chat_title"] = activeChat.summary.title;
     document["active_context_messages"] = activeChat.summary.messageCount;
@@ -115,15 +142,28 @@ OperationResult buildWebConsoleState(const Settings& settings,
     document["maximum_context_bytes"] = kMaximumStoredHistoryBytes;
     document["instructions"] = activeChat.instructions;
     document["ssh_tools_enabled"] = activeChat.sshToolsEnabled;
-    document["status"] = runtime.status;
+
+    JsonArray chatItems = document["chats"].to<JsonArray>();
+    for (const auto& chat : chats) {
+        JsonObject item = chatItems.add<JsonObject>();
+        item["id"] = chat.id;
+        item["title"] = chat.title;
+        item["pinned"] = chat.pinned;
+        item["archived"] = chat.archived;
+        item["total_messages"] = chat.messageCount + chat.archivedMessageCount;
+    }
+    appendChatMessages(activeChat, document);
+}
+
+void buildWebConsoleSettingsState(const Settings& settings,
+                                  const WebConsoleRuntimeState& runtime,
+                                  JsonDocument& document)
+{
+    document["ok"] = true;
     document["firmware_version"] = runtime.firmwareVersion;
-    document["uptime_ms"] = millis();
-    document["minimum_heap"] = ESP.getMinFreeHeap();
-    document["stack_free"] = uxTaskGetStackHighWaterMark(nullptr);
-    document["cpu_mhz"] = getCpuFrequencyMhz();
-    document["reset_reason"] = static_cast<int>(esp_reset_reason());
     document["wifi_ssid"] = settings.wifiSsid;
     document["model"] = settings.model;
+    document["global_instructions"] = settings.globalInstructions;
     document["api_base_url"] = settings.apiBaseUrl;
     document["api_key_configured"] = settings.apiKey.length() >= 8;
     document["stt_base_url"] = settings.sttBaseUrl;
@@ -146,22 +186,20 @@ OperationResult buildWebConsoleState(const Settings& settings,
     document["python_image_ready"] = python.pythonImageReady;
     document["python_error"] = python.error;
     document["python_runtime_error"] = python.lastRuntimeError;
+}
 
-    const OperationResult ssh = appendSshState(runtime, document);
-    if (!ssh.success) {
-        return ssh;
-    }
+OperationResult buildWebConsoleSshState(const WebConsoleRuntimeState& runtime,
+                                        JsonDocument& document)
+{
+    document["ok"] = true;
+    return appendSshState(runtime, document);
+}
 
-    JsonArray chatItems = document["chats"].to<JsonArray>();
-    for (const auto& chat : chats) {
-        JsonObject item = chatItems.add<JsonObject>();
-        item["id"] = chat.id;
-        item["title"] = chat.title;
-        item["pinned"] = chat.pinned;
-        item["archived"] = chat.archived;
-        item["total_messages"] = chat.messageCount + chat.archivedMessageCount;
-    }
-    appendChatMessages(activeChat, document);
+OperationResult buildWebConsoleFilesState(JsonDocument& document)
+{
+    document["ok"] = true;
+    document["sd_total_bytes"] = SD.totalBytes();
+    document["sd_used_bytes"] = SD.usedBytes();
     return appendWorkspaceState(document);
 }
 

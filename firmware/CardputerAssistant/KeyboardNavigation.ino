@@ -539,7 +539,7 @@ void handleKeyboard()
             if (carouselIndex == 0) {
                 openChatList(Screen::MainCarousel);
             } else if (carouselIndex == 1) {
-                openModelPicker(Screen::MainCarousel);
+                openAiMenu();
             } else if (carouselIndex == 2) {
                 openVoiceMenu();
             } else if (carouselIndex == 3) {
@@ -559,6 +559,95 @@ void handleKeyboard()
             } else {
                 cardputer::showFatalError("Carousel selection is out of range");
             }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::AiMenu) {
+        const std::size_t itemCount = aiMenuItems().size();
+        if (cancelPressed) {
+            currentScreen = Screen::MainCarousel;
+            menuStatus = "";
+            renderCarousel();
+        } else if (upPressed) {
+            aiMenuIndex = aiMenuIndex > 0 ? aiMenuIndex - 1 : 0;
+            renderAiMenu();
+        } else if (downPressed) {
+            aiMenuIndex = std::min(aiMenuIndex + 1, itemCount - 1);
+            renderAiMenu();
+        } else if (enterPressed) {
+            if (aiMenuIndex == 0) {
+                openModelPicker(Screen::AiMenu);
+            } else if (aiMenuIndex == 1) {
+                globalInstructionsInput = settings.globalInstructions.c_str();
+                globalInstructionsStatus = "";
+                currentScreen = Screen::GlobalInstructions;
+                renderGlobalInstructions();
+            } else {
+                currentScreen = Screen::MainCarousel;
+                menuStatus = "";
+                renderCarousel();
+            }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::GlobalInstructions) {
+        if (cancelPressed) {
+            globalInstructionsInput.clear();
+            globalInstructionsStatus = "";
+            currentScreen = Screen::AiMenu;
+            renderAiMenu();
+        } else if (keys.fn && keys.f3) {
+            keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
+                ? cardputer::KeyboardLayout::Russian
+                : cardputer::KeyboardLayout::English;
+            globalInstructionsStatus = keyboardLayout == cardputer::KeyboardLayout::English
+                ? String("English layout")
+                : String("Russian layout");
+            renderGlobalInstructions();
+        } else if (clearDraftPressed) {
+            globalInstructionsInput.clear();
+            globalInstructionsStatus = "Instructions cleared; ENTER to save";
+            renderGlobalInstructions();
+        } else if (backspacePressed) {
+            if (!globalInstructionsInput.empty()) {
+                globalInstructionsInput =
+                    cardputer::removeLastUtf8CodePoint(globalInstructionsInput);
+            }
+            globalInstructionsStatus = "";
+            renderGlobalInstructions();
+        } else if (enterPressed) {
+            cardputer::Settings updated = settings;
+            updated.globalInstructions = globalInstructionsInput.c_str();
+            const cardputer::OperationResult saved = cardputer::saveSettings(updated);
+            if (!saved.success) {
+                globalInstructionsStatus = saved.error;
+                renderGlobalInstructions();
+                return;
+            }
+            settings = updated;
+            globalInstructionsInput.clear();
+            globalInstructionsStatus = "";
+            menuStatus = settings.globalInstructions.isEmpty()
+                ? String("Global instructions disabled")
+                : String("Global instructions saved");
+            currentScreen = Screen::AiMenu;
+            renderAiMenu();
+        } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
+            for (const char character : printableNewKeys(newPresses)) {
+                const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
+                    ? cardputer::mapKeyToRussian(character)
+                    : std::string(1, character);
+                if (globalInstructionsInput.size() + text.size() >
+                    cardputer::kMaximumChatInstructionsBytes) {
+                    globalInstructionsStatus = "Instruction limit: 2048 bytes";
+                    break;
+                }
+                globalInstructionsInput += text;
+                globalInstructionsStatus = "";
+            }
+            renderGlobalInstructions();
         }
         return;
     }

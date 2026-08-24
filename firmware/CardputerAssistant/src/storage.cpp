@@ -54,6 +54,7 @@ OperationResult loadSettings(Settings& settings)
         preferences.getString("api_key", ""),
         preferences.getString("base_url", ""),
         preferences.getString("model", ""),
+        preferences.getString("global_inst", ""),
         preferences.getString("stt_key", ""),
         preferences.getString("stt_url", ""),
         preferences.getString("stt_model", ""),
@@ -94,6 +95,10 @@ OperationResult saveSettings(const Settings& settings)
     }
     if (settings.model.isEmpty()) {
         return {false, "Model id must not be empty"};
+    }
+    if (settings.globalInstructions.length() > 2048 ||
+        !isValidUtf8(std::string(settings.globalInstructions.c_str()))) {
+        return {false, "Global instructions must be valid UTF-8 and at most 2048 bytes"};
     }
     if (!settings.sttApiKey.isEmpty() && settings.sttApiKey.length() < 8) {
         return {false, "STT API key must contain at least 8 characters"};
@@ -173,6 +178,11 @@ OperationResult saveSettings(const Settings& settings)
             preferences.putString("model", settings.model), settings.model.length(), "model id");
     }
     if (result.success) {
+        result = verifyStoredLength(
+            preferences.putString("global_inst", settings.globalInstructions),
+            settings.globalInstructions.length(), "global instructions");
+    }
+    if (result.success) {
         result = verifyStoredLength(preferences.putString("stt_key", settings.sttApiKey),
                                     settings.sttApiKey.length(), "STT API key");
     }
@@ -242,6 +252,10 @@ OperationResult saveSettings(const Settings& settings)
     }
     if (result.success) {
         result = verifyStoredValue(preferences.getString("model", ""), settings.model, "model id");
+    }
+    if (result.success) {
+        result = verifyStoredValue(preferences.getString("global_inst", ""),
+                                   settings.globalInstructions, "global instructions");
     }
     if (result.success) {
         result = verifyStoredValue(
