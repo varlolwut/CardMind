@@ -9,7 +9,7 @@ const headerPath = new URL(
     "../firmware/CardputerAssistant/src/web_console_asset.h",
     import.meta.url,
 );
-const page = readFileSync(pagePath, "utf8");
+const page = readFileSync(pagePath, "utf8").replace(/\r\n/g, "\n");
 const header = readFileSync(headerPath, "utf8");
 const compressed = Buffer.from(
     [...header.matchAll(/0x([0-9a-f]{2})/g)]
