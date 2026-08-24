@@ -530,9 +530,7 @@ void handleKeyboard()
 
     if (currentScreen == Screen::MainCarousel) {
         if (cancelPressed) {
-            currentScreen = Screen::Chat;
-            menuStatus = "";
-            render();
+            return;
         } else if (leftPressed) {
             moveCarousel(cardputer::CarouselDirection::Previous);
         } else if (rightPressed) {
@@ -734,10 +732,6 @@ void handleKeyboard()
                 menuStatus = result.error;
                 currentScreen = Screen::UtilitiesMenu;
                 renderUtilitiesMenu();
-            } else if (utilitiesMenuIndex == 6) {
-                menuStatus = "";
-                currentScreen = Screen::SystemMonitor;
-                renderSystemMonitor();
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
@@ -803,14 +797,15 @@ void handleKeyboard()
                     renderWebConsoleMenu();
                     return;
                 }
-                password = "";
                 result = cardputer::activatePythonMode();
                 if (!result.success) {
+                    password = "";
                     menuStatus = result.error;
                     renderWebConsoleMenu();
                     return;
                 }
-                cardputer::showBusyScreen("PYTHON WORKSPACE", "Restarting into MicroPython...");
+                cardputer::showPythonWorkspaceRunning(address, password);
+                password = "";
                 delay(800);
                 ESP.restart();
             } else if (webConsoleMenuIndex == 5) {
@@ -824,15 +819,6 @@ void handleKeyboard()
                 menuStatus = "";
                 renderCarousel();
             }
-        }
-        return;
-    }
-
-    if (currentScreen == Screen::SystemMonitor) {
-        if (cancelPressed) {
-            currentScreen = Screen::UtilitiesMenu;
-            menuStatus = "";
-            renderUtilitiesMenu();
         }
         return;
     }
@@ -1648,6 +1634,11 @@ void handleKeyboard()
             }
             renderWifiPassword();
         }
+        return;
+    }
+
+    if (currentScreen == Screen::Chat && cancelPressed) {
+        openCarousel();
         return;
     }
 
