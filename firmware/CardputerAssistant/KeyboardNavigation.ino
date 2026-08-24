@@ -732,10 +732,6 @@ void handleKeyboard()
                 menuStatus = result.error;
                 currentScreen = Screen::UtilitiesMenu;
                 renderUtilitiesMenu();
-            } else if (utilitiesMenuIndex == 6) {
-                menuStatus = "";
-                currentScreen = Screen::SystemMonitor;
-                renderSystemMonitor();
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
@@ -823,15 +819,6 @@ void handleKeyboard()
                 menuStatus = "";
                 renderCarousel();
             }
-        }
-        return;
-    }
-
-    if (currentScreen == Screen::SystemMonitor) {
-        if (cancelPressed) {
-            currentScreen = Screen::UtilitiesMenu;
-            menuStatus = "";
-            renderUtilitiesMenu();
         }
         return;
     }
