@@ -38,6 +38,25 @@ void configureWebConsoleRoutes(WebServer& server,
               handler(handlers, WebConsoleRouteHandler::CloseConsole));
     server.on("/api/state", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/status", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/projects", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/project/select", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::SelectProject));
+    server.on("/api/project/new", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::NewProject));
+    server.on("/api/project/settings", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::ProjectSettings));
+    server.on("/api/project/rename", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::RenameProject));
+    server.on("/api/project/duplicate", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::DuplicateProject));
+    server.on("/api/project/archive", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::ArchiveProject));
+    server.on("/api/project/delete", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::DeleteProject));
+    server.on("/api/project/links", HTTP_GET,
+              handler(handlers, WebConsoleRouteHandler::ProjectLinks));
+    server.on("/api/project/link", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::ProjectLinkUpdate));
     server.on("/api/chats", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/chat", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/files", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));

@@ -34,6 +34,6 @@ network path between CardMind and the SSH server.
 
 Open a chat's details on the Cardputer or in the Web console to grant that chat
 permission to run SSH commands. The permission is off by default, belongs only to
-that chat, and is preserved when the chat is duplicated. Exported chat bundles do
-not include it. CardMind refuses model-initiated SSH until a complete profile exists
-and its current host fingerprint has already been trusted.
+that chat, and is preserved when the chat is duplicated. Imported project bundles
+always reset it to disabled. CardMind refuses model-initiated SSH until a complete
+profile exists and its current host fingerprint has already been trusted.

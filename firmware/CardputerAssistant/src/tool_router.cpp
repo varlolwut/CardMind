@@ -80,4 +80,18 @@ ToolExecutionResult routeToolCall(const Settings& settings,
     return unavailableTool(call.name);
 }
 
+ToolExecutionResult routeProjectToolCall(const Settings& settings,
+                                         const ChatToolPolicy& policy,
+                                         const String& projectId,
+                                         const ToolCall& call,
+                                         const CancelCallback& isCancelled)
+{
+    if (isWorkspaceToolName(call.name)) {
+        return policy.workspaceEnabled
+            ? executeProjectWorkspaceTool(projectId, call)
+            : deniedTool("Workspace");
+    }
+    return routeToolCall(settings, policy, call, isCancelled);
+}
+
 }  // namespace cardputer

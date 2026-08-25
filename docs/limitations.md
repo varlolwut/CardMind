@@ -12,13 +12,20 @@
 
 ## Current firmware limits
 
-- Up to 20 chats.
-- Active context: 64 messages and 32,768 UTF-8 bytes per chat; older complete turns
-  are archived on microSD.
-- Chat instructions: 2,048 bytes.
-- Workspace: up to 40 supported files; 491,520 bytes per file.
-- Supported workspace formats: `.txt`, `.md`, `.json`, `.jsonl`, `.csv`, `.html`,
-  `.svg`, and `.py`; text must be valid UTF-8.
+- Projects and chats use paginated microSD indexes rather than a small in-memory count.
+  The current implementation indexes up to 4,096 Shared workspace entries; practical
+  project and chat capacity is otherwise bounded by microSD space and index integrity.
+- Request context is configurable per project from 8 KiB to 256 KiB. The default is
+  32 KiB. Complete raw history stays on microSD and does not have a fixed 16- or
+  64-message ceiling.
+- Project and chat instructions: 16 KiB each. A compacted context summary may use up
+  to 128 KiB on microSD.
+- A typed or pasted chat prompt is limited to 16 KiB of valid UTF-8.
+- Workspace file: 256 MiB. Nested relative UTF-8 paths are supported; absolute paths,
+  traversal, control characters, and internal `.tmp`/`.bak` targets are rejected.
+- Arbitrary binary files may be stored, downloaded, copied, and transferred over SFTP.
+  Editing and model read/append tools require valid UTF-8 text and use bounded internal
+  windows of at most 12 KiB per operation.
 - QR display: up to 320 UTF-8 bytes. Longer files must be shortened before they can
   be rendered as a QR code on the 240 × 135 display.
 - Voice recording: up to 60 seconds. TTS input: up to 5,000 bytes.
@@ -26,7 +33,9 @@
 - Web sessions expire after 15 minutes of inactivity.
 
 Large files behave as complete files in the UI. The firmware transfers and commits
-them incrementally because loading 480 KiB beside Wi-Fi and TLS state is unsafe.
+them incrementally because loading a multi-megabyte document beside Wi-Fi and TLS
+state is unsafe. Replacement also needs enough temporary free space plus a small
+recovery floor; only the operation that cannot complete is rejected.
 
 ## Provider compatibility
 

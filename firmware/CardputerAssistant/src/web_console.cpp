@@ -7,6 +7,10 @@
 #include "crash_journal.h"
 #include "file_workspace.h"
 #include "python_mode.h"
+#include "project_bundle.h"
+#include "project_chat_storage.h"
+#include "project_storage.h"
+#include "sd_storage.h"
 #include "storage.h"
 #include "ssh_client.h"
 #include "ssh_tool.h"
@@ -40,12 +44,14 @@ namespace {
 constexpr std::uint32_t kSessionIdleMs = 15U * 60U * 1000U;
 constexpr std::uint32_t kLoginLockMs = 30U * 1000U;
 constexpr std::size_t kMaximumLoginFailures = 5;
-constexpr std::size_t kMaximumPromptBytes = 1200;
+constexpr std::size_t kMaximumPromptBytes = 16384;
 constexpr std::size_t kMaximumWebFileChunkBytes = 12288;
 
 WebServer server(80);
 Settings consoleSettings;
 ChatDocument activeChat;
+ProjectDocument activeProject;
+std::vector<ProjectSummary> consoleProjects;
 std::vector<ChatSummary> consoleChats;
 std::vector<WorkspaceFile> consoleFiles;
 std::vector<SshProfile> consoleSshProfiles;
@@ -55,6 +61,10 @@ bool filesIndexReady = false;
 bool sshProfilesReady = false;
 std::uint32_t chatsRevision = 0;
 std::uint32_t chatRevision = 0;
+std::uint32_t projectsRevision = 0;
+std::uint32_t projectRevision = 0;
+std::uint32_t chatsNextOffset = 0;
+bool chatsPageEof = true;
 std::uint32_t filesRevision = 0;
 std::uint32_t sshRevision = 0;
 std::uint32_t settingsRevision = 0;
@@ -243,6 +253,8 @@ void releaseConsoleSessionState()
     pythonRestartRequested = false;
     consoleSettings = Settings{};
     activeChat = ChatDocument{};
+    activeProject = ProjectDocument{};
+    std::vector<ProjectSummary>().swap(consoleProjects);
     std::vector<ChatSummary>().swap(consoleChats);
     std::vector<WorkspaceFile>().swap(consoleFiles);
     std::vector<SshProfile>().swap(consoleSshProfiles);
@@ -252,6 +264,10 @@ void releaseConsoleSessionState()
     sshProfilesReady = false;
     chatsRevision = 0;
     chatRevision = 0;
+    projectsRevision = 0;
+    projectRevision = 0;
+    chatsNextOffset = 0;
+    chatsPageEof = true;
     filesRevision = 0;
     sshRevision = 0;
     settingsRevision = 0;
@@ -347,20 +363,36 @@ std::uint64_t currentTimestamp()
 OperationResult refreshChats()
 {
     const std::uint32_t startedAt = millis();
-    const ChatsResult result = listChats();
+    const ProjectChatsPageResult result = listProjectChatsPage(
+        activeProject.summary.id, 0, kMaximumProjectPageEntries);
     recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         return {false, result.error};
     }
     consoleChats = result.chats;
+    chatsNextOffset = result.nextOffset;
+    chatsPageEof = result.eof;
     ++chatsRevision;
+    return {true, ""};
+}
+
+OperationResult refreshProjects()
+{
+    const std::uint32_t startedAt = millis();
+    const ProjectsPageResult result = listProjectsPage(0, kMaximumProjectPageEntries);
+    recordWebSdRead(millis() - startedAt);
+    if (!result.success) {
+        return {false, result.error};
+    }
+    consoleProjects = result.projects;
+    ++projectsRevision;
     return {true, ""};
 }
 
 OperationResult refreshFiles()
 {
     const std::uint32_t startedAt = millis();
-    const WorkspaceFilesResult result = listWorkspaceFiles();
+    const WorkspaceFilesPageResult result = listWorkspaceFilesPage(0, 64);
     recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         return {false, result.error};
@@ -398,7 +430,8 @@ OperationResult refreshSshProfiles()
 OperationResult loadActiveChat(const String& id)
 {
     const std::uint32_t startedAt = millis();
-    const ChatDocumentResult loaded = loadChat(id);
+    const ChatDocumentResult loaded = loadProjectChat(
+        activeProject.summary.id, id, 96, 131072);
     recordWebSdRead(millis() - startedAt);
     if (!loaded.success) {
         return {false, loaded.error};
@@ -412,12 +445,156 @@ OperationResult loadActiveChat(const String& id)
 OperationResult saveActiveChat()
 {
     const std::uint32_t startedAt = millis();
-    const OperationResult result = saveChat(activeChat);
+    const OperationResult result = saveProjectChatMetadata(activeChat);
     recordWebSdWrite(millis() - startedAt);
     if (result.success) {
         ++chatRevision;
     }
     return result;
+}
+
+OperationResult saveActiveChatSelection(const String& chatId)
+{
+    ProjectDocumentResult stored = loadProject(activeProject.summary.id);
+    if (!stored.success) {
+        return {false, stored.error};
+    }
+    stored.project.activeChatId = chatId;
+    const OperationResult result = saveProject(stored.project);
+    if (result.success) {
+        activeProject = stored.project;
+    }
+    return result;
+}
+
+OperationResult selectActiveProject(const String& id)
+{
+    ProjectDocumentResult loaded = loadProject(id);
+    if (!loaded.success) {
+        return {false, loaded.error};
+    }
+    ProjectStorageManifestResult manifest = loadProjectStorageManifest();
+    if (!manifest.success) {
+        return {false, manifest.error};
+    }
+    manifest.manifest.activeProjectId = id;
+    ++manifest.manifest.revision;
+    OperationResult result = saveProjectStorageManifest(manifest.manifest);
+    if (!result.success) {
+        return result;
+    }
+    activeProject = loaded.project;
+    ++projectRevision;
+    result = refreshChats();
+    if (!result.success) {
+        return result;
+    }
+    if (!activeProject.activeChatId.isEmpty()) {
+        result = loadActiveChat(activeProject.activeChatId);
+    } else if (!consoleChats.empty()) {
+        result = loadActiveChat(consoleChats.front().id);
+    } else {
+        const ChatDocumentResult created = createProjectChat(id, "New chat");
+        if (!created.success) {
+            return {false, created.error};
+        }
+        activeChat = created.chat;
+        result = saveActiveChatSelection(created.chat.summary.id);
+        if (result.success) {
+            ++chatRevision;
+            ++projectRevision;
+            result = refreshChats();
+        }
+    }
+    if (!result.success) {
+        return result;
+    }
+    result = saveActiveChatSelection(activeChat.summary.id);
+    if (result.success) {
+        ++projectRevision;
+    }
+    return result;
+}
+
+std::string effectiveProjectChatInstructions(const ProjectDocument& project,
+                                             const ChatDocument& chat)
+{
+    std::string result;
+    if (!project.instructions.empty()) {
+        result = "Project instructions supplied by the user:\n" + project.instructions;
+    }
+    if (!chat.instructions.empty()) {
+        if (!result.empty()) result += "\n\n";
+        result += "Chat-specific instructions override conflicting project instructions:\n";
+        result += chat.instructions;
+    }
+    if (!chat.contextSummary.empty()) {
+        if (!result.empty()) result += "\n\n";
+        result += "Conversation summary for turns omitted from the active context:\n";
+        result += chat.contextSummary;
+    }
+    return result;
+}
+
+OperationResult regenerateWebContextSummary(const std::vector<Message>& omitted)
+{
+    if (omitted.empty()) {
+        return {true, ""};
+    }
+    ChatDocumentResult stored = loadProjectChat(
+        activeProject.summary.id, activeChat.summary.id, 1, 1);
+    if (!stored.success) {
+        return {false, stored.error};
+    }
+    std::string transcript;
+    transcript.reserve(32768);
+    if (!stored.chat.contextSummary.empty()) {
+        transcript += "Previous summary:\n";
+        transcript += stored.chat.contextSummary;
+        transcript += "\n\nNewly omitted messages:\n";
+    }
+    std::uint32_t includedMessages = 0;
+    for (const Message& message : omitted) {
+        const std::string prefix = message.role == "user" ? "You: " : "AI: ";
+        if (transcript.size() + prefix.size() + message.content.size() + 1 > 32768) {
+            break;
+        }
+        transcript += prefix;
+        transcript += message.content;
+        transcript += '\n';
+        ++includedMessages;
+    }
+    if (includedMessages == 0) {
+        return {false, "Omitted messages exceed the context summary request budget"};
+    }
+    Settings summarySettings = consoleSettings;
+    summarySettings.globalInstructions = "";
+    if (!activeProject.model.isEmpty()) summarySettings.model = activeProject.model;
+    const std::vector<Message> request = {{
+        "user",
+        "Create a compact factual conversation summary. Preserve decisions, names, "
+        "constraints, unresolved questions and file or command references. Do not add "
+        "facts. Return only the summary.\n\n" + transcript,
+    }};
+    const ChatResult summary = streamChatCompletionWithBudget(
+        summarySettings, request,
+        "This is a context compaction operation, not a user-facing answer.",
+        768, [](const std::string&) {}, []() {
+            M5Cardputer.update();
+            return consoleEscapePressed() || !server.client().connected();
+        });
+    if (!summary.success) {
+        return {false, "Context summary failed: " + summary.error};
+    }
+    stored = loadProjectChat(activeProject.summary.id, activeChat.summary.id, 1, 1);
+    if (!stored.success) {
+        return {false, stored.error};
+    }
+    stored.chat.contextSummary = summary.response;
+    stored.chat.summarizedMessageCount = std::min(
+        stored.chat.summary.messageCount,
+        stored.chat.summarizedMessageCount + includedMessages);
+    return saveProjectChatMetadata(stored.chat);
 }
 
 bool consolePasswordVisible()
@@ -556,6 +733,7 @@ void handleState()
     String view = server.arg("view");
     const String path = server.uri();
     if (path == "/api/status") view = "status";
+    else if (path == "/api/projects") view = "projects";
     else if (path == "/api/chats") view = "chats";
     else if (path == "/api/chat") view = "chat";
     else if (path == "/api/files") view = "files";
@@ -563,20 +741,87 @@ void handleState()
     else if (path == "/api/settings") view = "settings";
     if (view == "status") {
         buildWebConsoleStatusState(runtime, webDiagnosticsEnabled(), document);
-    } else if (view == "chats") {
-        buildWebConsoleChatsState(consoleChats, chatsRevision, document);
-    } else if (view == "chat") {
-        buildWebConsoleChatState(consoleSettings, activeChat, chatRevision, document);
-    } else if (view == "files") {
-        if (!filesIndexReady) {
-            const OperationResult refreshed = refreshFiles();
-            if (!refreshed.success) {
-                sendWebJsonError(server, 500, refreshed.error);
-                return;
-            }
+    } else if (view == "projects") {
+        std::uint32_t offset = 0;
+        if (!server.arg("offset").isEmpty() &&
+            !parseUnsignedArgument(server.arg("offset"), offset)) {
+            sendWebJsonError(server, 400, "Project offset must be an unsigned integer");
+            return;
         }
-        buildWebConsoleFilesState(consoleFiles, SD.totalBytes(), SD.usedBytes(),
+        const ProjectsPageResult page = listProjectsPage(
+            offset, kMaximumProjectPageEntries);
+        if (!page.success) {
+            sendWebJsonError(server, 500, page.error);
+            return;
+        }
+        document["ok"] = true;
+        document["projects_revision"] = projectsRevision;
+        document["active_project_id"] = activeProject.summary.id;
+        document["next_offset"] = page.nextOffset;
+        document["eof"] = page.eof;
+        JsonArray projects = document["projects"].to<JsonArray>();
+        for (const ProjectSummary& project : page.projects) {
+            JsonObject item = projects.add<JsonObject>();
+            item["id"] = project.id;
+            item["title"] = project.title;
+            item["chat_count"] = project.chatCount;
+            item["archived"] = project.archived;
+        }
+    } else if (view == "chats") {
+        std::uint32_t offset = 0;
+        if (!server.arg("offset").isEmpty() &&
+            !parseUnsignedArgument(server.arg("offset"), offset)) {
+            sendWebJsonError(server, 400, "Chat offset must be an unsigned integer");
+            return;
+        }
+        const ProjectChatsPageResult page = listProjectChatsPage(
+            activeProject.summary.id, offset, kMaximumProjectPageEntries);
+        if (!page.success) {
+            sendWebJsonError(server, 500, page.error);
+            return;
+        }
+        buildWebConsoleChatsState(page.chats, chatsRevision, document);
+        document["project_id"] = activeProject.summary.id;
+        document["next_offset"] = page.nextOffset;
+        document["eof"] = page.eof;
+    } else if (view == "chat") {
+        Settings requestSettings = consoleSettings;
+        if (!activeProject.model.isEmpty()) requestSettings.model = activeProject.model;
+        buildWebConsoleChatState(requestSettings, activeChat, chatRevision, document);
+        document["project_id"] = activeProject.summary.id;
+        document["project_title"] = activeProject.summary.title;
+        document["project_archived"] = activeProject.summary.archived;
+        document["project_model"] = activeProject.model;
+        document["project_instructions"] = activeProject.instructions;
+        document["context_byte_budget"] = activeProject.contextByteBudget;
+        document["maximum_output_tokens"] = activeProject.maximumOutputTokens;
+        document["automatic_compaction"] = activeProject.automaticCompaction;
+        document["context_summary"] = activeChat.contextSummary;
+        document["summarized_messages"] = activeChat.summarizedMessageCount;
+        document["total_messages"] = activeChat.summary.messageCount;
+        const std::uint32_t displayedMessages =
+            document["messages"].as<JsonArrayConst>().size();
+        document["history_before_offset"] = activeChat.summary.messageCount > displayedMessages
+            ? activeChat.summary.messageCount - displayedMessages
+            : 0;
+        document["maximum_context_messages"] = 0;
+        document["maximum_context_bytes"] = activeProject.contextByteBudget;
+    } else if (view == "files") {
+        std::uint32_t offset = 0;
+        if (!server.arg("offset").isEmpty() &&
+            !parseUnsignedArgument(server.arg("offset"), offset)) {
+            sendWebJsonError(server, 400, "File offset must be an unsigned integer");
+            return;
+        }
+        const WorkspaceFilesPageResult page = listWorkspaceFilesPage(offset, 64);
+        if (!page.success) {
+            sendWebJsonError(server, 500, page.error);
+            return;
+        }
+        buildWebConsoleFilesState(page.files, SD.totalBytes(), SD.usedBytes(),
                                   filesRevision, document);
+        document["next_offset"] = page.nextOffset;
+        document["eof"] = page.eof;
     } else if (view == "ssh") {
         if (!sshProfilesReady) {
             const OperationResult refreshed = refreshSshProfiles();
@@ -639,8 +884,44 @@ void handlePrompt()
     const String promptValue = server.arg("prompt");
     const std::string prompt = promptValue.c_str();
     if (prompt.empty() || prompt.size() > kMaximumPromptBytes || !isValidUtf8(prompt)) {
-        sendWebJsonError(server, 400, "Prompt must be valid UTF-8 between 1 and 1200 bytes");
+        sendWebJsonError(server, 400, "Prompt must be valid UTF-8 between 1 and 16384 bytes");
         return;
+    }
+    const ChatDocumentResult storedChat = loadProjectChat(
+        activeProject.summary.id, activeChat.summary.id, 96, 131072);
+    if (!storedChat.success) {
+        sendWebJsonError(server, 500, storedChat.error);
+        return;
+    }
+    std::vector<Message> requestMessages = storedChat.chat.messages;
+    requestMessages.push_back({"user", prompt});
+    ContextWindowResult requestFit = fitMessagesToByteBudget(
+        requestMessages, activeProject.contextByteBudget);
+    OperationResult saved = appendProjectChatMessages(
+        activeProject.summary.id, activeChat.summary.id,
+        {{"user", prompt}}, currentTimestamp());
+    if (!saved.success) {
+        sendWebJsonError(server, 500, saved.error);
+        return;
+    }
+    if (storedChat.chat.summary.messageCount == 0) {
+        ChatDocument titled = storedChat.chat;
+        titled.summary.messageCount = 1;
+        titled.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
+        const ChatDocumentResult appended = loadProjectChat(
+            activeProject.summary.id, activeChat.summary.id, 1, 1);
+        if (!appended.success) {
+            sendWebJsonError(server, 500, appended.error);
+            return;
+        }
+        titled.summary = appended.chat.summary;
+        titled.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
+        titled.projectId = activeProject.summary.id;
+        saved = saveProjectChatMetadata(titled);
+        if (!saved.success) {
+            sendWebJsonError(server, 500, saved.error);
+            return;
+        }
     }
     const bool sshWasOpen = webSshTerminalOpen || webSshAwaitingTrust;
     if (sshWasOpen) {
@@ -653,9 +934,6 @@ void handlePrompt()
         sendWebSse(server, "notice", "",
                    "SSH terminal was disconnected to free memory for the AI request");
     }
-    std::vector<Message> requestMessages = activeChat.messages;
-    requestMessages.push_back({"user", prompt});
-    HistoryFitResult requestFit = fitHistoryToActiveContext(requestMessages);
     activeResponse.clear();
     consoleStatus = "Streaming from web console...";
     renderConsoleScreen();
@@ -663,6 +941,10 @@ void handlePrompt()
         activeResponse += text;
         sendWebSse(server, "delta", text, "");
     };
+    Settings requestSettings = consoleSettings;
+    if (!activeProject.model.isEmpty()) requestSettings.model = activeProject.model;
+    const std::string effectiveInstructions = effectiveProjectChatInstructions(
+        activeProject, storedChat.chat);
     const ChatToolPolicy toolPolicy = resolveChatToolPolicy(
         consoleSettings, prompt, activeChat.sshToolsEnabled, sshToolIsAvailable());
     const CancelCallback isCancelled = []() {
@@ -676,63 +958,304 @@ void handlePrompt()
     markOperation(chatToolPolicyIsEnabled(toolPolicy)
         ? "web_console_tools" : "web_console_chat");
     const ChatResult result = chatToolPolicyIsEnabled(toolPolicy)
-        ? streamChatCompletionWithTools(consoleSettings, requestFit.retained,
-                                        activeChat.instructions, toolPolicy.sshEnabled,
+        ? streamChatCompletionWithToolsAndBudget(
+                                        requestSettings, requestFit.retained,
+                                        effectiveInstructions, toolPolicy.sshEnabled,
+                                        activeProject.maximumOutputTokens,
                                         onText,
                                         [&toolPolicy, &isCancelled](const ToolCall& call) {
-                                            return routeToolCall(
-                                                consoleSettings, toolPolicy, call,
+                                            return routeProjectToolCall(
+                                                consoleSettings, toolPolicy,
+                                                activeProject.summary.id, call,
                                                 isCancelled);
                                         },
                                         isCancelled)
-        : streamChatCompletion(consoleSettings, requestFit.retained,
-                               activeChat.instructions, onText, isCancelled);
+        : streamChatCompletionWithBudget(
+              requestSettings, requestFit.retained, effectiveInstructions,
+              activeProject.maximumOutputTokens, onText, isCancelled);
     markOperation("idle");
     if (!result.success) {
         consoleStatus = result.error;
         activeResponse = result.response;
+        const OperationResult reloaded = loadActiveChat(activeChat.summary.id);
+        if (reloaded.success) {
+            refreshChats();
+        }
         sendWebSse(server, "error", "", result.error);
         renderConsoleScreen();
         return;
     }
-    requestFit.retained.push_back({"assistant", result.response});
-    HistoryFitResult finalFit = fitHistoryToActiveContext(requestFit.retained);
-    std::vector<Message> archivedMessages = std::move(requestFit.archived);
-    archivedMessages.reserve(archivedMessages.size() + finalFit.archived.size());
-    for (Message& message : finalFit.archived) {
-        archivedMessages.push_back(std::move(message));
+    std::vector<Message> finalMessages = requestFit.retained;
+    finalMessages.push_back({"assistant", result.response});
+    const ContextWindowResult finalFit = fitMessagesToByteBudget(
+        finalMessages, activeProject.contextByteBudget);
+    std::vector<Message> omitted;
+    if (finalFit.droppedMessages > 0) {
+        omitted.assign(finalMessages.begin(),
+                       finalMessages.begin() + finalFit.droppedMessages);
     }
-    if (!archivedMessages.empty()) {
-        const std::uint32_t archiveStartedAt = millis();
-        const OperationResult archived = archiveChatMessages(
-            activeChat.summary.id, archivedMessages);
-        recordWebSdWrite(millis() - archiveStartedAt);
-        if (!archived.success) {
-            activeResponse.clear();
-            consoleStatus = archived.error;
-            sendWebSse(server, "error", "", archived.error);
-            renderConsoleScreen();
-            return;
+    saved = appendProjectChatMessages(
+        activeProject.summary.id, activeChat.summary.id,
+        {{"assistant", result.response}}, currentTimestamp());
+    if (saved.success && activeProject.automaticCompaction && !omitted.empty()) {
+        const OperationResult compacted = regenerateWebContextSummary(omitted);
+        if (!compacted.success) {
+            consoleStatus = compacted.error;
+            sendWebSse(server, "notice", "", compacted.error);
         }
-        activeChat.summary.archivedMessageCount += archivedMessages.size();
     }
-    activeChat.messages = std::move(finalFit.retained);
-    activeChat.draft.clear();
-    if (activeChat.summary.messageCount == 0) {
-        activeChat.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
+    if (saved.success) {
+        saved = loadActiveChat(activeChat.summary.id);
     }
-    activeChat.summary.messageCount = activeChat.messages.size();
-    activeChat.summary.updatedAt = currentTimestamp();
-    const OperationResult saved = saveActiveChat();
     activeResponse.clear();
     consoleStatus = saved.success ? String("Saved") : saved.error;
     if (saved.success) {
-        refreshChats();
+        saved = refreshChats();
+    }
+    if (saved.success) {
         sendWebSse(server, "done", "", "");
     } else {
         sendWebSse(server, "error", "", saved.error);
     }
     renderConsoleScreen();
+}
+
+void handleSelectProject()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    OperationResult result = selectActiveProject(server.arg("id"));
+    if (result.success) result = refreshProjects();
+    if (!result.success) {
+        sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    consoleStatus = "Project selected";
+    JsonDocument document;
+    document["ok"] = true;
+    document["project_id"] = activeProject.summary.id;
+    sendWebJson(server, 200, document);
+}
+
+void handleNewProject()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    std::string title = server.arg("title").c_str();
+    if (title.empty()) title = "New project";
+    if (title.size() > kMaximumProjectTitleBytes || !isValidUtf8(title)) {
+        sendWebJsonError(server, 400,
+                         "Project title must be valid UTF-8 up to 120 bytes");
+        return;
+    }
+    const ProjectDocumentResult created = createProject(title.c_str());
+    if (!created.success) {
+        sendWebJsonError(server, 500, created.error);
+        return;
+    }
+    OperationResult result = selectActiveProject(created.project.summary.id);
+    if (result.success) result = refreshProjects();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    consoleStatus = "Project created";
+    JsonDocument document;
+    document["ok"] = true;
+    document["project_id"] = activeProject.summary.id;
+    sendWebJson(server, 200, document);
+}
+
+void handleProjectSettings()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    const std::string instructions = server.arg("instructions").c_str();
+    String model = server.arg("model");
+    model.trim();
+    std::uint32_t contextBytes = 0;
+    std::uint32_t outputTokens = 0;
+    if (instructions.size() > kMaximumProjectInstructionsBytes ||
+        !isValidUtf8(instructions) || model.length() > 120 ||
+        !parseUnsignedArgument(server.arg("context_byte_budget"), contextBytes) ||
+        contextBytes < 8192 || contextBytes > 262144 ||
+        !parseUnsignedArgument(server.arg("maximum_output_tokens"), outputTokens) ||
+        outputTokens < 128 || outputTokens > 8192) {
+        sendWebJsonError(server, 400,
+                         "Project settings contain invalid instructions, model or budgets");
+        return;
+    }
+    activeProject.instructions = instructions;
+    activeProject.model = model;
+    activeProject.contextByteBudget = contextBytes;
+    activeProject.maximumOutputTokens = outputTokens;
+    activeProject.automaticCompaction = server.arg("automatic_compaction") == "1";
+    OperationResult result = saveProject(activeProject);
+    if (result.success) result = refreshProjects();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    ++projectRevision;
+    consoleStatus = "Project settings saved";
+    JsonDocument document;
+    document["ok"] = true;
+    sendWebJson(server, 200, document);
+}
+
+void handleRenameProject()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    OperationResult result = renameProject(
+        activeProject.summary.id, server.arg("title"));
+    if (result.success) {
+        const ProjectDocumentResult loaded = loadProject(activeProject.summary.id);
+        result = loaded.success ? OperationResult{true, ""}
+                                : OperationResult{false, loaded.error};
+        if (loaded.success) activeProject = loaded.project;
+    }
+    if (result.success) result = refreshProjects();
+    if (!result.success) {
+        sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    ++projectRevision;
+    JsonDocument document;
+    document["ok"] = true;
+    sendWebJson(server, 200, document);
+}
+
+void handleDuplicateProject()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    String title = server.arg("title");
+    if (title.isEmpty()) title = activeProject.summary.title + " copy";
+    const ProjectDocumentResult duplicated = duplicateProject(
+        activeProject.summary.id, title);
+    if (!duplicated.success) {
+        sendWebJsonError(server, 500, duplicated.error);
+        return;
+    }
+    OperationResult result = selectActiveProject(duplicated.project.summary.id);
+    if (result.success) result = refreshProjects();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["project_id"] = activeProject.summary.id;
+    sendWebJson(server, 200, document);
+}
+
+void handleArchiveProject()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    const bool archived = server.arg("archived") == "1";
+    OperationResult result = setProjectArchived(activeProject.summary.id, archived);
+    if (result.success) {
+        const ProjectDocumentResult loaded = loadProject(activeProject.summary.id);
+        result = loaded.success ? OperationResult{true, ""}
+                                : OperationResult{false, loaded.error};
+        if (loaded.success) activeProject = loaded.project;
+    }
+    if (result.success) result = refreshProjects();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    ++projectRevision;
+    JsonDocument document;
+    document["ok"] = true;
+    sendWebJson(server, 200, document);
+}
+
+void handleDeleteProject()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    const String deletedId = activeProject.summary.id;
+    OperationResult result = deleteProject(deletedId);
+    if (result.success) result = refreshProjects();
+    if (result.success && consoleProjects.empty()) {
+        const ProjectDocumentResult created = createProject("Default");
+        result = created.success ? OperationResult{true, ""}
+                                 : OperationResult{false, created.error};
+        if (created.success) result = refreshProjects();
+    }
+    if (result.success) result = selectActiveProject(consoleProjects.front().id);
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["project_id"] = activeProject.summary.id;
+    sendWebJson(server, 200, document);
+}
+
+void handleProjectLinks()
+{
+    if (!sessionIsActive()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    std::uint32_t offset = 0;
+    if (!server.arg("offset").isEmpty() &&
+        !parseUnsignedArgument(server.arg("offset"), offset)) {
+        sendWebJsonError(server, 400, "Link offset must be an unsigned integer");
+        return;
+    }
+    const SharedFileLinksPageResult page = listProjectSharedLinksPage(
+        activeProject.summary.id, offset, kMaximumProjectPageEntries);
+    if (!page.success) {
+        sendWebJsonError(server, 500, page.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["next_offset"] = page.nextOffset;
+    document["eof"] = page.eof;
+    JsonArray links = document["links"].to<JsonArray>();
+    for (const SharedFileLink& link : page.links) links.add(link.path);
+    sendWebJson(server, 200, document);
+}
+
+void handleProjectLinkUpdate()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    const String path = server.arg("path");
+    const bool linked = server.arg("linked") == "1";
+    const OperationResult result = linked
+        ? linkSharedFileToProject(activeProject.summary.id, path)
+        : unlinkSharedFileFromProject(activeProject.summary.id, path);
+    if (!result.success) {
+        sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    sendWebJson(server, 200, document);
 }
 
 void handleSelectChat()
@@ -747,6 +1270,12 @@ void handleSelectChat()
         sendWebJsonError(server, 400, result.error);
         return;
     }
+    const OperationResult selected = saveActiveChatSelection(id);
+    if (!selected.success) {
+        sendWebJsonError(server, 500, selected.error);
+        return;
+    }
+    ++projectRevision;
     consoleStatus = "Chat selected";
     renderConsoleScreen();
     JsonDocument document;
@@ -761,15 +1290,22 @@ void handleNewChat()
         return;
     }
     const std::uint32_t startedAt = millis();
-    const ChatDocumentResult created = createChat("New chat");
+    const ChatDocumentResult created = createProjectChat(
+        activeProject.summary.id, "New chat");
     recordWebSdWrite(millis() - startedAt);
     if (!created.success) {
         sendWebJsonError(server, 400, created.error);
         return;
     }
     activeChat = created.chat;
+    OperationResult result = saveActiveChatSelection(created.chat.summary.id);
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    ++projectRevision;
     ++chatRevision;
-    OperationResult result = refreshChats();
+    result = refreshChats();
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
@@ -789,8 +1325,9 @@ void handleInstructions()
     }
     const String value = server.arg("instructions");
     const std::string instructions = value.c_str();
-    if (instructions.size() > kMaximumChatInstructionsBytes || !isValidUtf8(instructions)) {
-        sendWebJsonError(server, 400, "Instructions must be valid UTF-8 up to 2048 bytes");
+    if (instructions.size() > kMaximumProjectChatInstructionsBytes ||
+        !isValidUtf8(instructions)) {
+        sendWebJsonError(server, 400, "Instructions must be valid UTF-8 up to 16384 bytes");
         return;
     }
     activeChat.instructions = instructions;
@@ -945,13 +1482,20 @@ void handleDuplicateChat()
         return;
     }
     const std::uint32_t startedAt = millis();
-    const ChatDocumentResult duplicated = duplicateChat(activeChat.summary.id);
+    const ChatDocumentResult duplicated = duplicateProjectChat(
+        activeProject.summary.id, activeChat.summary.id);
     recordWebSdWrite(millis() - startedAt);
     if (!duplicated.success) {
         sendWebJsonError(server, 500, duplicated.error);
         return;
     }
     activeChat = duplicated.chat;
+    OperationResult selected = saveActiveChatSelection(duplicated.chat.summary.id);
+    if (!selected.success) {
+        sendWebJsonError(server, 500, selected.error);
+        return;
+    }
+    ++projectRevision;
     ++chatRevision;
     const OperationResult refreshed = refreshChats();
     if (!refreshed.success) {
@@ -973,8 +1517,8 @@ void handleExportChat()
     }
     const String filename = "chat_" + activeChat.summary.id + ".md";
     const std::uint32_t startedAt = millis();
-    const OperationResult exported = exportChatToWorkspace(
-        activeChat.summary.id, filename);
+    const OperationResult exported = exportProjectChatMarkdown(
+        activeProject.summary.id, activeChat.summary.id, filename);
     recordWebSdWrite(millis() - startedAt);
     if (!exported.success) {
         sendWebJsonError(server, 400, exported.error);
@@ -998,10 +1542,11 @@ void handleExportChatBundle()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    const String filename = "chat_" + activeChat.summary.id + ".chat.jsonl";
+    const String filename =
+        "project_" + activeProject.summary.id + ".cardmind-project.jsonl";
     const std::uint32_t startedAt = millis();
-    const OperationResult exported = exportChatBundleToWorkspace(
-        activeChat.summary.id, filename);
+    const OperationResult exported = exportProjectBundle(
+        activeProject.summary.id, filename);
     recordWebSdWrite(millis() - startedAt);
     if (!exported.success) {
         sendWebJsonError(server, 400, exported.error);
@@ -1012,7 +1557,7 @@ void handleExportChatBundle()
         sendWebJsonError(server, 500, refreshed.error);
         return;
     }
-    consoleStatus = "Chat bundle exported as " + filename;
+    consoleStatus = "Project bundle exported as " + filename;
     JsonDocument document;
     document["ok"] = true;
     document["filename"] = filename;
@@ -1026,24 +1571,25 @@ void handleImportChatBundle()
         return;
     }
     const std::uint32_t startedAt = millis();
-    const ChatDocumentResult imported = importChatBundleFromWorkspace(server.arg("name"));
+    const ProjectDocumentResult imported = importProjectBundle(server.arg("name"));
     recordWebSdWrite(millis() - startedAt);
     if (!imported.success) {
         sendWebJsonError(server, 400, imported.error);
         return;
     }
-    activeChat = imported.chat;
-    ++chatRevision;
-    const OperationResult refreshed = refreshChats();
+    OperationResult refreshed = refreshProjects();
+    if (refreshed.success) {
+        refreshed = selectActiveProject(imported.project.summary.id);
+    }
     if (!refreshed.success) {
         sendWebJsonError(server, 500, refreshed.error);
         return;
     }
-    consoleStatus = "Chat imported";
+    consoleStatus = "Project imported";
     renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
-    document["chat_id"] = activeChat.summary.id;
+    document["project_id"] = activeProject.summary.id;
     sendWebJson(server, 200, document);
 }
 
@@ -1054,7 +1600,8 @@ void handleDeleteChat()
         return;
     }
     const std::uint32_t startedAt = millis();
-    OperationResult result = deleteChat(activeChat.summary.id);
+    OperationResult result = deleteProjectChat(
+        activeProject.summary.id, activeChat.summary.id);
     recordWebSdWrite(millis() - startedAt);
     if (result.success) {
         result = refreshChats();
@@ -1064,12 +1611,19 @@ void handleDeleteChat()
         return;
     }
     if (consoleChats.empty()) {
-        const ChatDocumentResult created = createChat("New chat");
+        const ChatDocumentResult created = createProjectChat(
+            activeProject.summary.id, "New chat");
         if (!created.success) {
             sendWebJsonError(server, 500, created.error);
             return;
         }
         activeChat = created.chat;
+        result = saveActiveChatSelection(created.chat.summary.id);
+        if (!result.success) {
+            sendWebJsonError(server, 500, result.error);
+            return;
+        }
+        ++projectRevision;
         ++chatRevision;
         result = refreshChats();
     } else {
@@ -1079,6 +1633,12 @@ void handleDeleteChat()
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    result = saveActiveChatSelection(activeChat.summary.id);
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    ++projectRevision;
     consoleStatus = "Chat deleted";
     renderConsoleScreen();
     JsonDocument document;
@@ -1195,7 +1755,8 @@ void handleClearChat()
         return;
     }
     const std::uint32_t startedAt = millis();
-    OperationResult result = clearChatHistory(activeChat.summary.id);
+    OperationResult result = clearProjectChatHistory(
+        activeProject.summary.id, activeChat.summary.id);
     recordWebSdWrite(millis() - startedAt);
     if (result.success) {
         result = loadActiveChat(activeChat.summary.id);
@@ -1226,8 +1787,8 @@ void handleArchivedMessages()
         return;
     }
     const std::uint32_t startedAt = millis();
-    const ArchivedMessagesPageResult result = readArchivedChatMessages(
-        activeChat.summary.id, offset, 8, 12000);
+    const ArchivedMessagesPageResult result = readProjectChatMessages(
+        activeProject.summary.id, activeChat.summary.id, offset, 8, 12000);
     recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
@@ -2036,7 +2597,7 @@ void handleFileSave()
     }
     const std::string content = server.arg("content").c_str();
     if (content.size() > kMaximumWebFileChunkBytes || !isValidUtf8(content)) {
-        sendWebJsonError(server, 400, "File chunk must be valid UTF-8 up to 12288 bytes");
+        sendWebJsonError(server, 400, "Editor window must be valid UTF-8 up to 12288 bytes");
         return;
     }
     const std::uint32_t startedAt = millis();
@@ -2052,7 +2613,7 @@ void handleFileSave()
         sendWebJsonError(server, 500, result.error);
         return;
     }
-    consoleStatus = "File chunk saved";
+    consoleStatus = "File changes saved";
     JsonDocument document;
     document["ok"] = true;
     sendWebJson(server, 200, document);
@@ -2174,7 +2735,13 @@ void handleFileUploadData()
             return;
         }
         if (!uploadFile || upload.currentSize > kMaximumWorkspaceFileBytes - uploadBytes) {
-            failUpload("Uploaded file exceeds the 491520-byte size limit");
+            failUpload("Uploaded file exceeds the 256 MiB size limit");
+            return;
+        }
+        const OperationResult space = checkSdOperationSpace(
+            upload.currentSize, kStorageOperationalFloorBytes);
+        if (!space.success) {
+            failUpload(space.error);
             return;
         }
         const std::size_t written = uploadFile.write(upload.buf, upload.currentSize);
@@ -2191,12 +2758,12 @@ void handleFileUploadData()
         }
         uploadFile.flush();
         uploadFile.close();
-        const OperationResult valid = validateWorkspaceFileUtf8(uploadStorageName);
-        if (!valid.success) {
-            failUpload(valid.error);
-            return;
-        }
         if (uploadReplacing) {
+            const OperationResult valid = validateWorkspaceFileUtf8(uploadStorageName);
+            if (!valid.success) {
+                failUpload(valid.error);
+                return;
+            }
             const OperationResult replaced = replaceWorkspaceFileWithTemporary(
                 uploadName, uploadStorageName);
             if (!replaced.success) {
@@ -2283,28 +2850,34 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         return {false, initialChatId,
                 result.success ? String("Installation password is missing") : result.error};
     }
-    Serial.println("WEB_CONSOLE stage=refresh_chats");
+    Serial.println("WEB_CONSOLE stage=refresh_projects");
     Serial.flush();
-    result = refreshChats();
+    result = refreshProjects();
     if (!result.success) {
         releaseConsoleSessionState();
         return {false, initialChatId, result.error};
     }
     settingsRevision = 1;
-    Serial.println("WEB_CONSOLE stage=load_chat");
+    Serial.println("WEB_CONSOLE stage=load_project");
     Serial.flush();
-    if (!initialChatId.isEmpty()) {
-        result = loadActiveChat(initialChatId);
-    } else if (!consoleChats.empty()) {
-        result = loadActiveChat(consoleChats.front().id);
-    } else {
-        const ChatDocumentResult created = createChat("New chat");
-        result = created.success ? OperationResult{true, ""}
-                                 : OperationResult{false, created.error};
-        if (created.success) {
-            activeChat = created.chat;
-            ++chatRevision;
-            result = refreshChats();
+    const ProjectStorageManifestResult manifest = loadProjectStorageManifest();
+    if (!manifest.success || manifest.manifest.activeProjectId.isEmpty()) {
+        releaseConsoleSessionState();
+        return {false, initialChatId,
+                manifest.success ? String("Active project is missing") : manifest.error};
+    }
+    result = selectActiveProject(manifest.manifest.activeProjectId);
+    if (result.success && !initialChatId.isEmpty() &&
+        initialChatId != activeChat.summary.id) {
+        const ChatDocumentResult requested = loadProjectChat(
+            activeProject.summary.id, initialChatId, 96, 131072);
+        if (requested.success) {
+            activeChat = requested.chat;
+            result = saveActiveChatSelection(initialChatId);
+            if (result.success) {
+                ++chatRevision;
+                ++projectRevision;
+            }
         }
     }
     if (!result.success) {
@@ -2327,6 +2900,15 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleSession,
             handleCloseConsole,
             handleState,
+            handleSelectProject,
+            handleNewProject,
+            handleProjectSettings,
+            handleRenameProject,
+            handleDuplicateProject,
+            handleArchiveProject,
+            handleDeleteProject,
+            handleProjectLinks,
+            handleProjectLinkUpdate,
             handlePrompt,
             handleSelectChat,
             handleNewChat,

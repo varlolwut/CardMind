@@ -562,7 +562,7 @@ OperationResult exportChatToWorkspace(const String& id, const String& filename)
         const String headingText = message.role == "user" ? "## You\n\n" : "## Assistant\n\n";
         const std::size_t required = headingText.length() + message.content.size() + 2;
         if (required > kMaximumWorkspaceFileBytes - writtenBytes) {
-            exportError = "Chat export exceeds the 491520-byte workspace file limit";
+            exportError = "Chat export exceeds the 256 MiB workspace file limit";
             return false;
         }
         const std::size_t headingWritten = output.print(headingText);
@@ -633,7 +633,7 @@ OperationResult exportChatBundleToWorkspace(const String& id, const String& file
     auto writeJsonLine = [&output, &writtenBytes](JsonDocument& document) -> OperationResult {
         const std::size_t required = measureJson(document) + 1;
         if (required > kMaximumWorkspaceFileBytes - writtenBytes) {
-            return {false, "Portable chat bundle exceeds the 491520-byte workspace file limit"};
+            return {false, "Portable chat bundle exceeds the 256 MiB workspace file limit"};
         }
         if (serializeJson(document, output) != required - 1 || output.write('\n') != 1) {
             return {false, "Failed while writing portable chat bundle"};

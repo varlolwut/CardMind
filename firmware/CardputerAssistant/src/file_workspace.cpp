@@ -1,6 +1,8 @@
 #include "file_workspace.h"
 
 #include "text_utils.h"
+#include "sd_storage.h"
+#include "project_storage.h"
 
 #include <ArduinoJson.h>
 #include <SD.h>
@@ -27,6 +29,144 @@ struct BookmarkEntriesResult {
     std::vector<BookmarkEntry> entries;
     String error;
 };
+
+struct WorkspacePageCollector {
+    std::uint32_t skipped;
+    std::size_t maximumEntries;
+    std::uint32_t visited;
+    bool hasMore;
+    std::vector<WorkspaceFile> entries;
+    String error;
+};
+
+struct WorkspaceRecoveryCollector {
+    std::vector<String> targets;
+    String error;
+};
+
+String baseName(const String& path)
+{
+    const int slash = path.lastIndexOf('/');
+    return slash >= 0 ? path.substring(slash + 1) : path;
+}
+
+void collectWorkspaceEntries(File& directory,
+                             const String& prefix,
+                             std::size_t depth,
+                             WorkspacePageCollector& collector)
+{
+    if (!collector.error.isEmpty() || collector.hasMore) {
+        return;
+    }
+    if (depth > 16) {
+        collector.error = "Workspace directory nesting exceeds 16 levels";
+        return;
+    }
+    File entry = directory.openNextFile();
+    while (entry) {
+        const String relativePath = prefix.isEmpty()
+            ? baseName(entry.name()) : prefix + "/" + baseName(entry.name());
+        if (!isValidStorageRelativePath(std::string(relativePath.c_str()), 512)) {
+            collector.error = "Workspace contains an invalid path: " + relativePath;
+            entry.close();
+            return;
+        }
+        if (entry.isDirectory()) {
+            collectWorkspaceEntries(entry, relativePath, depth + 1, collector);
+        } else {
+            if (collector.visited >= collector.skipped) {
+                if (collector.entries.size() >= collector.maximumEntries) {
+                    collector.hasMore = true;
+                    entry.close();
+                    return;
+                }
+                collector.entries.push_back({relativePath,
+                                              static_cast<std::uint32_t>(entry.size()), false});
+            }
+            ++collector.visited;
+        }
+        entry.close();
+        if (!collector.error.isEmpty() || collector.hasMore) {
+            return;
+        }
+        entry = directory.openNextFile();
+    }
+}
+
+void collectWorkspaceRecoveryTargets(File& directory,
+                                     const String& prefix,
+                                     std::size_t depth,
+                                     WorkspaceRecoveryCollector& collector)
+{
+    if (!collector.error.isEmpty() || collector.targets.size() >= 32) {
+        return;
+    }
+    if (depth > 16) {
+        collector.error = "Workspace directory nesting exceeds 16 levels";
+        return;
+    }
+    File entry = directory.openNextFile();
+    while (entry) {
+        const String relativePath = prefix.isEmpty()
+            ? baseName(entry.name()) : prefix + "/" + baseName(entry.name());
+        if (entry.isDirectory()) {
+            collectWorkspaceRecoveryTargets(entry, relativePath, depth + 1, collector);
+        } else if (relativePath.endsWith(".tmp") || relativePath.endsWith(".bak")) {
+            const String target = relativePath.substring(0, relativePath.length() - 4);
+            if (!isValidWorkspaceFilename(target.c_str())) {
+                collector.error = "Workspace contains an invalid recovery artifact: " +
+                    relativePath;
+            } else if (std::find(collector.targets.begin(), collector.targets.end(), target) ==
+                       collector.targets.end()) {
+                collector.targets.push_back(target);
+            }
+        }
+        entry.close();
+        if (!collector.error.isEmpty() || collector.targets.size() >= 32) {
+            return;
+        }
+        entry = directory.openNextFile();
+    }
+}
+
+OperationResult recoverWorkspaceArtifacts()
+{
+    while (true) {
+        File directory = SD.open(kWorkspaceDirectory);
+        if (!directory || !directory.isDirectory()) {
+            return {false, "Failed to open workspace while recovering interrupted writes"};
+        }
+        WorkspaceRecoveryCollector collector;
+        collector.targets.reserve(32);
+        collectWorkspaceRecoveryTargets(directory, "", 0, collector);
+        directory.close();
+        if (!collector.error.isEmpty()) {
+            return {false, collector.error};
+        }
+        if (collector.targets.empty()) {
+            return {true, ""};
+        }
+        for (const String& target : collector.targets) {
+            const OperationResult recovered = recoverAtomicSdFile(workspaceFilePath(target));
+            if (!recovered.success) {
+                return recovered;
+            }
+        }
+    }
+}
+
+OperationResult ensureWorkspaceParentDirectories(const String& name)
+{
+    std::size_t separator = std::string(name.c_str()).find('/');
+    while (separator != std::string::npos) {
+        const String directory = String(kWorkspaceDirectory) + "/" + name.substring(0, separator);
+        if (!SD.exists(directory) && !SD.mkdir(directory)) {
+            return {false, "Failed to create workspace directory: " + directory};
+        }
+        separator = std::string(name.c_str()).find('/', separator + 1);
+    }
+    return {true, ""};
+}
 
 OperationResult removeIfPresent(const String& path)
 {
@@ -143,14 +283,17 @@ OperationResult commitTemporaryFile(const String& target,
     return hadTarget ? removeIfPresent(backup) : OperationResult{true, ""};
 }
 
-OperationResult prepareTemporaryPaths(const String& temporary, const String& backup)
+OperationResult prepareWorkspaceTarget(const String& target)
 {
-    const OperationResult temporaryResult = removeIfPresent(temporary);
-    return temporaryResult.success ? removeIfPresent(backup) : temporaryResult;
+    return recoverAtomicSdFile(target);
 }
 
 BookmarkEntriesResult loadBookmarkEntries()
 {
+    const OperationResult recovered = recoverAtomicSdFile(kBookmarksPath);
+    if (!recovered.success) {
+        return {false, {}, recovered.error};
+    }
     if (!SD.exists(kBookmarksPath)) {
         return {true, {}, ""};
     }
@@ -179,7 +322,7 @@ BookmarkEntriesResult loadBookmarkEntries()
         }
         entries.push_back({name, item["offset"].as<std::uint32_t>()});
         if (entries.size() > kMaximumWorkspaceFiles) {
-            return {false, {}, "Workspace bookmark metadata contains more than 40 entries"};
+            return {false, {}, "Workspace bookmark metadata contains more than 4096 entries"};
         }
     }
     return {true, entries, ""};
@@ -190,7 +333,7 @@ OperationResult saveBookmarkEntries(const std::vector<BookmarkEntry>& entries)
     const String target = kBookmarksPath;
     const String temporary = target + ".tmp";
     const String backup = target + ".bak";
-    OperationResult result = prepareTemporaryPaths(temporary, backup);
+    OperationResult result = prepareWorkspaceTarget(target);
     if (!result.success) {
         return result;
     }
@@ -258,7 +401,7 @@ ToolExecutionResult readFileTool(const String& name,
 ToolExecutionResult writeFileTool(const String& name, const std::string& content)
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
-        return toolFailure("Invalid filename; use ASCII letters, digits, ._- and a text extension");
+        return toolFailure("Invalid workspace-relative path");
     }
     if (content.size() > kMaximumWorkspaceToolChunkBytes) {
         return toolFailure("write_file content exceeds 12288 bytes; write an initial chunk, then use append_file");
@@ -266,10 +409,19 @@ ToolExecutionResult writeFileTool(const String& name, const std::string& content
     if (!isValidUtf8(content)) {
         return toolFailure("File content must be valid UTF-8 text");
     }
+    const OperationResult space = checkSdOperationSpace(
+        content.size(), kStorageOperationalFloorBytes);
+    if (!space.success) {
+        return toolFailure(space.error);
+    }
+    const OperationResult parent = ensureWorkspaceParentDirectories(name);
+    if (!parent.success) {
+        return toolFailure(parent.error);
+    }
     const String target = workspaceFilePath(name);
     const String temporary = target + ".tmp";
     const String backup = target + ".bak";
-    const OperationResult prepared = prepareTemporaryPaths(temporary, backup);
+    const OperationResult prepared = prepareWorkspaceTarget(target);
     if (!prepared.success) {
         return toolFailure(prepared.error);
     }
@@ -300,7 +452,7 @@ ToolExecutionResult writeFileTool(const String& name, const std::string& content
 ToolExecutionResult appendFileTool(const String& name, const std::string& content)
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
-        return toolFailure("Invalid filename; use ASCII letters, digits, ._- and a text extension");
+        return toolFailure("Invalid workspace-relative path");
     }
     if (content.size() > kMaximumWorkspaceToolChunkBytes) {
         return toolFailure("append_file content exceeds the 12288-byte chunk limit");
@@ -317,11 +469,16 @@ ToolExecutionResult appendFileTool(const String& name, const std::string& conten
     existing.close();
     if (currentBytes > kMaximumWorkspaceFileBytes ||
         content.size() > kMaximumWorkspaceFileBytes - currentBytes) {
-        return toolFailure("Appending would exceed the 491520-byte file limit");
+        return toolFailure("Appending would exceed the 256 MiB per-file limit");
+    }
+    const OperationResult space = checkSdOperationSpace(
+        currentBytes + content.size(), kStorageOperationalFloorBytes);
+    if (!space.success) {
+        return toolFailure(space.error);
     }
     const String temporary = target + ".tmp";
     const String backup = target + ".bak";
-    OperationResult result = prepareTemporaryPaths(temporary, backup);
+    OperationResult result = prepareWorkspaceTarget(target);
     if (!result.success) {
         return toolFailure(result.error);
     }
@@ -368,49 +525,93 @@ OperationResult initializeFileWorkspace()
     if (!SD.exists(kWorkspaceDirectory) && !SD.mkdir(kWorkspaceDirectory)) {
         return {false, "Failed to create /assistant/files on microSD"};
     }
-    return {true, ""};
+    return recoverWorkspaceArtifacts();
+}
+
+OperationResult ensureWorkspaceFileParent(const String& name)
+{
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, "Invalid workspace-relative path"};
+    }
+    return ensureWorkspaceParentDirectories(name);
 }
 
 WorkspaceFilesResult listWorkspaceFiles()
 {
+    std::vector<WorkspaceFile> files;
+    std::uint32_t offset = 0;
+    bool eof = false;
+    while (!eof) {
+        const WorkspaceFilesPageResult page = listWorkspaceFilesPage(offset, 64);
+        if (!page.success) {
+            return {false, {}, page.error};
+        }
+        files.insert(files.end(), page.files.begin(), page.files.end());
+        if (!page.eof && page.nextOffset <= offset) {
+            return {false, {}, "Workspace pagination did not advance"};
+        }
+        offset = page.nextOffset;
+        eof = page.eof;
+    }
+    return {true, std::move(files), ""};
+}
+
+ToolExecutionResult listProjectFilesTool(const String& projectId)
+{
+    JsonDocument document;
+    document["ok"] = true;
+    JsonArray files = document["files"].to<JsonArray>();
+    std::uint32_t offset = 0;
+    bool eof = false;
+    while (!eof) {
+        const SharedFileLinksPageResult page = listProjectSharedLinksPage(
+            projectId, offset, 32);
+        if (!page.success) {
+            return toolFailure(page.error);
+        }
+        for (const SharedFileLink& link : page.links) {
+            File file = SD.open(workspaceFilePath(link.path), FILE_READ);
+            if (!file || file.isDirectory()) {
+                if (file) {
+                    file.close();
+                }
+                return toolFailure("Project links a missing Shared file: " + link.path);
+            }
+            JsonObject item = files.add<JsonObject>();
+            item["name"] = link.path;
+            item["bytes"] = file.size();
+            file.close();
+        }
+        if (!page.eof && page.nextOffset <= offset) {
+            return toolFailure("Project Shared-link pagination did not advance");
+        }
+        offset = page.nextOffset;
+        eof = page.eof;
+    }
+    return {true, jsonOutput(document), ""};
+}
+
+WorkspaceFilesPageResult listWorkspaceFilesPage(std::uint32_t offset,
+                                                std::size_t maximumEntries)
+{
+    if (maximumEntries == 0 || maximumEntries > 64) {
+        return {false, {}, offset, true,
+                "Workspace page size must be between 1 and 64"};
+    }
     File directory = SD.open(kWorkspaceDirectory);
     if (!directory || !directory.isDirectory()) {
-        return {false, {}, "Failed to open /assistant/files directory"};
+        return {false, {}, offset, true, "Failed to open /assistant/files directory"};
     }
-    std::vector<WorkspaceFile> files;
-    File file = directory.openNextFile();
-    while (file) {
-        if (!file.isDirectory()) {
-            String name = file.name();
-            const int slash = name.lastIndexOf('/');
-            if (slash >= 0) {
-                name = name.substring(slash + 1);
-            }
-            if (!isValidWorkspaceFilename(name.c_str())) {
-                file.close();
-                directory.close();
-                return {false, {}, "Workspace contains an invalid filename: " + name};
-            }
-            if (file.size() > kMaximumWorkspaceFileBytes) {
-                file.close();
-                directory.close();
-                return {false, {}, "Workspace file exceeds the 491520-byte limit: " + name};
-            }
-            files.push_back({name, static_cast<std::uint32_t>(file.size())});
-            if (files.size() > kMaximumWorkspaceFiles) {
-                file.close();
-                directory.close();
-                return {false, {}, "Workspace contains more than 40 files"};
-            }
-        }
-        file.close();
-        file = directory.openNextFile();
-    }
+    WorkspacePageCollector collector = {offset, maximumEntries, 0, false, {}, ""};
+    collector.entries.reserve(maximumEntries);
+    collectWorkspaceEntries(directory, "", 0, collector);
     directory.close();
-    std::sort(files.begin(), files.end(), [](const WorkspaceFile& left, const WorkspaceFile& right) {
-        return left.name < right.name;
-    });
-    return {true, files, ""};
+    if (!collector.error.isEmpty()) {
+        return {false, {}, offset, true, collector.error};
+    }
+    const std::uint32_t nextOffset = offset +
+        static_cast<std::uint32_t>(collector.entries.size());
+    return {true, std::move(collector.entries), nextOffset, !collector.hasMore, ""};
 }
 
 WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
@@ -419,7 +620,7 @@ WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
         return {false, "", 0, 0, 0, true,
-                "Invalid filename; use ASCII letters, digits, ._- and a text extension"};
+                "Invalid workspace-relative path"};
     }
     if (maximumBytes == 0 || maximumBytes > kMaximumWorkspaceToolChunkBytes) {
         return {false, "", 0, 0, 0, true,
@@ -433,7 +634,7 @@ WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
     if (totalBytes > kMaximumWorkspaceFileBytes) {
         file.close();
         return {false, "", 0, 0, 0, true,
-                "Workspace file exceeds the 491520-byte size limit"};
+                "Workspace file exceeds the 256 MiB per-file limit"};
     }
     if (offset > totalBytes || !isFileUtf8Boundary(file, offset, totalBytes) ||
         !file.seek(offset)) {
@@ -561,7 +762,7 @@ OperationResult saveWorkspaceBookmark(const String& name, std::uint32_t offset)
         }
     }
     if (loaded.entries.size() >= kMaximumWorkspaceFiles) {
-        return {false, "Workspace bookmark limit of 40 entries reached"};
+        return {false, "Workspace bookmark limit of 4096 entries reached"};
     }
     loaded.entries.push_back({name, offset});
     return saveBookmarkEntries(loaded.entries);
@@ -586,18 +787,15 @@ OperationResult clearWorkspaceBookmark(const String& name)
 OperationResult createWorkspaceFile(const String& name)
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
-        return {false, "Invalid filename; use ASCII letters, digits, ._- and a text extension"};
+        return {false, "Invalid workspace-relative path"};
     }
     const String path = workspaceFilePath(name);
     if (SD.exists(path)) {
         return {false, "Workspace file already exists: " + name};
     }
-    const WorkspaceFilesResult existing = listWorkspaceFiles();
-    if (!existing.success) {
-        return {false, existing.error};
-    }
-    if (existing.files.size() >= kMaximumWorkspaceFiles) {
-        return {false, "Workspace already contains the maximum of 40 files"};
+    const OperationResult parent = ensureWorkspaceParentDirectories(name);
+    if (!parent.success) {
+        return parent;
     }
     File file = SD.open(path, FILE_WRITE);
     if (!file) {
@@ -618,7 +816,7 @@ OperationResult validateWorkspaceFileUtf8(const String& name)
     }
     if (file.size() > kMaximumWorkspaceFileBytes) {
         file.close();
-        return {false, "Workspace file exceeds the 491520-byte size limit"};
+        return {false, "Workspace file exceeds the 256 MiB per-file limit"};
     }
     constexpr std::size_t blockBytes = 4096;
     std::vector<std::uint8_t> block(blockBytes);
@@ -665,6 +863,10 @@ OperationResult replaceWorkspaceFileRange(const String& name,
         return {false, "Replacement content must be valid UTF-8 text"};
     }
     const String target = workspaceFilePath(name);
+    OperationResult result = prepareWorkspaceTarget(target);
+    if (!result.success) {
+        return result;
+    }
     File source = SD.open(target, FILE_READ);
     if (!source) {
         return {false, "Workspace file does not exist: " + name};
@@ -680,15 +882,16 @@ OperationResult replaceWorkspaceFileRange(const String& name,
     const std::size_t resultBytes = totalBytes - originalBytes + replacement.size();
     if (resultBytes > kMaximumWorkspaceFileBytes) {
         source.close();
-        return {false, "Edited file would exceed the 491520-byte size limit"};
+        return {false, "Edited file would exceed the 256 MiB per-file limit"};
     }
-    const String temporary = target + ".tmp";
-    const String backup = target + ".bak";
-    OperationResult result = prepareTemporaryPaths(temporary, backup);
+    result = checkSdOperationSpace(
+        resultBytes, kStorageOperationalFloorBytes);
     if (!result.success) {
         source.close();
         return result;
     }
+    const String temporary = target + ".tmp";
+    const String backup = target + ".bak";
     File destination = SD.open(temporary, FILE_WRITE);
     if (!destination) {
         source.close();
@@ -732,6 +935,10 @@ OperationResult replaceWorkspaceFileWithTemporary(const String& name,
     }
     const String target = workspaceFilePath(name);
     const String temporary = workspaceFilePath(temporaryName);
+    const OperationResult recovered = prepareWorkspaceTarget(target);
+    if (!recovered.success) {
+        return recovered;
+    }
     if (!SD.exists(target)) {
         return {false, "Workspace file does not exist: " + name};
     }
@@ -758,6 +965,33 @@ OperationResult replaceWorkspaceFileWithTemporary(const String& name,
                                     bookmark.error};
 }
 
+OperationResult commitWorkspaceBinaryTemporary(const String& name,
+                                                const String& temporaryName)
+{
+    if (!isValidWorkspaceFilename(name.c_str()) ||
+        !isValidWorkspaceFilename(temporaryName.c_str()) || name == temporaryName) {
+        return {false, "Workspace binary replacement paths are invalid"};
+    }
+    const String target = workspaceFilePath(name);
+    const String temporary = workspaceFilePath(temporaryName);
+    File file = SD.open(temporary, FILE_READ);
+    if (!file || file.isDirectory()) {
+        if (file) file.close();
+        return {false, "Workspace binary replacement file could not be opened"};
+    }
+    const std::size_t replacementBytes = file.size();
+    file.close();
+    if (replacementBytes > kMaximumWorkspaceFileBytes) {
+        return {false, "Workspace binary replacement exceeds the 256 MiB limit"};
+    }
+    const OperationResult recovered = prepareWorkspaceTarget(target);
+    if (!recovered.success) {
+        return recovered;
+    }
+    const String backup = target + ".bak";
+    return commitTemporaryFile(target, temporary, backup);
+}
+
 OperationResult copyWorkspaceFile(const String& sourceName, const String& destinationName)
 {
     if (!isValidWorkspaceFilename(sourceName.c_str()) ||
@@ -772,8 +1006,12 @@ OperationResult copyWorkspaceFile(const String& sourceName, const String& destin
     if (SD.exists(destination)) {
         return {false, "Workspace file already exists: " + destinationName};
     }
+    OperationResult result = ensureWorkspaceParentDirectories(destinationName);
+    if (!result.success) {
+        return result;
+    }
     const String temporary = destination + ".tmp";
-    OperationResult result = removeIfPresent(temporary);
+    result = removeIfPresent(temporary);
     if (result.success) {
         result = copyFile(source, temporary);
     }
@@ -809,8 +1047,19 @@ OperationResult renameWorkspaceFile(const String& sourceName, const String& dest
     if (!SD.exists(source)) {
         return {false, "Workspace file does not exist: " + sourceName};
     }
+    const SharedFileLinkResult linked = sharedFileHasAnyProjectLink(sourceName);
+    if (!linked.success) {
+        return {false, linked.error};
+    }
+    if (linked.linked) {
+        return {false, "Unlink the Shared file from every project before renaming it"};
+    }
     if (SD.exists(destination)) {
         return {false, "Workspace file already exists: " + destinationName};
+    }
+    const OperationResult parent = ensureWorkspaceParentDirectories(destinationName);
+    if (!parent.success) {
+        return parent;
     }
     const WorkspaceBookmarkResult bookmark = loadWorkspaceBookmark(sourceName);
     if (!bookmark.success) {
@@ -840,6 +1089,13 @@ OperationResult deleteWorkspaceFile(const String& name)
     const String path = workspaceFilePath(name);
     if (!SD.exists(path)) {
         return {false, "Workspace file does not exist: " + name};
+    }
+    const SharedFileLinkResult linked = sharedFileHasAnyProjectLink(name);
+    if (!linked.success) {
+        return {false, linked.error};
+    }
+    if (linked.linked) {
+        return {false, "Unlink the Shared file from every project before deleting it"};
     }
     OperationResult result = clearWorkspaceBookmark(name);
     if (!result.success) {
@@ -884,6 +1140,53 @@ ToolExecutionResult executeWorkspaceTool(const ToolCall& call)
                                          : appendFileTool(name, content);
     }
     return toolFailure(String("Unsupported workspace tool: ") + call.name.c_str());
+}
+
+ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
+                                                const ToolCall& call)
+{
+    if (!isValidChatId(projectId.c_str())) {
+        return toolFailure("Workspace tool requires an active project");
+    }
+    if (call.name == "list_files") {
+        return listProjectFilesTool(projectId);
+    }
+    JsonDocument arguments;
+    const DeserializationError jsonError = deserializeJson(arguments, call.arguments);
+    if (jsonError || !arguments.is<JsonObject>() ||
+        !arguments["name"].is<const char*>()) {
+        return toolFailure(jsonError
+            ? String("Tool arguments must be a JSON object: ") + jsonError.c_str()
+            : String("Tool arguments are missing required string field 'name'"));
+    }
+    const String name = arguments["name"].as<const char*>();
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return toolFailure("Workspace tool path is invalid");
+    }
+    const SharedFileLinkResult linked = projectHasSharedFileLink(projectId, name);
+    if (!linked.success) {
+        return toolFailure(linked.error);
+    }
+    const bool exists = SD.exists(workspaceFilePath(name));
+    if (call.name != "write_file" && (!linked.linked || !exists)) {
+        return toolFailure("Shared file is not linked to the active project: " + name);
+    }
+    if (call.name == "write_file" && exists && !linked.linked) {
+        return toolFailure("Existing Shared file is not linked to the active project: " + name);
+    }
+    const ToolExecutionResult executed = executeWorkspaceTool(call);
+    if (!executed.success || call.name != "write_file" || linked.linked) {
+        return executed;
+    }
+    const OperationResult linkResult = linkSharedFileToProject(projectId, name);
+    if (linkResult.success) {
+        return executed;
+    }
+    const OperationResult rollback = deleteWorkspaceFile(name);
+    return toolFailure(rollback.success
+        ? "File was created but project linking failed: " + linkResult.error
+        : "File linking failed and created-file rollback also failed: " +
+              linkResult.error + "; " + rollback.error);
 }
 
 String workspaceFilePath(const String& name)
