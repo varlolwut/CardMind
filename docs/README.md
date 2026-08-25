@@ -9,6 +9,8 @@ installation entry point; details live here so they can be maintained independen
   provider setup, and the first prompt.
 - [User guide](user-guide.md): carousel, keyboard controls, chats, voice, search,
   files, tools, backup, and updates.
+- [Projects and Shared workspace](projects-workspace.md): project isolation, settings
+  precedence, context compaction, shared-file links, migration, and project bundles.
 - [Configuration](configuration.md): chat, STT, TTS, search, network, model, and
   secret-handling rules.
 

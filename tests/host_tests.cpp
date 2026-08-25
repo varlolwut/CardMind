@@ -113,9 +113,61 @@ void testChatText()
     require(cardputer::isValidWorkspaceFilename("chat_export.chat.jsonl"),
             "Portable chat bundle filename rejected");
     require(!cardputer::isValidWorkspaceFilename("../secret.txt"), "Traversal filename accepted");
-    require(!cardputer::isValidWorkspaceFilename("program.exe"), "Executable extension accepted");
-    require(!cardputer::isValidWorkspaceFilename(".hidden.txt"), "Hidden filename accepted");
-    require(!cardputer::isValidWorkspaceFilename("note.MD"), "Uppercase extension accepted");
+    require(cardputer::isValidWorkspaceFilename("bin/program.exe"),
+            "Arbitrary nested workspace file rejected");
+    require(cardputer::isValidWorkspaceFilename(".hidden.txt"),
+            "Hidden workspace filename rejected");
+    require(cardputer::isValidWorkspaceFilename("note.MD"),
+            "Uppercase workspace extension rejected");
+    require(!cardputer::isValidWorkspaceFilename("draft.tmp"),
+            "Reserved temporary workspace suffix accepted");
+    require(!cardputer::isValidWorkspaceFilename("backup.bak"),
+            "Reserved backup workspace suffix accepted");
+    require(cardputer::isValidStorageRelativePath("Проекты/заметки/идея.md", 512),
+            "Valid nested UTF-8 storage path rejected");
+    require(cardputer::isValidStorageRelativePath("src/main.cpp", 512),
+            "Valid source storage path rejected");
+    require(!cardputer::isValidStorageRelativePath("../secret.txt", 512),
+            "Parent traversal storage path accepted");
+    require(!cardputer::isValidStorageRelativePath("notes//draft.md", 512),
+            "Empty storage path segment accepted");
+    require(!cardputer::isValidStorageRelativePath("C:/secret.txt", 512),
+            "Drive-qualified storage path accepted");
+    require(!cardputer::isValidStorageRelativePath("/absolute.txt", 512),
+            "Absolute storage path accepted");
+    require(!cardputer::isValidStorageRelativePath(std::string("bad\x01.txt", 8), 512),
+            "Control character in storage path accepted");
+    require(!cardputer::isValidStorageRelativePath("notes/./draft.md", 512),
+            "Current-directory storage segment accepted");
+    require(!cardputer::isValidStorageRelativePath("notes/../draft.md", 512),
+            "Nested parent traversal storage path accepted");
+}
+
+void testContextWindowBudget()
+{
+    const std::vector<cardputer::Message> messages = {
+        {"user", "first"},
+        {"assistant", "second"},
+        {"user", "third"},
+    };
+    const cardputer::ContextWindowResult all =
+        cardputer::fitMessagesToByteBudget(messages, 4096);
+    require(all.droppedMessages == 0 && all.retained.size() == 3,
+            "Context budget dropped messages that fit");
+    const cardputer::ContextWindowResult newest =
+        cardputer::fitMessagesToByteBudget(messages, 22);
+    require(newest.droppedMessages == 2 && newest.retained.size() == 1 &&
+                newest.retained.front().content == "third",
+            "Context budget did not retain the newest complete message");
+    const cardputer::ContextWindowResult zero =
+        cardputer::fitMessagesToByteBudget(messages, 0);
+    require(zero.droppedMessages == 3 && zero.retained.empty(),
+            "Zero context budget retained messages");
+    const std::vector<cardputer::Message> oversized = {{"user", std::string(128, 'x')}};
+    const cardputer::ContextWindowResult one =
+        cardputer::fitMessagesToByteBudget(oversized, 16);
+    require(one.droppedMessages == 0 && one.retained.size() == 1,
+            "Context budget discarded the only newest message");
 }
 
 void testWorkspaceRouting()
@@ -256,6 +308,7 @@ int main()
         testUtf8Validation();
         testWavHeader();
         testChatText();
+        testContextWindowBudget();
         testWorkspaceRouting();
         testWebSearchRouting();
         testSshTerminalFiltering();

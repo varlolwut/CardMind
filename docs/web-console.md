@@ -26,11 +26,14 @@ configuration and SFTP controls.
 
 ### Chat
 
-- Use the two-pane desktop layout to keep conversations beside the active thread; on
-  a phone the active conversation and composer appear first.
+- Select or create a project, then use the two-pane desktop layout to keep its chats
+  beside the active thread; on a phone the active conversation and composer appear
+  first.
+- Edit project instructions, model override, context budget, output budget, and
+  automatic compaction from **Details**. Chat instructions remain a narrower override.
 - Select, create, rename, pin, archive, duplicate, export, or delete chats.
-- Load archived turns, clear a chat without deleting it, and monitor active context
-  usage by message count and UTF-8 bytes.
+- Load earlier raw turns, clear a chat without deleting it, and monitor total messages
+  and active context usage.
 - Send prompts with SSE streaming, cancel an active request, or retry the previous
   browser prompt.
 - Edit instructions that belong only to the active chat.
@@ -39,19 +42,22 @@ configuration and SFTP controls.
 
 ### Workspace
 
-- Browse the `/assistant/files` workspace on microSD.
-- Upload or download supported UTF-8 files.
-- Open, edit, and atomically save a complete file. Internal streaming keeps the
-  ESP32 memory use bounded but is not exposed in the interface.
-- Rename or delete files and import a selected CardMind chat bundle.
+- Browse the Shared workspace on microSD, including nested UTF-8 paths.
+- Upload or download arbitrary files up to 256 MiB. Only valid UTF-8 text is opened in
+  the editor or exposed to model text tools.
+- Open a bounded text window, move with Previous and Next, and save the edited window
+  back into the same complete file. Replacement is staged before the original changes.
+- Link or unlink a selected Shared file for the active project. Linked files are the
+  only pre-existing Shared files visible to the model in that project.
+- Rename or delete unlinked files and import a selected CardMind project bundle.
 - Render up to 320 UTF-8 bytes as a QR code on the Cardputer, either from the QR
   editor or from the complete contents of a selected workspace file.
 
 Incomplete uploads are removed after an error. Existing files are not overwritten
 silently.
 
-The browser may hold the complete document while it is being edited. The Cardputer
-transfers it incrementally and commits it through a temporary file, so an interrupted
+The browser never needs to hold a complete large document. The Cardputer reads and
+replaces bounded text windows and commits through a temporary file, so an interrupted
 save does not replace the last valid copy.
 
 ### SSH and SFTP
@@ -74,8 +80,8 @@ scrollback log.
 
 SSH access for the model is a separate, per-chat permission in **Chat → Details**.
 It is disabled by default. Enabling it requires a complete SSH profile; execution
-also requires a host fingerprint that was already reviewed and trusted. Portable
-chat bundles never carry this permission to another installation.
+also requires a host fingerprint that was already reviewed and trusted. Imported
+project bundles always reset this permission to disabled.
 
 Destructive actions and editable names use CardMind dialogs instead of browser-native
 prompts, so confirmation remains usable and visually consistent on desktop and mobile.

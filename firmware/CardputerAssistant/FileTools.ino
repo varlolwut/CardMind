@@ -184,18 +184,32 @@ void openFilesMenu()
     renderFilesMenu();
 }
 
+cardputer::OperationResult refreshWorkspacePage(std::uint32_t offset)
+{
+    const cardputer::WorkspaceFilesPageResult page = cardputer::listWorkspaceFilesPage(
+        offset, 32);
+    if (!page.success) {
+        return {false, page.error};
+    }
+    workspaceFiles = page.files;
+    workspacePageOffset = offset;
+    workspaceNextPageOffset = page.nextOffset;
+    workspacePageEof = page.eof;
+    workspaceFileIndex = 0;
+    return {true, ""};
+}
+
 void openWorkspaceFileList()
 {
     workspaceListMode = WorkspaceListMode::Browse;
     workspaceListReturnScreen = Screen::FilesMenu;
-    const cardputer::WorkspaceFilesResult result = cardputer::listWorkspaceFiles();
+    workspacePreviousPageOffsets.clear();
+    const cardputer::OperationResult result = refreshWorkspacePage(0);
     if (!result.success) {
         menuStatus = result.error;
         renderFilesMenu();
         return;
     }
-    workspaceFiles = result.files;
-    workspaceFileIndex = 0;
     menuStatus = workspaceFiles.empty() ? String("Workspace is empty") : String();
     currentScreen = Screen::WorkspaceFileList;
     renderWorkspaceFileList();
@@ -226,16 +240,24 @@ void openChatImportList()
 
 cardputer::OperationResult selectWorkspaceFileByName(const String& name)
 {
-    const cardputer::WorkspaceFilesResult result = cardputer::listWorkspaceFiles();
-    if (!result.success) {
-        return {false, result.error};
-    }
-    workspaceFiles = result.files;
-    for (std::size_t index = 0; index < workspaceFiles.size(); ++index) {
-        if (workspaceFiles[index].name == name) {
-            workspaceFileIndex = index + 1;
-            return {true, ""};
+    workspacePreviousPageOffsets.clear();
+    std::uint32_t offset = 0;
+    while (true) {
+        const cardputer::OperationResult result = refreshWorkspacePage(offset);
+        if (!result.success) {
+            return result;
         }
+        for (std::size_t index = 0; index < workspaceFiles.size(); ++index) {
+            if (workspaceFiles[index].name == name) {
+                workspaceFileIndex = index + 1;
+                return {true, ""};
+            }
+        }
+        if (workspacePageEof) {
+            break;
+        }
+        workspacePreviousPageOffsets.push_back(offset);
+        offset = workspaceNextPageOffset;
     }
     return {false, "Workspace file was not found after the operation: " + name};
 }

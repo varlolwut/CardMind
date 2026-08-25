@@ -132,14 +132,18 @@ void runWebSearchRoundTripTest()
         return;
     }
     bool searchCalled = false;
+    String observedToolName;
     const std::vector<cardputer::Message> testHistory = {
-        {"user", "/search cardputer zero"},
+        {"user", "/search Call web_search exactly once with JSON query \"Cardputer Zero\", then summarize its result."},
     };
     const cardputer::ChatToolPolicy toolPolicy = cardputer::resolveChatToolPolicy(
         settings, testHistory.front().content, false, false);
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
         settings, testHistory, "", false, [](const std::string&) {},
-        [&searchCalled, &toolPolicy](const cardputer::ToolCall& call) {
+        [&searchCalled, &observedToolName, &toolPolicy](const cardputer::ToolCall& call) {
+            if (observedToolName.isEmpty()) {
+                observedToolName = String(call.name.c_str());
+            }
             if (cardputer::isWebSearchToolName(call.name)) {
                 searchCalled = true;
                 return cardputer::executeWebSearchTool(
@@ -149,9 +153,10 @@ void runWebSearchRoundTripTest()
                 settings, toolPolicy, call, []() { return false; });
         }, []() { return false; });
     const String safeError = serialSafeError(result.error, 180);
-    Serial.printf("SEARCHTEST result=%s search_called=%s response_bytes=%u error=%s\n",
+    Serial.printf("SEARCHTEST result=%s search_called=%s tool=%s response_bytes=%u error=%s\n",
                   result.success && searchCalled ? "pass" : "failed",
                   searchCalled ? "yes" : "no",
+                  observedToolName.isEmpty() ? "none" : observedToolName.c_str(),
                   static_cast<unsigned int>(result.response.size()), safeError.c_str());
 }
 
@@ -345,6 +350,8 @@ void runChatQolTest()
 
 void runFileWorkspaceEditTest()
 {
+    constexpr std::size_t kWorkspaceFileTestBytes = 2U * 1024U * 1024U;
+    constexpr std::uint32_t kWorkspaceFileEditOffset = 1024U * 1024U;
     const String sourceName = "firmware_editor_test.txt";
     const String copyName = "firmware_editor_copy.txt";
     const String renamedName = "firmware_editor_renamed.txt";
@@ -371,16 +378,16 @@ void runFileWorkspaceEditTest()
         Serial.println("FILETEST stage=write_large_file");
         File file = SD.open(sourcePath, FILE_WRITE);
         if (!file) {
-            result = {false, "Failed to open maximum-size workspace test file"};
+            result = {false, "Failed to open streaming workspace test file"};
         } else {
             std::uint8_t block[4096] = {};
             std::fill(block, block + sizeof(block), static_cast<std::uint8_t>('a'));
             std::size_t written = 0;
-            while (result.success && written < cardputer::kMaximumWorkspaceFileBytes) {
-                const std::size_t blockBytes = std::min(
-                    sizeof(block), cardputer::kMaximumWorkspaceFileBytes - written);
+            while (result.success && written < kWorkspaceFileTestBytes) {
+                const std::size_t blockBytes = std::min<std::size_t>(
+                    sizeof(block), kWorkspaceFileTestBytes - written);
                 if (file.write(block, blockBytes) != blockBytes) {
-                    result = {false, "Failed to write maximum-size workspace test file"};
+                    result = {false, "Failed to write streaming workspace test file"};
                 }
                 written += blockBytes;
             }
@@ -388,18 +395,18 @@ void runFileWorkspaceEditTest()
             file.close();
         }
     }
-    constexpr std::uint32_t editOffset = 245760;
     const std::string replacement = "мир";
     if (result.success) {
         Serial.println("FILETEST stage=replace_range");
         result = cardputer::replaceWorkspaceFileRange(
-            sourceName, editOffset, static_cast<std::uint32_t>(replacement.size()), replacement);
+            sourceName, kWorkspaceFileEditOffset,
+            static_cast<std::uint32_t>(replacement.size()), replacement);
     }
     const cardputer::WorkspaceChunkResult read = result.success
-        ? cardputer::readWorkspaceFileChunk(sourceName, editOffset, 32)
+        ? cardputer::readWorkspaceFileChunk(sourceName, kWorkspaceFileEditOffset, 32)
         : cardputer::WorkspaceChunkResult{false, "", 0, 0, 0, true, result.error};
     if (result.success && (!read.success || read.content.rfind(replacement, 0) != 0 ||
-                           read.totalBytes != cardputer::kMaximumWorkspaceFileBytes)) {
+                           read.totalBytes != kWorkspaceFileTestBytes)) {
         result = {false, "Workspace editor content verification failed"};
     }
     if (result.success) {
@@ -410,18 +417,19 @@ void runFileWorkspaceEditTest()
     const cardputer::WorkspaceFindResult found = result.success
         ? cardputer::findWorkspaceText(sourceName, replacement, 0)
         : cardputer::WorkspaceFindResult{false, false, 0, result.error};
-    if (result.success && (!found.success || !found.found || found.offset != editOffset)) {
+    if (result.success && (!found.success || !found.found ||
+                           found.offset != kWorkspaceFileEditOffset)) {
         result = {false, "Workspace search verification failed"};
     }
     if (result.success) {
         Serial.println("FILETEST stage=save_bookmark");
-        result = cardputer::saveWorkspaceBookmark(sourceName, editOffset);
+        result = cardputer::saveWorkspaceBookmark(sourceName, kWorkspaceFileEditOffset);
     }
     const cardputer::WorkspaceBookmarkResult sourceBookmark = result.success
         ? cardputer::loadWorkspaceBookmark(sourceName)
         : cardputer::WorkspaceBookmarkResult{false, false, 0, result.error};
     if (result.success && (!sourceBookmark.success || !sourceBookmark.found ||
-                           sourceBookmark.offset != editOffset)) {
+                           sourceBookmark.offset != kWorkspaceFileEditOffset)) {
         result = {false, "Workspace bookmark verification failed"};
     }
     if (result.success) {
@@ -436,7 +444,7 @@ void runFileWorkspaceEditTest()
         ? cardputer::loadWorkspaceBookmark(renamedName)
         : cardputer::WorkspaceBookmarkResult{false, false, 0, result.error};
     if (result.success && (!renamedBookmark.success || !renamedBookmark.found ||
-                           renamedBookmark.offset != editOffset)) {
+                           renamedBookmark.offset != kWorkspaceFileEditOffset)) {
         result = {false, "Copied and renamed bookmark verification failed"};
     }
     if (result.success) {
@@ -553,20 +561,25 @@ void runToolApiTest()
     }
     bool writeSucceeded = false;
     String writtenName;
+    const String expectedName = "firmware_tool_" + String(millis()) + ".py";
+    const std::string prompt =
+        "Use write_file exactly once with JSON arguments name \"" +
+        std::string(expectedName.c_str()) +
+        "\" and content \"print('CARDMIND_TOOL_OK')\\n\". Do not answer until the tool result.";
     const std::vector<cardputer::Message> testHistory = {
-        {"user", "Можешь набросать простой тестовый скрипт на Python и сохранить его?"},
+        {"user", prompt},
     };
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
         settings, testHistory, "", false, [](const std::string&) {},
-        [&writeSucceeded, &writtenName](const cardputer::ToolCall& call) {
-            const cardputer::ToolExecutionResult execution = cardputer::executeWorkspaceTool(call);
+        [&writeSucceeded, &writtenName, &expectedName](const cardputer::ToolCall& call) {
+            const cardputer::ToolExecutionResult execution =
+                cardputer::executeProjectWorkspaceTool(activeProjectId, call);
             if (call.name == "write_file" && execution.success) {
                 JsonDocument arguments;
                 const DeserializationError error = deserializeJson(arguments, call.arguments);
                 if (!error && arguments["name"].is<const char*>()) {
                     writtenName = String(arguments["name"].as<const char*>());
-                    writeSucceeded = cardputer::isValidWorkspaceFilename(writtenName.c_str()) &&
-                        writtenName.endsWith(".py");
+                    writeSucceeded = writtenName == expectedName;
                 }
             }
             return execution;
@@ -574,14 +587,26 @@ void runToolApiTest()
     const String testPath = writtenName.isEmpty()
         ? String() : cardputer::workspaceFilePath(writtenName);
     const bool fileCreated = !testPath.isEmpty() && SD.exists(testPath);
-    const bool cleanup = !fileCreated || SD.remove(testPath);
-    if (!result.success || !writeSucceeded || !fileCreated || !cleanup) {
-        Serial.printf("TOOLTEST result=failed stage=tool_roundtrip api=%s write=%s file=%s cleanup=%s error=%s\n",
+    const cardputer::SharedFileLinkResult linked = fileCreated
+        ? cardputer::projectHasSharedFileLink(activeProjectId, writtenName)
+        : cardputer::SharedFileLinkResult{true, false, ""};
+    cardputer::OperationResult cleanup = {true, ""};
+    if (fileCreated && linked.success && linked.linked) {
+        cleanup = cardputer::unlinkSharedFileFromProject(activeProjectId, writtenName);
+    }
+    if (fileCreated && cleanup.success) {
+        cleanup = cardputer::deleteWorkspaceFile(writtenName);
+    }
+    if (!result.success || !writeSucceeded || !fileCreated || !linked.success ||
+        !linked.linked || !cleanup.success) {
+        Serial.printf("TOOLTEST result=failed stage=tool_roundtrip api=%s write=%s file=%s link=%s cleanup=%s error=%s\n",
                       result.success ? "pass" : "failed",
                       writeSucceeded ? "pass" : "failed",
                       fileCreated ? "pass" : "failed",
-                      cleanup ? "pass" : "failed",
-                      result.error.isEmpty() ? "none" : result.error.c_str());
+                      linked.success && linked.linked ? "pass" : "failed",
+                      cleanup.success ? "pass" : "failed",
+                      !result.error.isEmpty() ? result.error.c_str() :
+                          (!linked.success ? linked.error.c_str() : cleanup.error.c_str()));
         return;
     }
     Serial.printf("TOOLTEST result=pass response_bytes=%u\n",

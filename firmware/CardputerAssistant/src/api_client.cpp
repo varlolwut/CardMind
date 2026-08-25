@@ -142,12 +142,13 @@ String parseApiError(int status, const String& body)
 
 String buildChatRequest(const Settings& settings,
                         const std::vector<Message>& history,
-                        const std::string& instructions)
+                        const std::string& instructions,
+                        std::uint32_t maximumOutputTokens)
 {
     JsonDocument document;
     document["model"] = settings.model;
     document["stream"] = true;
-    document["max_tokens"] = 1024;
+    document["max_tokens"] = maximumOutputTokens;
     JsonArray messages = document["messages"].to<JsonArray>();
     if (!settings.globalInstructions.isEmpty() || !instructions.empty()) {
         JsonObject system = messages.add<JsonObject>();
@@ -226,7 +227,7 @@ void addWorkspaceTools(JsonDocument& document)
     appendTool["function"]["name"] = "append_file";
     appendTool["function"]["description"] =
         "Atomically append a UTF-8 chunk up to 12288 bytes to an existing workspace file. "
-        "The final file may contain up to 491520 bytes.";
+        "The final file may contain up to 256 MiB.";
     appendTool["function"]["parameters"]["type"] = "object";
     appendTool["function"]["parameters"]["properties"]["name"]["type"] = "string";
     appendTool["function"]["parameters"]["properties"]["content"]["type"] = "string";
@@ -291,17 +292,22 @@ String buildToolChatRequest(const Settings& settings,
                             const std::vector<Message>& history,
                             const std::string& instructions,
                             bool sshToolAvailable,
+                            std::uint32_t maximumOutputTokens,
                             const std::vector<ToolRound>& rounds)
 {
     JsonDocument document;
     document["model"] = settings.model;
     document["stream"] = true;
-    document["max_tokens"] = 1024;
+    document["max_tokens"] = maximumOutputTokens;
     JsonArray messages = document["messages"].to<JsonArray>();
     JsonObject system = messages.add<JsonObject>();
     system["role"] = "system";
     const bool workspaceToolsAvailable = !history.empty() &&
         requestsWorkspaceAccess(history.back().content);
+    const bool webSearchAvailable = settings.webSearchApiKey.length() >= 8 &&
+        settings.webSearchBaseUrl.startsWith("https://");
+    const bool webSearchRequired = webSearchAvailable && !history.empty() &&
+        requestsWebSearch(history.back().content);
     const bool respondInRussian = !history.empty() && containsCyrillicUtf8(history.back().content);
     String systemPrompt = respondInRussian
         ? String("The required response language is Russian. Answer only in Russian unless the user explicitly asks for another language. ")
@@ -316,8 +322,7 @@ String buildToolChatRequest(const Settings& settings,
             "tool before answering. Handle multi-call file access internally without describing implementation "
             "chunks to the user. Never claim a file was saved unless a file tool returned ok=true. ";
     }
-    if (settings.webSearchApiKey.length() >= 8 &&
-        settings.webSearchBaseUrl.startsWith("https://")) {
+    if (webSearchAvailable) {
         systemPrompt +=
             "Use only web_search and web_fetch for web access. Use web_search for current facts, news, "
             "release dates, or whenever the user asks to search. Use web_fetch only for an HTTPS URL "
@@ -374,14 +379,16 @@ String buildToolChatRequest(const Settings& settings,
     if (workspaceToolsAvailable) {
         addWorkspaceTools(document);
     }
-    if (settings.webSearchApiKey.length() >= 8 &&
-        settings.webSearchBaseUrl.startsWith("https://")) {
+    if (webSearchAvailable) {
         addWebSearchTool(document);
     }
     if (sshToolAvailable) {
         addSshTool(document);
     }
-    if (workspaceToolsAvailable && rounds.empty()) {
+    if (webSearchRequired && rounds.empty()) {
+        document["tool_choice"]["type"] = "function";
+        document["tool_choice"]["function"]["name"] = "web_search";
+    } else if (workspaceToolsAvailable && rounds.empty()) {
         if (requestsWorkspaceWrite(history.back().content)) {
             document["tool_choice"]["type"] = "function";
             document["tool_choice"]["function"]["name"] = "write_file";
@@ -506,7 +513,9 @@ private:
             ToolCall& call = toolCalls_[index];
             const char* id = toolCallDelta["id"].as<const char*>();
             const char* name = toolCallDelta["function"]["name"].as<const char*>();
-            const char* arguments = toolCallDelta["function"]["arguments"].as<const char*>();
+            const JsonVariantConst argumentValue =
+                toolCallDelta["function"]["arguments"];
+            const char* arguments = argumentValue.as<const char*>();
             if (id != nullptr) {
                 call.id += id;
             }
@@ -515,6 +524,16 @@ private:
             }
             if (arguments != nullptr) {
                 call.arguments += arguments;
+            } else if (argumentValue.is<JsonObjectConst>() ||
+                       argumentValue.is<JsonArrayConst>()) {
+                std::string structuredArguments;
+                serializeJson(argumentValue, structuredArguments);
+                if (call.arguments.empty()) {
+                    call.arguments = structuredArguments;
+                } else if (call.arguments != structuredArguments) {
+                    error_ = "Streaming tool call returned conflicting structured arguments";
+                    return;
+                }
             }
         }
         const char* content = document["choices"][0]["delta"]["content"].as<const char*>();
@@ -749,11 +768,16 @@ CompletionTurnResult streamCompletionTurn(const Settings& settings,
         if (!sink.done()) {
             return {false, completeResponse, {}, "SSE stream ended without the [DONE] sentinel"};
         }
-        for (const auto& call : sink.toolCalls()) {
+        for (std::size_t index = 0; index < sink.toolCalls().size(); ++index) {
+            const ToolCall& call = sink.toolCalls()[index];
             if (call.id.empty() || call.name.empty() || call.arguments.empty() ||
                 !isValidUtf8(call.id) || !isValidUtf8(call.name) || !isValidUtf8(call.arguments)) {
                 return {false, completeResponse, {},
-                        "Streaming response contained an incomplete or invalid tool call"};
+                        "Streaming response contained an incomplete or invalid tool call at index " +
+                            String(static_cast<unsigned int>(index)) +
+                            " (id_bytes=" + String(call.id.size()) +
+                            ", name_bytes=" + String(call.name.size()) +
+                            ", argument_bytes=" + String(call.arguments.size()) + ")"};
             }
         }
         return {true, completeResponse, sink.toolCalls(), ""};
@@ -769,13 +793,28 @@ ChatResult streamChatCompletion(const Settings& settings,
                                 const ChatTextCallback& onText,
                                 const CancelCallback& isCancelled)
 {
+    return streamChatCompletionWithBudget(
+        settings, history, instructions, 1024, onText, isCancelled);
+}
+
+ChatResult streamChatCompletionWithBudget(const Settings& settings,
+                                          const std::vector<Message>& history,
+                                          const std::string& instructions,
+                                          std::uint32_t maximumOutputTokens,
+                                          const ChatTextCallback& onText,
+                                          const CancelCallback& isCancelled)
+{
     if (history.empty() || history.back().role != "user") {
         return {false, "", "Chat request requires a final user message"};
     }
     if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
         return {false, "", "Not enough free heap to start chat request safely"};
     }
-    const String payload = buildChatRequest(settings, history, instructions);
+    if (maximumOutputTokens < 128 || maximumOutputTokens > 16384) {
+        return {false, "", "Output token budget must be between 128 and 16384"};
+    }
+    const String payload = buildChatRequest(
+        settings, history, instructions, maximumOutputTokens);
     if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
         return {false, "", "Chat payload left less than 70000 bytes of free heap; start a new chat"};
     }
@@ -800,8 +839,26 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const ToolExecutor& executeTool,
                                          const CancelCallback& isCancelled)
 {
+    return streamChatCompletionWithToolsAndBudget(
+        settings, history, instructions, sshToolAvailable, 1024,
+        onText, executeTool, isCancelled);
+}
+
+ChatResult streamChatCompletionWithToolsAndBudget(
+    const Settings& settings,
+    const std::vector<Message>& history,
+    const std::string& instructions,
+    bool sshToolAvailable,
+    std::uint32_t maximumOutputTokens,
+    const ChatTextCallback& onText,
+    const ToolExecutor& executeTool,
+    const CancelCallback& isCancelled)
+{
     if (history.empty() || history.back().role != "user") {
         return {false, "", "Chat request requires a final user message"};
+    }
+    if (maximumOutputTokens < 128 || maximumOutputTokens > 16384) {
+        return {false, "", "Output token budget must be between 128 and 16384"};
     }
     std::vector<ToolRound> rounds;
     std::string completeResponse;
@@ -815,7 +872,8 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
             return {false, completeResponse, "Not enough free heap to continue tool request safely"};
         }
         const String payload = buildToolChatRequest(
-            settings, history, instructions, sshToolAvailable, rounds);
+            settings, history, instructions, sshToolAvailable,
+            maximumOutputTokens, rounds);
         if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
             return {false, completeResponse,
                     "Tool payload left less than 70000 bytes of free heap; start a new chat"};

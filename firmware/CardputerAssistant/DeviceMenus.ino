@@ -210,9 +210,17 @@ std::vector<String> workspaceFileItems()
         workspaceListMode == WorkspaceListMode::ImportChat
             ? String("Choose a chat bundle below")
             : String("+ New text file")};
-    items.reserve(workspaceFiles.size() + 1);
+    items.reserve(workspaceFiles.size() + 3);
     for (const auto& file : workspaceFiles) {
-        items.push_back(file.name + "  " + String(file.size) + " B");
+        items.push_back((file.directory ? String("[DIR] ") : String()) +
+                        file.name + (file.directory ? String() :
+                        "  " + String(file.size) + " B"));
+    }
+    if (!workspacePreviousPageOffsets.empty()) {
+        items.push_back("< Previous entries");
+    }
+    if (!workspacePageEof) {
+        items.push_back("Next entries >");
     }
     return items;
 }
@@ -220,6 +228,11 @@ std::vector<String> workspaceFileItems()
 std::vector<String> fileActionItems()
 {
     const String mode = cardputer::documentReaderModeLabel(fileReaderMode).c_str();
+    const cardputer::SharedFileLinkResult linked =
+        cardputer::projectHasSharedFileLink(activeProjectId, fileViewerName);
+    const String linkAction = linked.success && linked.linked
+        ? String("Unlink from active project")
+        : String("Link to active project");
     return {
         "View as " + mode,
         "Edit current page",
@@ -232,6 +245,7 @@ std::vector<String> fileActionItems()
         "Open bookmark",
         "Save copy as...",
         "Rename...",
+        linkAction,
         "Delete file",
         "Back",
     };
@@ -246,7 +260,7 @@ std::vector<cardputer::CarouselCard> carouselCards()
         networkSubtitle = String("Connecting: ") + settings.wifiSsid;
     }
     return {
-        {"CONVERSATIONS", "CHATS", "Open · New · Manage", 0x2F1C, cardputer::CarouselIcon::Chats},
+        {"CONTEXTS", "PROJECTS", "Chats · Files · Instructions", 0x2F1C, cardputer::CarouselIcon::Chats},
         {"MODELS & TOOLS", "AI", settings.model, 0xA23F, cardputer::CarouselIcon::Ai},
         {"SPEECH", "VOICE", "STT · TTS · Volume", 0xFD20, cardputer::CarouselIcon::Voice},
         {"CONNECTIVITY", "NETWORK", networkSubtitle, 0xB7E6, cardputer::CarouselIcon::Network},
@@ -508,8 +522,10 @@ void openWebConsole(Screen returnScreen)
         const cardputer::OperationResult clockResult = wifiResult.success && wifiChanged
             ? cardputer::synchronizeTlsClock()
             : wifiResult;
-        const cardputer::OperationResult activeResult = activateChat(result.activeChatId);
-        const cardputer::OperationResult listResult = refreshChatList();
+        const cardputer::OperationResult activeResult = initializeChats();
+        const cardputer::OperationResult listResult = activeResult.success
+            ? refreshProjectPage(0)
+            : activeResult;
         if (!runtimeResult.success) {
             menuStatus = runtimeResult.error;
         } else if (!wifiResult.success) {
