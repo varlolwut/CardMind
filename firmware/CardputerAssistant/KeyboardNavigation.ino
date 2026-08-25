@@ -671,7 +671,7 @@ void handleKeyboard()
             };
             const cardputer::FirmwareCancelCallback cancelled = []() {
                 M5Cardputer.update();
-                return M5Cardputer.Keyboard.keysState().esc;
+                return cardputerEscapePressed();
             };
             cardputer::markOperation("ota_download");
             cardputer::OperationResult result = cardputer::downloadFirmwareUpdate(
@@ -1727,7 +1727,7 @@ void handleKeyboard()
     }
 
     if (currentScreen == Screen::Chat && cancelPressed) {
-        openCarousel();
+        openChatList(Screen::MainCarousel);
         return;
     }
 

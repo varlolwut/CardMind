@@ -1,5 +1,6 @@
 #include "tts_client.h"
 
+#include "adv_audio_power.h"
 #include "storage.h"
 #include "text_utils.h"
 
@@ -195,6 +196,18 @@ struct SpeakerWaitResult {
     String error;
 };
 
+OperationResult finishSpeaker(const OperationResult& playbackResult)
+{
+    const OperationResult shutdown = powerDownCardputerAdvAudio();
+    if (shutdown.success) {
+        return playbackResult;
+    }
+    if (playbackResult.success) {
+        return shutdown;
+    }
+    return {false, playbackResult.error + "; " + shutdown.error};
+}
+
 SpeakerWaitResult waitForSpeakerIdle(const SpeechPlaybackControl& control,
                                      std::uint32_t timeoutMs)
 {
@@ -239,10 +252,9 @@ OperationResult playPcmFile(std::uint8_t volume, const SpeechPlaybackControl& co
                 waitForSpeakerIdle(control, kSpeakerDrainTimeoutMs);
             if (!drained.success || drained.stopped) {
                 file.close();
-                M5Cardputer.Speaker.end();
-                return drained.stopped
+                return finishSpeaker(drained.stopped
                     ? OperationResult{true, "Speech playback stopped"}
-                    : OperationResult{false, drained.error};
+                    : OperationResult{false, drained.error});
             }
             delay(10);
             command = control();
@@ -250,32 +262,31 @@ OperationResult playPcmFile(std::uint8_t volume, const SpeechPlaybackControl& co
         if (command == SpeechPlaybackCommand::Stop) {
             M5Cardputer.Speaker.stop();
             file.close();
-            M5Cardputer.Speaker.end();
-            return {true, "Speech playback stopped"};
+            return finishSpeaker({true, "Speech playback stopped"});
         }
         auto& buffer = playbackBuffers[bufferIndex];
         const std::size_t bytes = file.read(
             reinterpret_cast<std::uint8_t*>(buffer.data()), buffer.size() * sizeof(std::int16_t));
         if (bytes == 0 || bytes % sizeof(std::int16_t) != 0) {
             file.close();
-            M5Cardputer.Speaker.end();
-            return {false, "Failed to read aligned PCM samples from microSD"};
+            return finishSpeaker(
+                {false, "Failed to read aligned PCM samples from microSD"});
         }
         if (!M5Cardputer.Speaker.playRaw(buffer.data(), bytes / sizeof(std::int16_t),
                                           kPcmSampleRate, false, 1, 0)) {
             file.close();
-            M5Cardputer.Speaker.end();
-            return {false, "Cardputer speaker rejected a TTS PCM chunk"};
+            return finishSpeaker(
+                {false, "Cardputer speaker rejected a TTS PCM chunk"});
         }
         bufferIndex = (bufferIndex + 1) % playbackBuffers.size();
     }
     file.close();
     const SpeakerWaitResult drained = waitForSpeakerIdle(control, kSpeakerDrainTimeoutMs);
-    M5Cardputer.Speaker.end();
     if (!drained.success) {
-        return {false, drained.error};
+        return finishSpeaker({false, drained.error});
     }
-    return {true, drained.stopped ? String("Speech playback stopped") : String()};
+    return finishSpeaker(
+        {true, drained.stopped ? String("Speech playback stopped") : String()});
 }
 
 OperationResult downloadSpeech(const Settings& settings,
@@ -490,15 +501,15 @@ OperationResult playTtsHardwareTestControlled(std::uint8_t volume,
     }
     M5Cardputer.Speaker.setVolume(volume);
     if (!M5Cardputer.Speaker.playRaw(samples.data(), samples.size(), kPcmSampleRate, false, 1, 0)) {
-        M5Cardputer.Speaker.end();
-        return {false, "Cardputer speaker rejected the hardware test PCM"};
+        return finishSpeaker(
+            {false, "Cardputer speaker rejected the hardware test PCM"});
     }
     const SpeakerWaitResult drained = waitForSpeakerIdle(control, kSpeakerDrainTimeoutMs);
-    M5Cardputer.Speaker.end();
     if (!drained.success) {
-        return {false, drained.error};
+        return finishSpeaker({false, drained.error});
     }
-    return {true, drained.stopped ? String("Speech playback stopped") : String()};
+    return finishSpeaker(
+        {true, drained.stopped ? String("Speech playback stopped") : String()});
 }
 
 }  // namespace cardputer
