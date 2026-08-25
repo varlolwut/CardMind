@@ -53,7 +53,7 @@ void handleVoiceInput()
     cardputer::markOperation("stt_request");
     const cardputer::CancelCallback sttCancelled = []() {
         M5Cardputer.update();
-        return M5Cardputer.Keyboard.keysState().esc;
+        return cardputerEscapePressed();
     };
     const cardputer::TranscriptionResult transcription =
         cardputer::transcribeVoiceRecording(settings, sttCancelled);
@@ -103,7 +103,7 @@ void handleVoiceInput()
 cardputer::SpeechPlaybackCommand chatSpeechPlaybackControl()
 {
     M5Cardputer.update();
-    return M5Cardputer.Keyboard.keysState().esc
+    return cardputerEscapePressed()
         ? cardputer::SpeechPlaybackCommand::Stop
         : cardputer::SpeechPlaybackCommand::Continue;
 }
@@ -140,6 +140,8 @@ void speakLastAssistantResponse()
         settings, message->content, chatSpeechPlaybackControl);
     cardputer::markOperation("idle");
     if (speechWasStopped(result)) {
+        waitForModalKeyRelease();
+        pressedKeys.clear();
         setTransientStatus("Speech stopped", 1500);
         Serial.println("INFO event=tts_playback result=stopped source=manual");
     } else if (result.success) {
@@ -226,6 +228,10 @@ cardputer::OperationResult playDocumentSpeechText(const std::string& text,
         const cardputer::OperationResult spoken = cardputer::synthesizeAndPlaySpeechControlled(
             settings, text.substr(offset, bytes), control);
         if (!spoken.success || stopped || !spoken.error.isEmpty()) {
+            if (stopped) {
+                waitForModalKeyRelease();
+                pressedKeys.clear();
+            }
             return spoken;
         }
         offset += bytes;
