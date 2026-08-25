@@ -88,7 +88,10 @@ const stateScript = `const previewState=${JSON.stringify(previewState)};\n`;
 const page = source
     .replace("let csrf=''", "let csrf='preview'")
     .replace("</script>", `${stateScript}render(previewState);</script>`)
-    .replace("loadSession().then(refresh).catch(e=>showStatus(e.message));", "");
+    .replace(
+        "loadSession().then(()=>showPanel(location.hash.slice(1)||'chat')).catch(showError);",
+        "showPanel(location.hash.slice(1)||'chat');",
+    );
 const server = createServer((request, response) => {
     if (request.url !== "/" && request.url !== "/index.html") {
         response.writeHead(404, {"Content-Type": "text/plain; charset=utf-8"});

@@ -32,6 +32,7 @@ enum class WebConsoleRouteHandler : std::size_t {
     Settings,
     Models,
     Diagnostics,
+    DiagnosticMetrics,
     PythonStart,
     SshSettings,
     SshSelect,

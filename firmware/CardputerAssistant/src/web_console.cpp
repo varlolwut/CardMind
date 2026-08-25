@@ -14,6 +14,7 @@
 #include "tool_router.h"
 #include "ui.h"
 #include "web_console_routes.h"
+#include "web_console_metrics.h"
 #include "web_console_state.h"
 #include "web_console_transport.h"
 #include "web_search_client.h"
@@ -28,6 +29,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <vector>
@@ -45,6 +47,17 @@ WebServer server(80);
 Settings consoleSettings;
 ChatDocument activeChat;
 std::vector<ChatSummary> consoleChats;
+std::vector<WorkspaceFile> consoleFiles;
+std::vector<SshProfile> consoleSshProfiles;
+std::size_t consoleSshSelected = 0;
+bool consoleSshPrivateKeyInstalled = false;
+bool filesIndexReady = false;
+bool sshProfilesReady = false;
+std::uint32_t chatsRevision = 0;
+std::uint32_t chatRevision = 0;
+std::uint32_t filesRevision = 0;
+std::uint32_t sshRevision = 0;
+std::uint32_t settingsRevision = 0;
 String accessPassword;
 String sessionToken;
 String csrfToken;
@@ -71,6 +84,27 @@ std::size_t sshKeyUploadBytes = 0;
 constexpr const char* kSshKeyUploadPath = "/assistant/ssh/upload.tmp";
 SshClient webSshClient;
 SshProfile webSshProfile = {"", "", 22, "", "", SshAuthMode::Password, ""};
+enum class WebSshStage : std::uint8_t {
+    Idle,
+    Connecting,
+    AwaitingTrust,
+    Authenticating,
+    Opening,
+    Connected,
+    Stopping,
+    Failed,
+};
+portMUX_TYPE webSshStateMux = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t webSshTask = nullptr;
+WebSshStage webSshStage = WebSshStage::Idle;
+bool webSshCancelRequested = false;
+char webSshError[192] = {};
+char webSshFingerprint[96] = {};
+char webSshHostKeyType[32] = {};
+bool webSshHostChanged = false;
+std::uint32_t webSshConnectMs = 0;
+std::uint32_t webSshAuthenticateMs = 0;
+std::uint32_t webSshOpenMs = 0;
 bool webSshAwaitingTrust = false;
 bool webSshTerminalOpen = false;
 bool consoleEscapeConsumed = false;
@@ -78,6 +112,39 @@ std::uint32_t passwordRevealUntil = 0;
 String consoleQrPayload;
 String firmwareVersion;
 bool pythonRestartRequested = false;
+
+const char* webSshStageName(WebSshStage stage)
+{
+    switch (stage) {
+        case WebSshStage::Idle: return "idle";
+        case WebSshStage::Connecting: return "connecting";
+        case WebSshStage::AwaitingTrust: return "awaiting_trust";
+        case WebSshStage::Authenticating: return "authenticating";
+        case WebSshStage::Opening: return "opening";
+        case WebSshStage::Connected: return "connected";
+        case WebSshStage::Stopping: return "stopping";
+        case WebSshStage::Failed: return "failed";
+    }
+    return "failed";
+}
+
+void publishWebSshStage(WebSshStage stage, const String& error)
+{
+    char copiedError[sizeof(webSshError)] = {};
+    std::snprintf(copiedError, sizeof(copiedError), "%s", error.c_str());
+    portENTER_CRITICAL(&webSshStateMux);
+    webSshStage = stage;
+    std::memcpy(webSshError, copiedError, sizeof(webSshError));
+    portEXIT_CRITICAL(&webSshStateMux);
+}
+
+bool webSshTaskIsRunning()
+{
+    portENTER_CRITICAL(&webSshStateMux);
+    const bool running = webSshTask != nullptr;
+    portEXIT_CRITICAL(&webSshStateMux);
+    return running;
+}
 
 bool consoleEscapePressed()
 {
@@ -105,13 +172,28 @@ bool parseUnsignedArgument(const String& value, std::uint32_t& result)
     return true;
 }
 
-void closeWebSshConnection()
+void clearWebSshConnection()
 {
     webSshClient.close();
     webSshAwaitingTrust = false;
     webSshTerminalOpen = false;
     webSshProfile.password = String();
     webSshProfile.privateKeyPassphrase = String();
+}
+
+void closeWebSshConnection()
+{
+    portENTER_CRITICAL(&webSshStateMux);
+    const bool running = webSshTask != nullptr;
+    if (running) {
+        webSshCancelRequested = true;
+        webSshStage = WebSshStage::Stopping;
+    }
+    portEXIT_CRITICAL(&webSshStateMux);
+    if (!running) {
+        clearWebSshConnection();
+        publishWebSshStage(WebSshStage::Idle, "");
+    }
 }
 
 String normalizedBaseUrl(String value)
@@ -162,6 +244,17 @@ void releaseConsoleSessionState()
     consoleSettings = Settings{};
     activeChat = ChatDocument{};
     std::vector<ChatSummary>().swap(consoleChats);
+    std::vector<WorkspaceFile>().swap(consoleFiles);
+    std::vector<SshProfile>().swap(consoleSshProfiles);
+    consoleSshSelected = 0;
+    consoleSshPrivateKeyInstalled = false;
+    filesIndexReady = false;
+    sshProfilesReady = false;
+    chatsRevision = 0;
+    chatRevision = 0;
+    filesRevision = 0;
+    sshRevision = 0;
+    settingsRevision = 0;
     std::string().swap(activeResponse);
 }
 
@@ -253,23 +346,78 @@ std::uint64_t currentTimestamp()
 
 OperationResult refreshChats()
 {
+    const std::uint32_t startedAt = millis();
     const ChatsResult result = listChats();
+    recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         return {false, result.error};
     }
     consoleChats = result.chats;
+    ++chatsRevision;
+    return {true, ""};
+}
+
+OperationResult refreshFiles()
+{
+    const std::uint32_t startedAt = millis();
+    const WorkspaceFilesResult result = listWorkspaceFiles();
+    recordWebSdRead(millis() - startedAt);
+    if (!result.success) {
+        return {false, result.error};
+    }
+    consoleFiles = result.files;
+    filesIndexReady = true;
+    ++filesRevision;
+    return {true, ""};
+}
+
+OperationResult refreshSshProfiles()
+{
+    const std::uint32_t startedAt = millis();
+    std::vector<SshProfile> profiles;
+    std::size_t selected = 0;
+    const OperationResult result = loadSshProfiles(profiles, selected);
+    if (result.success) {
+        consoleSshPrivateKeyInstalled = sshPrivateKeyIsInstalled();
+    }
+    recordWebSdRead(millis() - startedAt);
+    if (!result.success) {
+        return result;
+    }
+    for (SshProfile& profile : profiles) {
+        profile.password = "";
+        profile.privateKeyPassphrase = "";
+    }
+    consoleSshProfiles = std::move(profiles);
+    consoleSshSelected = selected;
+    sshProfilesReady = true;
+    ++sshRevision;
     return {true, ""};
 }
 
 OperationResult loadActiveChat(const String& id)
 {
+    const std::uint32_t startedAt = millis();
     const ChatDocumentResult loaded = loadChat(id);
+    recordWebSdRead(millis() - startedAt);
     if (!loaded.success) {
         return {false, loaded.error};
     }
     activeChat = loaded.chat;
     activeResponse.clear();
+    ++chatRevision;
     return {true, ""};
+}
+
+OperationResult saveActiveChat()
+{
+    const std::uint32_t startedAt = millis();
+    const OperationResult result = saveChat(activeChat);
+    recordWebSdWrite(millis() - startedAt);
+    if (result.success) {
+        ++chatRevision;
+    }
+    return result;
 }
 
 bool consolePasswordVisible()
@@ -399,43 +547,80 @@ void handleState()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    const std::uint32_t startedAt = millis();
     JsonDocument document;
     const WebConsoleRuntimeState runtime = {
         consoleStatus,
         firmwareVersion,
         webSshTerminalOpen && webSshClient.isOpen(),
     };
-    const String view = server.arg("view");
-    OperationResult result = {true, ""};
-    if (view.isEmpty()) {
-        result = buildWebConsoleState(
-            consoleSettings, activeChat, consoleChats, runtime, document);
-    } else if (view == "status") {
-        buildWebConsoleStatusState(runtime, document);
+    String view = server.arg("view");
+    const String path = server.uri();
+    if (path == "/api/status") view = "status";
+    else if (path == "/api/chats") view = "chats";
+    else if (path == "/api/chat") view = "chat";
+    else if (path == "/api/files") view = "files";
+    else if (path == "/api/ssh/state") view = "ssh";
+    else if (path == "/api/settings") view = "settings";
+    if (view == "status") {
+        buildWebConsoleStatusState(runtime, webDiagnosticsEnabled(), document);
+    } else if (view == "chats") {
+        buildWebConsoleChatsState(consoleChats, chatsRevision, document);
     } else if (view == "chat") {
-        buildWebConsoleChatState(consoleSettings, activeChat, consoleChats, document);
+        buildWebConsoleChatState(consoleSettings, activeChat, chatRevision, document);
     } else if (view == "files") {
-        result = buildWebConsoleFilesState(document);
+        if (!filesIndexReady) {
+            const OperationResult refreshed = refreshFiles();
+            if (!refreshed.success) {
+                sendWebJsonError(server, 500, refreshed.error);
+                return;
+            }
+        }
+        buildWebConsoleFilesState(consoleFiles, SD.totalBytes(), SD.usedBytes(),
+                                  filesRevision, document);
     } else if (view == "ssh") {
-        result = buildWebConsoleSshState(runtime, document);
+        if (!sshProfilesReady) {
+            const OperationResult refreshed = refreshSshProfiles();
+            if (!refreshed.success) {
+                sendWebJsonError(server, 500, refreshed.error);
+                return;
+            }
+        }
+        buildWebConsoleSshState(consoleSshProfiles, consoleSshSelected,
+                                consoleSshPrivateKeyInstalled, runtime,
+                                sshRevision, document);
+        char error[sizeof(webSshError)] = {};
+        char fingerprint[sizeof(webSshFingerprint)] = {};
+        char keyType[sizeof(webSshHostKeyType)] = {};
+        WebSshStage stage = WebSshStage::Idle;
+        bool hostChanged = false;
+        std::uint32_t connectMs = 0;
+        std::uint32_t authenticateMs = 0;
+        std::uint32_t openMs = 0;
+        portENTER_CRITICAL(&webSshStateMux);
+        stage = webSshStage;
+        std::memcpy(error, webSshError, sizeof(error));
+        std::memcpy(fingerprint, webSshFingerprint, sizeof(fingerprint));
+        std::memcpy(keyType, webSshHostKeyType, sizeof(keyType));
+        hostChanged = webSshHostChanged;
+        connectMs = webSshConnectMs;
+        authenticateMs = webSshAuthenticateMs;
+        openMs = webSshOpenMs;
+        portEXIT_CRITICAL(&webSshStateMux);
+        document["ssh_stage"] = webSshStageName(stage);
+        document["ssh_error"] = error;
+        document["ssh_fingerprint"] = fingerprint;
+        document["ssh_key_type"] = keyType;
+        document["ssh_host_changed"] = hostChanged;
+        document["ssh_connect_ms"] = connectMs;
+        document["ssh_authenticate_ms"] = authenticateMs;
+        document["ssh_open_ms"] = openMs;
     } else if (view == "settings") {
-        buildWebConsoleSettingsState(consoleSettings, runtime, document);
+        buildWebConsoleSettingsState(consoleSettings, runtime, settingsRevision,
+                                     document);
     } else {
-        sendWebJsonError(server, 400, "Unknown state view: " + view);
+        sendWebJsonError(server, 400, "Use a specialized state endpoint");
         return;
     }
-    if (!result.success) {
-        sendWebJsonError(server, 500, result.error);
-        return;
-    }
-    const std::uint32_t durationMs = millis() - startedAt;
-    const std::size_t responseBytes = measureJson(document);
-    server.sendHeader("Server-Timing", "state;dur=" + String(durationMs));
-    server.sendHeader("X-CardMind-State-Bytes", String(responseBytes));
-    Serial.printf("WEB_API endpoint=state view=%s duration_ms=%u response_bytes=%u heap=%u\n",
-                  view.isEmpty() ? "all" : view.c_str(), durationMs,
-                  static_cast<unsigned int>(responseBytes), ESP.getFreeHeap());
     sendWebJson(server, 200, document);
 }
 
@@ -443,6 +628,12 @@ void handlePrompt()
 {
     if (!requestHasValidCsrf()) {
         sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    if (webSshTaskIsRunning()) {
+        sendWebJsonError(
+            server, 409,
+            "Wait for the background SSH connection attempt to finish or stop it");
         return;
     }
     const String promptValue = server.arg("prompt");
@@ -512,8 +703,10 @@ void handlePrompt()
         archivedMessages.push_back(std::move(message));
     }
     if (!archivedMessages.empty()) {
+        const std::uint32_t archiveStartedAt = millis();
         const OperationResult archived = archiveChatMessages(
             activeChat.summary.id, archivedMessages);
+        recordWebSdWrite(millis() - archiveStartedAt);
         if (!archived.success) {
             activeResponse.clear();
             consoleStatus = archived.error;
@@ -530,7 +723,7 @@ void handlePrompt()
     }
     activeChat.summary.messageCount = activeChat.messages.size();
     activeChat.summary.updatedAt = currentTimestamp();
-    const OperationResult saved = saveChat(activeChat);
+    const OperationResult saved = saveActiveChat();
     activeResponse.clear();
     consoleStatus = saved.success ? String("Saved") : saved.error;
     if (saved.success) {
@@ -567,12 +760,15 @@ void handleNewChat()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const ChatDocumentResult created = createChat("New chat");
+    recordWebSdWrite(millis() - startedAt);
     if (!created.success) {
         sendWebJsonError(server, 400, created.error);
         return;
     }
     activeChat = created.chat;
+    ++chatRevision;
     OperationResult result = refreshChats();
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
@@ -599,9 +795,14 @@ void handleInstructions()
     }
     activeChat.instructions = instructions;
     activeChat.summary.updatedAt = currentTimestamp();
-    const OperationResult saved = saveChat(activeChat);
+    const OperationResult saved = saveActiveChat();
     if (!saved.success) {
         sendWebJsonError(server, 500, saved.error);
+        return;
+    }
+    const OperationResult refreshed = refreshChats();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     consoleStatus = instructions.empty() ? String("Instructions disabled")
@@ -624,22 +825,32 @@ void handleChatPermissions()
         return;
     }
     if (requested == "1") {
-        SshProfile profile;
-        const OperationResult loaded = loadSshProfile(profile);
-        const bool complete = loaded.success && sshProfileIsComplete(profile);
-        profile.password = "";
-        profile.privateKeyPassphrase = "";
+        if (!sshProfilesReady) {
+            const OperationResult refreshed = refreshSshProfiles();
+            if (!refreshed.success) {
+                sendWebJsonError(server, 500, refreshed.error);
+                return;
+            }
+        }
+        const bool complete = !consoleSshProfiles.empty() &&
+            consoleSshSelected < consoleSshProfiles.size() &&
+            sshProfileIsComplete(consoleSshProfiles[consoleSshSelected]);
         if (!complete) {
-            sendWebJsonError(server, 409, loaded.success
-                ? String("A complete selected SSH profile is required") : loaded.error);
+            sendWebJsonError(server, 409,
+                             "A complete selected SSH profile is required");
             return;
         }
     }
     activeChat.sshToolsEnabled = requested == "1";
     activeChat.summary.updatedAt = currentTimestamp();
-    const OperationResult saved = saveChat(activeChat);
+    const OperationResult saved = saveActiveChat();
     if (!saved.success) {
         sendWebJsonError(server, 500, saved.error);
+        return;
+    }
+    const OperationResult refreshed = refreshChats();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     consoleStatus = activeChat.sshToolsEnabled
@@ -663,7 +874,7 @@ void handleRenameChat()
     }
     activeChat.summary.title = makeChatTitle(requestedTitle, kMaximumChatTitleCells).c_str();
     activeChat.summary.updatedAt = currentTimestamp();
-    OperationResult result = saveChat(activeChat);
+    OperationResult result = saveActiveChat();
     if (result.success) {
         result = refreshChats();
     }
@@ -688,7 +899,7 @@ void handlePinChat()
     if (activeChat.summary.pinned) {
         activeChat.summary.archived = false;
     }
-    OperationResult result = saveChat(activeChat);
+    OperationResult result = saveActiveChat();
     if (result.success) {
         result = refreshChats();
     }
@@ -712,7 +923,7 @@ void handleArchiveChat()
     if (activeChat.summary.archived) {
         activeChat.summary.pinned = false;
     }
-    OperationResult result = saveChat(activeChat);
+    OperationResult result = saveActiveChat();
     if (result.success) {
         result = refreshChats();
     }
@@ -733,12 +944,15 @@ void handleDuplicateChat()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const ChatDocumentResult duplicated = duplicateChat(activeChat.summary.id);
+    recordWebSdWrite(millis() - startedAt);
     if (!duplicated.success) {
         sendWebJsonError(server, 500, duplicated.error);
         return;
     }
     activeChat = duplicated.chat;
+    ++chatRevision;
     const OperationResult refreshed = refreshChats();
     if (!refreshed.success) {
         sendWebJsonError(server, 500, refreshed.error);
@@ -758,10 +972,17 @@ void handleExportChat()
         return;
     }
     const String filename = "chat_" + activeChat.summary.id + ".md";
+    const std::uint32_t startedAt = millis();
     const OperationResult exported = exportChatToWorkspace(
         activeChat.summary.id, filename);
+    recordWebSdWrite(millis() - startedAt);
     if (!exported.success) {
         sendWebJsonError(server, 400, exported.error);
+        return;
+    }
+    const OperationResult refreshed = refreshFiles();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     consoleStatus = "Chat exported as " + filename;
@@ -778,10 +999,17 @@ void handleExportChatBundle()
         return;
     }
     const String filename = "chat_" + activeChat.summary.id + ".chat.jsonl";
+    const std::uint32_t startedAt = millis();
     const OperationResult exported = exportChatBundleToWorkspace(
         activeChat.summary.id, filename);
+    recordWebSdWrite(millis() - startedAt);
     if (!exported.success) {
         sendWebJsonError(server, 400, exported.error);
+        return;
+    }
+    const OperationResult refreshed = refreshFiles();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     consoleStatus = "Chat bundle exported as " + filename;
@@ -797,12 +1025,15 @@ void handleImportChatBundle()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const ChatDocumentResult imported = importChatBundleFromWorkspace(server.arg("name"));
+    recordWebSdWrite(millis() - startedAt);
     if (!imported.success) {
         sendWebJsonError(server, 400, imported.error);
         return;
     }
     activeChat = imported.chat;
+    ++chatRevision;
     const OperationResult refreshed = refreshChats();
     if (!refreshed.success) {
         sendWebJsonError(server, 500, refreshed.error);
@@ -822,7 +1053,9 @@ void handleDeleteChat()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const std::uint32_t startedAt = millis();
     OperationResult result = deleteChat(activeChat.summary.id);
+    recordWebSdWrite(millis() - startedAt);
     if (result.success) {
         result = refreshChats();
     }
@@ -837,6 +1070,7 @@ void handleDeleteChat()
             return;
         }
         activeChat = created.chat;
+        ++chatRevision;
         result = refreshChats();
     } else {
         result = loadActiveChat(consoleChats.front().id);
@@ -947,6 +1181,7 @@ void handleSettings()
         return;
     }
     consoleSettings = updated;
+    ++settingsRevision;
     consoleStatus = "Settings saved; Wi-Fi changes apply after closing the console";
     JsonDocument document;
     document["ok"] = true;
@@ -959,7 +1194,9 @@ void handleClearChat()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const std::uint32_t startedAt = millis();
     OperationResult result = clearChatHistory(activeChat.summary.id);
+    recordWebSdWrite(millis() - startedAt);
     if (result.success) {
         result = loadActiveChat(activeChat.summary.id);
     }
@@ -988,8 +1225,10 @@ void handleArchivedMessages()
         sendWebJsonError(server, 400, "Archive offset must be an unsigned integer");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const ArchivedMessagesPageResult result = readArchivedChatMessages(
         activeChat.summary.id, offset, 8, 12000);
+    recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
@@ -1057,6 +1296,24 @@ void handleDiagnosticsDownload()
     server.sendHeader("Cache-Control", "no-store");
     server.sendHeader("Content-Disposition", "attachment; filename=cardmind-diagnostics.txt");
     server.send(200, "text/plain; charset=utf-8", report);
+}
+
+void handleDiagnosticMetrics()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    const String enabled = server.arg("enabled");
+    if (enabled != "0" && enabled != "1") {
+        sendWebJsonError(server, 400, "Diagnostic metrics enabled must be 0 or 1");
+        return;
+    }
+    setWebDiagnosticsEnabled(enabled == "1");
+    JsonDocument document;
+    document["ok"] = true;
+    document["enabled"] = webDiagnosticsEnabled();
+    sendWebJson(server, 200, document);
 }
 
 void handlePythonStart()
@@ -1135,6 +1392,7 @@ void handleSshSettings()
         profile.privateKeyPassphrase = server.arg("key_passphrase");
     }
     OperationResult saved;
+    const std::uint32_t saveStartedAt = millis();
     if (create) {
         std::vector<SshProfile> profiles;
         std::size_t selectedIndex = 0;
@@ -1143,10 +1401,16 @@ void handleSshSettings()
     } else {
         saved = saveSshProfile(profile);
     }
+    recordWebSdWrite(millis() - saveStartedAt);
     profile.password = "";
     profile.privateKeyPassphrase = "";
     if (!saved.success) {
         sendWebJsonError(server, 400, saved.error);
+        return;
+    }
+    const OperationResult refreshed = refreshSshProfiles();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     consoleStatus = "SSH profile saved";
@@ -1166,9 +1430,16 @@ void handleSshSelect()
         sendWebJsonError(server, 400, "SSH profile index must be an unsigned integer");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const OperationResult result = selectSshProfile(index);
+    recordWebSdWrite(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    const OperationResult refreshed = refreshSshProfiles();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     JsonDocument document;
@@ -1187,9 +1458,16 @@ void handleSshDelete()
         sendWebJsonError(server, 400, "SSH profile index must be an unsigned integer");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const OperationResult result = deleteSshProfile(index);
+    recordWebSdWrite(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    const OperationResult refreshed = refreshSshProfiles();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
         return;
     }
     JsonDocument document;
@@ -1197,16 +1475,132 @@ void handleSshDelete()
     sendWebJson(server, 200, document);
 }
 
-OperationResult finishWebSshStart()
+bool webSshCancellationRequested()
 {
-    OperationResult result = webSshClient.authenticate(webSshProfile, 10000);
-    if (result.success) result = webSshClient.openTerminal(120, 36, 10000);
-    if (!result.success) {
-        closeWebSshConnection();
-        return result;
+    portENTER_CRITICAL(&webSshStateMux);
+    const bool requested = webSshCancelRequested;
+    portEXIT_CRITICAL(&webSshStateMux);
+    return requested;
+}
+
+void completeWebSshWorker(WebSshStage stage, const String& error,
+                          bool closeConnection)
+{
+    if (closeConnection) {
+        clearWebSshConnection();
+    }
+    publishWebSshStage(stage, error);
+    portENTER_CRITICAL(&webSshStateMux);
+    webSshTask = nullptr;
+    webSshCancelRequested = false;
+    portEXIT_CRITICAL(&webSshStateMux);
+}
+
+void runWebSshWorker(void* parameter)
+{
+    const bool authenticateOnly = reinterpret_cast<std::uintptr_t>(parameter) == 1U;
+    OperationResult result = {true, ""};
+    if (!authenticateOnly) {
+        publishWebSshStage(WebSshStage::Connecting, "");
+        const std::uint32_t startedAt = millis();
+        result = webSshClient.connect(webSshProfile, 10000);
+        const std::uint32_t durationMs = millis() - startedAt;
+        portENTER_CRITICAL(&webSshStateMux);
+        webSshConnectMs = durationMs;
+        portEXIT_CRITICAL(&webSshStateMux);
+        if (!result.success || webSshCancellationRequested()) {
+            completeWebSshWorker(
+                webSshCancellationRequested() ? WebSshStage::Idle : WebSshStage::Failed,
+                webSshCancellationRequested() ? String() : result.error, true);
+            vTaskDelete(nullptr);
+            return;
+        }
+        const SshTrustResult trust = checkTrustedSshHost(
+            webSshProfile.host, webSshProfile.port, webSshClient.fingerprint());
+        if (!trust.success) {
+            completeWebSshWorker(WebSshStage::Failed, trust.error, true);
+            vTaskDelete(nullptr);
+            return;
+        }
+        if (!trust.found || !trust.matches) {
+            const String fingerprint = webSshClient.fingerprint();
+            const String keyType = webSshClient.hostKeyType();
+            portENTER_CRITICAL(&webSshStateMux);
+            std::snprintf(webSshFingerprint, sizeof(webSshFingerprint), "%s",
+                          fingerprint.c_str());
+            std::snprintf(webSshHostKeyType, sizeof(webSshHostKeyType), "%s",
+                          keyType.c_str());
+            webSshHostChanged = trust.found && !trust.matches;
+            webSshAwaitingTrust = true;
+            webSshStage = WebSshStage::AwaitingTrust;
+            webSshTask = nullptr;
+            portEXIT_CRITICAL(&webSshStateMux);
+            vTaskDelete(nullptr);
+            return;
+        }
+    }
+    publishWebSshStage(WebSshStage::Authenticating, "");
+    std::uint32_t startedAt = millis();
+    result = webSshClient.authenticate(webSshProfile, 10000);
+    const std::uint32_t authenticateMs = millis() - startedAt;
+    portENTER_CRITICAL(&webSshStateMux);
+    webSshAuthenticateMs = authenticateMs;
+    portEXIT_CRITICAL(&webSshStateMux);
+    if (!result.success || webSshCancellationRequested()) {
+        completeWebSshWorker(
+            webSshCancellationRequested() ? WebSshStage::Idle : WebSshStage::Failed,
+            webSshCancellationRequested() ? String() : result.error, true);
+        vTaskDelete(nullptr);
+        return;
+    }
+    publishWebSshStage(WebSshStage::Opening, "");
+    startedAt = millis();
+    result = webSshClient.openTerminal(120, 36, 10000);
+    const std::uint32_t openMs = millis() - startedAt;
+    portENTER_CRITICAL(&webSshStateMux);
+    webSshOpenMs = openMs;
+    portEXIT_CRITICAL(&webSshStateMux);
+    if (!result.success || webSshCancellationRequested()) {
+        completeWebSshWorker(
+            webSshCancellationRequested() ? WebSshStage::Idle : WebSshStage::Failed,
+            webSshCancellationRequested() ? String() : result.error, true);
+        vTaskDelete(nullptr);
+        return;
     }
     webSshAwaitingTrust = false;
     webSshTerminalOpen = true;
+    webSshProfile.password = "";
+    webSshProfile.privateKeyPassphrase = "";
+    completeWebSshWorker(WebSshStage::Connected, "", false);
+    if (webDiagnosticsEnabled()) {
+        Serial.printf("SSH_METRIC connect_ms=%u auth_ms=%u open_ms=%u heap=%u\n",
+                      static_cast<unsigned int>(webSshConnectMs),
+                      static_cast<unsigned int>(webSshAuthenticateMs),
+                      static_cast<unsigned int>(webSshOpenMs),
+                      static_cast<unsigned int>(ESP.getFreeHeap()));
+    }
+    vTaskDelete(nullptr);
+}
+
+OperationResult startWebSshWorker(bool authenticateOnly)
+{
+    portENTER_CRITICAL(&webSshStateMux);
+    webSshCancelRequested = false;
+    portEXIT_CRITICAL(&webSshStateMux);
+    TaskHandle_t task = nullptr;
+    vTaskSuspendAll();
+    const BaseType_t created = xTaskCreate(
+        runWebSshWorker, "web-ssh-connect", 12288,
+        reinterpret_cast<void*>(authenticateOnly ? 1U : 0U), 1, &task);
+    if (created == pdPASS && task != nullptr) {
+        portENTER_CRITICAL(&webSshStateMux);
+        webSshTask = task;
+        portEXIT_CRITICAL(&webSshStateMux);
+    }
+    xTaskResumeAll();
+    if (created != pdPASS || task == nullptr) {
+        return {false, "Failed to allocate the background SSH connection task"};
+    }
     return {true, ""};
 }
 
@@ -1216,50 +1610,38 @@ void handleSshStart()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    if (webSshTerminalOpen && webSshClient.isOpen()) {
+    if (webSshTaskIsRunning() || webSshAwaitingTrust ||
+        (webSshTerminalOpen && webSshClient.isOpen())) {
         sendWebJsonError(server, 409,
                          "SSH terminal is already open; disconnect it before reconnecting");
         return;
     }
-    closeWebSshConnection();
+    clearWebSshConnection();
+    publishWebSshStage(WebSshStage::Idle, "");
+    const std::uint32_t loadStartedAt = millis();
     const OperationResult loaded = loadSshProfile(webSshProfile);
+    recordWebSdRead(millis() - loadStartedAt);
     if (!loaded.success || !sshProfileIsComplete(webSshProfile)) {
         sendWebJsonError(server, 400, loaded.success ? String("Selected SSH profile is incomplete") : loaded.error);
         return;
     }
-    OperationResult result = webSshClient.connect(webSshProfile, 10000);
+    portENTER_CRITICAL(&webSshStateMux);
+    webSshConnectMs = 0;
+    webSshAuthenticateMs = 0;
+    webSshOpenMs = 0;
+    webSshFingerprint[0] = '\0';
+    webSshHostKeyType[0] = '\0';
+    webSshHostChanged = false;
+    portEXIT_CRITICAL(&webSshStateMux);
+    const OperationResult result = startWebSshWorker(false);
     if (!result.success) {
-        sendWebJsonError(server, 502, result.error);
-        return;
-    }
-    const SshTrustResult trust = checkTrustedSshHost(
-        webSshProfile.host, webSshProfile.port, webSshClient.fingerprint());
-    if (!trust.success) {
-        closeWebSshConnection();
-        sendWebJsonError(server, 500, trust.error);
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
-    if (!trust.found || !trust.matches) {
-        webSshAwaitingTrust = true;
-        document["trust_required"] = true;
-        document["changed"] = trust.found && !trust.matches;
-        document["host"] = webSshProfile.host;
-        document["port"] = webSshProfile.port;
-        document["key_type"] = webSshClient.hostKeyType();
-        document["fingerprint"] = webSshClient.fingerprint();
-        document["open"] = false;
-        sendWebJson(server, 200, document);
-        return;
-    }
-    result = finishWebSshStart();
-    if (!result.success) {
-        sendWebJsonError(server, 502, result.error);
-        return;
-    }
-    document["open"] = true;
-    sendWebJson(server, 200, document);
+    document["stage"] = "connecting";
+    sendWebJson(server, 202, document);
 }
 
 void handleSshTrust()
@@ -1268,21 +1650,24 @@ void handleSshTrust()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    if (!webSshAwaitingTrust || server.arg("fingerprint") != webSshClient.fingerprint()) {
+    if (!webSshAwaitingTrust || server.arg("fingerprint") != webSshFingerprint) {
         sendWebJsonError(server, 409, "SSH trust request does not match the pending connection");
         return;
     }
     OperationResult result = trustSshHost(webSshProfile.host, webSshProfile.port,
-                                          webSshClient.fingerprint());
-    if (result.success) result = finishWebSshStart();
+                                          webSshFingerprint);
+    if (result.success) {
+        webSshAwaitingTrust = false;
+        result = startWebSshWorker(true);
+    }
     if (!result.success) {
         sendWebJsonError(server, 502, result.error);
         return;
     }
     JsonDocument document;
     document["ok"] = true;
-    document["open"] = true;
-    sendWebJson(server, 200, document);
+    document["stage"] = "authenticating";
+    sendWebJson(server, 202, document);
 }
 
 void handleSshInput()
@@ -1372,7 +1757,8 @@ void handleSshStop()
     closeWebSshConnection();
     JsonDocument document;
     document["ok"] = true;
-    sendWebJson(server, 200, document);
+    document["stage"] = webSshTaskIsRunning() ? "stopping" : "idle";
+    sendWebJson(server, webSshTaskIsRunning() ? 202 : 200, document);
 }
 
 OperationResult ensureWebSftp()
@@ -1418,10 +1804,19 @@ void handleSftpDownload()
         return;
     }
     OperationResult result = ensureWebSftp();
-    if (result.success) result = webSshClient.downloadSftpFile(
-        server.arg("path"), server.arg("name"), 60000);
+    if (result.success) {
+        const std::uint32_t startedAt = millis();
+        result = webSshClient.downloadSftpFile(
+            server.arg("path"), server.arg("name"), 60000);
+        recordWebSdWrite(millis() - startedAt);
+    }
     if (!result.success) {
         sendWebJsonError(server, 502, result.error);
+        return;
+    }
+    result = refreshFiles();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     JsonDocument document;
@@ -1523,6 +1918,11 @@ void handleSshKeyUploadComplete()
         sendWebJsonError(server, 400, sshKeyUploadError);
         return;
     }
+    const OperationResult refreshed = refreshSshProfiles();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
+        return;
+    }
     consoleStatus = "SSH private key installed";
     JsonDocument document;
     document["ok"] = true;
@@ -1557,8 +1957,10 @@ void handleQrFile()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const WorkspaceChunkResult result = readWorkspaceFileChunk(
         server.arg("name"), 0, kMaximumQrPayloadBytes + 1);
+    recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
         return;
@@ -1601,8 +2003,10 @@ void handleFileRead()
         sendWebJsonError(server, 400, "File offset must be an unsigned integer");
         return;
     }
+    const std::uint32_t startedAt = millis();
     const WorkspaceChunkResult result = readWorkspaceFileChunk(
         server.arg("name"), offset, kMaximumWebFileChunkBytes);
+    recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
         return;
@@ -1635,10 +2039,17 @@ void handleFileSave()
         sendWebJsonError(server, 400, "File chunk must be valid UTF-8 up to 12288 bytes");
         return;
     }
-    const OperationResult result = replaceWorkspaceFileRange(
+    const std::uint32_t startedAt = millis();
+    OperationResult result = replaceWorkspaceFileRange(
         server.arg("name"), offset, originalBytes, content);
+    recordWebSdWrite(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    result = refreshFiles();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = "File chunk saved";
@@ -1653,9 +2064,16 @@ void handleFileRename()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    const OperationResult result = renameWorkspaceFile(server.arg("name"), server.arg("new_name"));
+    const std::uint32_t startedAt = millis();
+    OperationResult result = renameWorkspaceFile(server.arg("name"), server.arg("new_name"));
+    recordWebSdWrite(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    result = refreshFiles();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = "File renamed";
@@ -1670,9 +2088,16 @@ void handleFileDelete()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    const OperationResult result = deleteWorkspaceFile(server.arg("name"));
+    const std::uint32_t startedAt = millis();
+    OperationResult result = deleteWorkspaceFile(server.arg("name"));
+    recordWebSdWrite(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
+        return;
+    }
+    result = refreshFiles();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
         return;
     }
     consoleStatus = "File deleted";
@@ -1692,7 +2117,9 @@ void handleFileDownload()
         sendWebJsonError(server, 400, "Invalid workspace filename");
         return;
     }
+    const std::uint32_t startedAt = millis();
     File file = SD.open(workspaceFilePath(name), FILE_READ);
+    recordWebSdRead(millis() - startedAt);
     if (!file) {
         sendWebJsonError(server, 404, "Workspace file does not exist: " + name);
         return;
@@ -1796,6 +2223,11 @@ void handleFileUploadComplete()
         sendWebJsonError(server, 400, uploadError);
         return;
     }
+    const OperationResult refreshed = refreshFiles();
+    if (!refreshed.success) {
+        sendWebJsonError(server, 500, refreshed.error);
+        return;
+    }
     consoleStatus = uploadReplacing ? "File saved" : "File uploaded";
     JsonDocument document;
     document["ok"] = true;
@@ -1840,6 +2272,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     if (WiFi.status() != WL_CONNECTED) {
         return {false, initialChatId, "Web console requires an active Wi-Fi connection"};
     }
+    setWebDiagnosticsEnabled(false);
     Serial.println("WEB_CONSOLE stage=load_password");
     Serial.flush();
     consoleSettings = settings;
@@ -1857,6 +2290,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         releaseConsoleSessionState();
         return {false, initialChatId, result.error};
     }
+    settingsRevision = 1;
     Serial.println("WEB_CONSOLE stage=load_chat");
     Serial.flush();
     if (!initialChatId.isEmpty()) {
@@ -1869,6 +2303,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
                                  : OperationResult{false, created.error};
         if (created.success) {
             activeChat = created.chat;
+            ++chatRevision;
             result = refreshChats();
         }
     }
@@ -1910,6 +2345,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleSettings,
             handleModels,
             handleDiagnosticsDownload,
+            handleDiagnosticMetrics,
             handlePythonStart,
             handleSshSettings,
             handleSshSelect,
@@ -1994,6 +2430,10 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         delay(2);
     }
     showBusyScreen("WEB CONSOLE", "Closing browser and SSH sessions...");
+    closeWebSshConnection();
+    while (webSshTaskIsRunning()) {
+        delay(10);
+    }
     // Keep the listener bound because repeated stop/begin cycles exhaust lwIP sockets.
     server.client().stop();
     const String activeChatId = activeChat.summary.id;

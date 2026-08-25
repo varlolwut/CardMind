@@ -1,12 +1,25 @@
 #include "web_console_routes.h"
 
+#include "web_console_metrics.h"
+
+#include <functional>
+
 namespace cardputer {
 namespace {
 
-WebConsoleHandler handler(const WebConsoleRouteHandlers& handlers,
-                          WebConsoleRouteHandler route)
+WebServer* routeServer = nullptr;
+
+std::function<void()> handler(const WebConsoleRouteHandlers& handlers,
+                              WebConsoleRouteHandler route)
 {
-    return handlers.items[static_cast<std::size_t>(route)];
+    const WebConsoleHandler selected =
+        handlers.items[static_cast<std::size_t>(route)];
+    return [selected]() {
+        const String endpoint = routeServer->uri();
+        beginWebRequestMetrics(endpoint.c_str());
+        selected();
+        finishWebRequestMetrics();
+    };
 }
 
 }  // namespace
@@ -14,6 +27,7 @@ WebConsoleHandler handler(const WebConsoleRouteHandlers& handlers,
 void configureWebConsoleRoutes(WebServer& server,
                                const WebConsoleRouteHandlers& handlers)
 {
+    routeServer = &server;
     const char* headers[] = {"Cookie", "X-CardMind-CSRF"};
     server.collectHeaders(headers, 2);
     server.on("/", HTTP_GET, handler(handlers, WebConsoleRouteHandler::Root));
@@ -23,6 +37,12 @@ void configureWebConsoleRoutes(WebServer& server,
     server.on("/api/console/close", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::CloseConsole));
     server.on("/api/state", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/status", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/chats", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/chat", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/files", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/ssh/state", HTTP_GET,
+              handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/prompt", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Prompt));
     server.on("/api/chat/select", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::SelectChat));
@@ -54,9 +74,13 @@ void configureWebConsoleRoutes(WebServer& server,
               handler(handlers, WebConsoleRouteHandler::ArchivedMessages));
     server.on("/api/settings", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::Settings));
+    server.on("/api/settings", HTTP_GET,
+              handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/models", HTTP_GET, handler(handlers, WebConsoleRouteHandler::Models));
     server.on("/api/diagnostics", HTTP_GET,
               handler(handlers, WebConsoleRouteHandler::Diagnostics));
+    server.on("/api/diagnostics/metrics", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::DiagnosticMetrics));
     server.on("/api/python/start", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::PythonStart));
     server.on("/api/ssh/settings", HTTP_POST,
