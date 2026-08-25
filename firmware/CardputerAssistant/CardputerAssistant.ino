@@ -8,6 +8,7 @@
 #include <hal/usb_serial_jtag_ll.h>
 
 #include "src/api_client.h"
+#include "src/adv_audio_power.h"
 #include "src/app_types.h"
 #include "src/audio_utils.h"
 #include "src/backup_manager.h"
@@ -277,6 +278,8 @@ cardputer::OperationResult runSshSessionTest(bool testSftp);
 cardputer::OperationResult runSshDemoTest();
 cardputer::OperationResult saveAndApplyDeviceSettings(const cardputer::Settings& candidate);
 bool keyboardWordContains(const Keyboard_Class::KeysState& keys, char expected);
+bool cardputerEscapePressed();
+void waitForModalKeyRelease();
 bool confirmSshFingerprint(const cardputer::SshProfile& profile,
                            const String& keyType,
                            const String& fingerprint,
@@ -926,7 +929,7 @@ void submitPrompt()
     cardputer::markOperation(useTools ? "chat_tools" : "chat_stream");
     const cardputer::CancelCallback isCancelled = []() {
         M5Cardputer.update();
-        return M5Cardputer.Keyboard.keysState().esc;
+        return cardputerEscapePressed();
     };
     const cardputer::ChatResult result = useTools
         ? cardputer::streamChatCompletionWithTools(
@@ -996,7 +999,7 @@ void submitPrompt()
         const cardputer::OperationResult speech = cardputer::synthesizeAndPlaySpeechControlled(
             settings, result.response, []() {
                 M5Cardputer.update();
-                return M5Cardputer.Keyboard.keysState().esc
+                return cardputerEscapePressed()
                     ? cardputer::SpeechPlaybackCommand::Stop
                     : cardputer::SpeechPlaybackCommand::Continue;
             });
@@ -1004,6 +1007,8 @@ void submitPrompt()
         const bool stopped = speech.error == "Speech playback stopped" ||
             speech.error == "Speech synthesis canceled by user";
         if (stopped) {
+            waitForModalKeyRelease();
+            pressedKeys.clear();
             setTransientStatus("Speech stopped", 1500);
             Serial.println("INFO event=tts_playback result=stopped source=auto");
         } else if (!speech.success) {
@@ -1130,6 +1135,17 @@ void setup()
             delay(1000);
         }
     }
+    const cardputer::OperationResult audioPowerResult =
+        cardputer::initializeCardputerAdvAudioPowerControl();
+    if (!audioPowerResult.success) {
+        cardputer::showFatalError(audioPowerResult.error);
+        Serial.printf("FATAL event=audio_power_control reason=%s\n",
+                      audioPowerResult.error.c_str());
+        while (true) {
+            delay(1000);
+        }
+    }
+    Serial.println("AUDIO_CODEC power_control=ready");
     refreshBatteryStatus();
     Serial.printf("POWER battery=%d charging=%s\n",
                   batteryLevel, batteryCharging ? "yes" : "no");
@@ -1304,7 +1320,14 @@ void loop()
         timerDurationSeconds = 0;
         M5Cardputer.Speaker.setVolume(settings.ttsVolume);
         M5Cardputer.Speaker.tone(1200, 220);
-        menuStatus = "Timer finished";
+        while (M5Cardputer.Speaker.isPlaying()) {
+            delay(1);
+        }
+        const cardputer::OperationResult audioPowerResult =
+            cardputer::powerDownCardputerAdvAudio();
+        menuStatus = audioPowerResult.success
+            ? String("Timer finished")
+            : audioPowerResult.error;
         if (currentScreen == Screen::TimerMenu || currentScreen == Screen::UtilitiesMenu) {
             render();
         }

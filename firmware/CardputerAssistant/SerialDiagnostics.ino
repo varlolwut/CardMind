@@ -989,6 +989,12 @@ void handleSerialCommand(const String& command)
         Serial.printf("TTSHW result=%s\n", result.success ? "pass" : "failed");
         return;
     }
+    if (command == "AUDIOSTATUS") {
+        const cardputer::OperationResult result =
+            cardputer::verifyCardputerAdvAudioPoweredDown();
+        Serial.printf("AUDIOSTATUS result=%s\n", result.success ? "pass" : "failed");
+        return;
+    }
     if (command == "TTSSTOPTEST") {
         const cardputer::OperationResult result = cardputer::playTtsHardwareTestControlled(
             settings.ttsVolume, []() { return cardputer::SpeechPlaybackCommand::Stop; });

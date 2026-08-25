@@ -7,7 +7,7 @@ param(
     [int]$BaudRate,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("offline", "online", "p1", "full")]
+    [ValidateSet("audio", "offline", "online", "p1", "full")]
     [string]$Suite,
 
     [Parameter(Mandatory = $true)]
@@ -180,6 +180,17 @@ $offlineCases = @(
     (New-RegressionCase -Name "post-console responsiveness" -Command "STATUS" -CompletionPattern "^STATUS version=" -PassPattern "board_adv=yes.*microsd=ready.*chats=ready.*files=ready" -TimeoutSeconds 15)
 )
 
+$audioCases = @(
+    (New-RegressionCase -Name "microphone before speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "codec idle after microphone" -Command "AUDIOSTATUS" -CompletionPattern "^AUDIOSTATUS result=" -PassPattern "^AUDIOSTATUS result=pass$" -TimeoutSeconds 15),
+    (New-RegressionCase -Name "speaker hardware" -Command "TTSHW" -CompletionPattern "^TTSHW result=" -PassPattern "^TTSHW result=pass$" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "codec idle after speaker" -Command "AUDIOSTATUS" -CompletionPattern "^AUDIOSTATUS result=" -PassPattern "^AUDIOSTATUS result=pass$" -TimeoutSeconds 15),
+    (New-RegressionCase -Name "speaker cancellation" -Command "TTSSTOPTEST" -CompletionPattern "^TTSSTOPTEST result=" -PassPattern "^TTSSTOPTEST result=pass$" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "codec idle after cancellation" -Command "AUDIOSTATUS" -CompletionPattern "^AUDIOSTATUS result=" -PassPattern "^AUDIOSTATUS result=pass$" -TimeoutSeconds 15),
+    (New-RegressionCase -Name "microphone after speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "codec final idle" -Command "AUDIOSTATUS" -CompletionPattern "^AUDIOSTATUS result=" -PassPattern "^AUDIOSTATUS result=pass$" -TimeoutSeconds 15)
+)
+
 $onlineCases = @(
     (New-RegressionCase -Name "chat API" -Command "APITEST" -CompletionPattern "^APITEST result=" -PassPattern "^APITEST result=pass" -TimeoutSeconds 120),
     (New-RegressionCase -Name "model file tool" -Command "TOOLTEST" -CompletionPattern "^TOOLTEST result=" -PassPattern "^TOOLTEST result=pass" -TimeoutSeconds 180),
@@ -237,6 +248,9 @@ try {
     Start-Sleep -Seconds 12
     $serial.ReadExisting() | Out-Null
     $cases = [System.Collections.Generic.List[object]]::new()
+    if ($Suite -eq "audio") {
+        $cases.AddRange([object[]]$audioCases)
+    }
     if ($Suite -eq "offline" -or $Suite -eq "full") {
         $cases.AddRange([object[]]$offlineCases)
     }

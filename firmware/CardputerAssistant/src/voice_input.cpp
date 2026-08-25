@@ -1,5 +1,6 @@
 #include "voice_input.h"
 
+#include "adv_audio_power.h"
 #include "audio_utils.h"
 
 #include <M5Cardputer.h>
@@ -90,7 +91,12 @@ VoiceRecordingResult recordVoiceWhileButtonHeld(const VoiceProgressCallback& onP
         return {false, 0, 0, 0, "Failed to reserve the WAV header on microSD"};
     }
 
-    M5Cardputer.Speaker.end();
+    const OperationResult audioPowerResult = powerDownCardputerAdvAudio();
+    if (!audioPowerResult.success) {
+        file.close();
+        deleteRecordingIfPresent();
+        return {false, 0, 0, 0, audioPowerResult.error};
+    }
     if (!M5Cardputer.Mic.begin()) {
         file.close();
         deleteRecordingIfPresent();
@@ -129,6 +135,10 @@ VoiceRecordingResult recordVoiceWhileButtonHeld(const VoiceProgressCallback& onP
         onProgress(millis() - startedAt, normalizedPeak(samples));
     }
     M5Cardputer.Mic.end();
+    const OperationResult shutdownResult = powerDownCardputerAdvAudio();
+    if (!shutdownResult.success && error.isEmpty()) {
+        error = shutdownResult.error;
+    }
 
     if (!error.isEmpty()) {
         file.close();
@@ -158,7 +168,10 @@ VoiceRecordingResult probeMicrophone(std::uint32_t durationMs)
     if (durationMs == 0 || durationMs > 5000) {
         return {false, 0, 0, 0, "Microphone probe duration must be between 1 and 5000 ms"};
     }
-    M5Cardputer.Speaker.end();
+    const OperationResult audioPowerResult = powerDownCardputerAdvAudio();
+    if (!audioPowerResult.success) {
+        return {false, 0, 0, 0, audioPowerResult.error};
+    }
     if (!M5Cardputer.Mic.begin()) {
         return {false, 0, 0, 0, "Failed to start the Cardputer ADV microphone"};
     }
@@ -174,9 +187,13 @@ VoiceRecordingResult probeMicrophone(std::uint32_t durationMs)
             kChunkSamples, static_cast<std::size_t>(targetSamples - sampleCount));
         if (!M5Cardputer.Mic.record(samples.data(), requested, kSampleRate)) {
             M5Cardputer.Mic.end();
+            const OperationResult shutdownResult = powerDownCardputerAdvAudio();
+            const String error = shutdownResult.success
+                ? String("Microphone probe queue rejected an audio chunk")
+                : shutdownResult.error;
             return {false, sampleCount, peakLevel,
                     normalizedMean(absoluteTotal, sampleCount),
-                    "Microphone probe queue rejected an audio chunk"};
+                    error};
         }
         while (M5Cardputer.Mic.isRecording() != 0) {
             M5Cardputer.update();
@@ -190,6 +207,11 @@ VoiceRecordingResult probeMicrophone(std::uint32_t durationMs)
         sampleCount += static_cast<std::uint32_t>(requested);
     }
     M5Cardputer.Mic.end();
+    const OperationResult shutdownResult = powerDownCardputerAdvAudio();
+    if (!shutdownResult.success) {
+        return {false, sampleCount, peakLevel,
+                normalizedMean(absoluteTotal, sampleCount), shutdownResult.error};
+    }
     return {true, sampleCount, peakLevel, normalizedMean(absoluteTotal, sampleCount), ""};
 }
 
