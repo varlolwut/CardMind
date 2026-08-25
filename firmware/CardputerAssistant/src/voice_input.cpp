@@ -26,6 +26,7 @@ constexpr std::uint32_t kMinimumSamples = kSampleRate / 2;
 constexpr std::uint32_t kMaximumRecordingSeconds = 60;
 constexpr std::uint32_t kMaximumSamples = kSampleRate * kMaximumRecordingSeconds;
 constexpr std::size_t kWavHeaderSize = 44;
+constexpr std::uint8_t kSdMountAttempts = 3;
 
 std::uint16_t normalizedPeak(const std::array<std::int16_t, kChunkSamples>& samples)
 {
@@ -61,14 +62,25 @@ OperationResult deleteRecordingIfPresent()
 
 OperationResult initializeVoiceStorage()
 {
-    SPI.begin(kSdClockPin, kSdMisoPin, kSdMosiPin, kSdChipSelectPin);
-    if (!SD.begin(kSdChipSelectPin, SPI, 25000000)) {
-        return {false, "Failed to mount the microSD card for temporary voice recording"};
+    bool mountSucceeded = false;
+    for (std::uint8_t attempt = 1; attempt <= kSdMountAttempts; ++attempt) {
+        SPI.begin(kSdClockPin, kSdMisoPin, kSdMosiPin, kSdChipSelectPin);
+        const bool mounted = SD.begin(kSdChipSelectPin, SPI, 25000000);
+        mountSucceeded = mountSucceeded || mounted;
+        if (mounted && SD.cardType() != CARD_NONE) {
+            return deleteRecordingIfPresent();
+        }
+        Serial.printf("WARN event=sd_mount attempt=%u result=failed\n",
+                      static_cast<unsigned int>(attempt));
+        SD.end();
+        SPI.end();
+        if (attempt < kSdMountAttempts) {
+            delay(static_cast<std::uint32_t>(attempt) * 250U);
+        }
     }
-    if (SD.cardType() == CARD_NONE) {
-        return {false, "No microSD card is present for temporary voice recording"};
-    }
-    return deleteRecordingIfPresent();
+    return mountSucceeded
+        ? OperationResult{false, "No microSD card was detected after 3 attempts"}
+        : OperationResult{false, "Failed to mount microSD after 3 attempts; reinsert or check the card"};
 }
 
 VoiceRecordingResult recordVoiceWhileButtonHeld(const VoiceProgressCallback& onProgress)

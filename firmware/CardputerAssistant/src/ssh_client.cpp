@@ -1,6 +1,8 @@
 #include "ssh_client.h"
 
 #include "file_workspace.h"
+#include "sd_storage.h"
+#include "text_utils.h"
 
 #include <libssh2.h>
 #include <libssh2_sftp.h>
@@ -1261,9 +1263,13 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
     if (!isValidRemotePath(remotePath)) {
         return {false, "SFTP remote file path is invalid"};
     }
-    const String localPath = workspaceFilePath(workspaceName);
-    if (localPath.isEmpty()) {
+    if (!isValidWorkspaceFilename(workspaceName.c_str())) {
         return {false, "SFTP download destination filename is invalid"};
+    }
+    const String localPath = workspaceFilePath(workspaceName);
+    const OperationResult parent = ensureWorkspaceFileParent(workspaceName);
+    if (!parent.success) {
+        return parent;
     }
     LIBSSH2_SFTP_HANDLE* remote = nullptr;
     const std::uint32_t openDeadline = millis() + timeoutMs;
@@ -1278,7 +1284,35 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
         return {false, sessionError(implementation_->session, "SFTP remote file open",
                                     libssh2_session_last_errno(implementation_->session))};
     }
-    const String temporaryPath = localPath + ".sftp-part";
+    LIBSSH2_SFTP_ATTRIBUTES attributes = {};
+    int statResult = LIBSSH2_ERROR_EAGAIN;
+    const std::uint32_t statDeadline = millis() + timeoutMs;
+    while (statResult == LIBSSH2_ERROR_EAGAIN &&
+           static_cast<std::int32_t>(statDeadline - millis()) > 0) {
+        statResult = libssh2_sftp_fstat(remote, &attributes);
+        if (statResult == LIBSSH2_ERROR_EAGAIN) {
+            delay(5);
+        }
+    }
+    if (statResult != 0) {
+        closeSftpHandle(remote);
+        return {false, sessionError(implementation_->session, "SFTP remote file stat",
+                                    statResult)};
+    }
+    if ((attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0) {
+        if (attributes.filesize > kMaximumWorkspaceFileBytes) {
+            closeSftpHandle(remote);
+            return {false, "SFTP file exceeds the 256 MiB workspace limit"};
+        }
+        const OperationResult space = checkSdOperationSpace(
+            attributes.filesize, kStorageOperationalFloorBytes);
+        if (!space.success) {
+            closeSftpHandle(remote);
+            return space;
+        }
+    }
+    const String temporaryName = workspaceName + ".sftp-part";
+    const String temporaryPath = workspaceFilePath(temporaryName);
     SD.remove(temporaryPath);
     File local = SD.open(temporaryPath, FILE_WRITE);
     if (!local) {
@@ -1301,7 +1335,7 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
                 closeSftpHandle(remote);
                 SD.remove(temporaryPath);
                 return {false, total > kMaximumWorkspaceFileBytes
-                    ? String("SFTP file exceeds the 491520-byte workspace limit")
+                    ? String("SFTP file exceeds the 256 MiB workspace limit")
                     : String("microSD rejected SFTP download data")};
             }
             deadline = millis() + timeoutMs;
@@ -1325,13 +1359,11 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
         SD.remove(temporaryPath);
         return {false, "SFTP download timed out before remote end-of-file"};
     }
-    if (SD.exists(localPath) && !SD.remove(localPath)) {
+    const OperationResult committed = commitWorkspaceBinaryTemporary(
+        workspaceName, temporaryName);
+    if (!committed.success) {
         SD.remove(temporaryPath);
-        return {false, "Failed to replace the existing workspace file"};
-    }
-    if (!SD.rename(temporaryPath, localPath)) {
-        SD.remove(temporaryPath);
-        return {false, "Failed to activate the downloaded workspace file"};
+        return committed;
     }
     return {true, ""};
 }
@@ -1345,6 +1377,9 @@ OperationResult SshClient::uploadSftpFile(const String& workspaceName,
     }
     if (!isValidRemotePath(remotePath)) {
         return {false, "SFTP remote file path is invalid"};
+    }
+    if (!isValidWorkspaceFilename(workspaceName.c_str())) {
+        return {false, "SFTP upload source filename is invalid"};
     }
     const String localPath = workspaceFilePath(workspaceName);
     File local = SD.open(localPath, FILE_READ);

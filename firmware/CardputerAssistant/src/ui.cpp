@@ -934,7 +934,7 @@ void showFilenameEntry(const String& title,
                               42));
     canvas->setCursor(5, 101);
     canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    canvas->print(String(input.size()) + "/48 bytes");
+    canvas->print(String(input.size()) + "/180 bytes");
     canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
