@@ -4,12 +4,15 @@
 
 namespace cardputer {
 
-constexpr std::size_t kMaximumWorkspaceFileBytes = 491520;
+constexpr std::uint32_t kMaximumWorkspaceFileBytes = 268435456;
 constexpr std::size_t kMaximumWorkspaceToolChunkBytes = 12288;
-constexpr std::size_t kMaximumWorkspaceFiles = 40;
+constexpr std::size_t kMaximumWorkspaceFiles = 4096;
 
 OperationResult initializeFileWorkspace();
+OperationResult ensureWorkspaceFileParent(const String& name);
 WorkspaceFilesResult listWorkspaceFiles();
+WorkspaceFilesPageResult listWorkspaceFilesPage(std::uint32_t offset,
+                                                std::size_t maximumEntries);
 WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
                                             std::uint32_t offset,
                                             std::size_t maximumBytes);
@@ -27,10 +30,14 @@ OperationResult replaceWorkspaceFileRange(const String& name,
                                           const std::string& replacement);
 OperationResult replaceWorkspaceFileWithTemporary(const String& name,
                                                    const String& temporaryName);
+OperationResult commitWorkspaceBinaryTemporary(const String& name,
+                                               const String& temporaryName);
 OperationResult copyWorkspaceFile(const String& sourceName, const String& destinationName);
 OperationResult renameWorkspaceFile(const String& sourceName, const String& destinationName);
 OperationResult deleteWorkspaceFile(const String& name);
 ToolExecutionResult executeWorkspaceTool(const ToolCall& call);
+ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
+                                                const ToolCall& call);
 String workspaceFilePath(const String& name);
 
 }  // namespace cardputer

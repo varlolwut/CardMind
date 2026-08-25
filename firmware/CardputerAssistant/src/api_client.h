@@ -18,6 +18,12 @@ ChatResult streamChatCompletion(const Settings& settings,
                                 const std::string& instructions,
                                 const ChatTextCallback& onText,
                                 const CancelCallback& isCancelled);
+ChatResult streamChatCompletionWithBudget(const Settings& settings,
+                                          const std::vector<Message>& history,
+                                          const std::string& instructions,
+                                          std::uint32_t maximumOutputTokens,
+                                          const ChatTextCallback& onText,
+                                          const CancelCallback& isCancelled);
 ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const std::vector<Message>& history,
                                          const std::string& instructions,
@@ -25,5 +31,14 @@ ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const ChatTextCallback& onText,
                                          const ToolExecutor& executeTool,
                                          const CancelCallback& isCancelled);
+ChatResult streamChatCompletionWithToolsAndBudget(
+    const Settings& settings,
+    const std::vector<Message>& history,
+    const std::string& instructions,
+    bool sshToolAvailable,
+    std::uint32_t maximumOutputTokens,
+    const ChatTextCallback& onText,
+    const ToolExecutor& executeTool,
+    const CancelCallback& isCancelled);
 
 }  // namespace cardputer

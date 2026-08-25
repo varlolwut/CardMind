@@ -1,5 +1,7 @@
 #pragma once
 
+#include "app_types.h"
+
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -22,6 +24,9 @@ std::string ellipsizeUtf8(const std::string& value, std::size_t maxCells);
 std::string makeChatTitle(const std::string& prompt, std::size_t maxCells);
 bool isValidChatId(const std::string& value);
 bool isValidWorkspaceFilename(const std::string& value);
+bool isValidStorageRelativePath(const std::string& path, std::size_t maximumBytes);
+ContextWindowResult fitMessagesToByteBudget(const std::vector<Message>& messages,
+                                            std::size_t maximumBytes);
 bool requestsWorkspaceAccess(const std::string& prompt);
 bool requestsWorkspaceWrite(const std::string& prompt);
 bool requestsWebSearch(const std::string& prompt);

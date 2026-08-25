@@ -234,6 +234,171 @@ async function verifyWorkspaceRoundTrip(baseUrl, auth, name, marker) {
   }
 }
 
+async function verifyWorkspaceWindowSave(baseUrl, auth, name, marker) {
+  const replacement = `${marker}-EDITED\n`;
+  await request(baseUrl, auth, '/api/file/save', {
+    method: 'POST',
+    body: form({
+      name,
+      offset: '0',
+      original_bytes: String(Buffer.byteLength(`${marker}\n`, 'utf8')),
+      content: replacement,
+    }),
+  });
+  const response = await request(
+    baseUrl,
+    auth,
+    `/api/file?name=${encodeURIComponent(name)}&offset=0`,
+    {method: 'GET'},
+  );
+  const document = await response.json();
+  if (document.content !== replacement || document.eof !== true) {
+    throw new Error(`Workspace window save returned unexpected content for '${name}'`);
+  }
+}
+
+async function activeChatState(baseUrl, auth) {
+  const response = await request(baseUrl, auth, statePaths.chat, {method: 'GET'});
+  return response.json();
+}
+
+async function verifyProjectRoundTrip(baseUrl, auth, workspaceName) {
+  const original = await activeChatState(baseUrl, auth);
+  const originalProjectId = requireString(original.project_id, 'project_id');
+  const suffix = String(Date.now());
+  const title = `P2 E2E ${suffix}`;
+  let projectId = '';
+  let importedProjectId = '';
+  let bundleName = '';
+  let linked = false;
+  try {
+    const createdResponse = await request(baseUrl, auth, '/api/project/new', {
+      method: 'POST',
+      body: form({title}),
+    });
+    const created = await createdResponse.json();
+    projectId = requireString(created.project_id, 'project_id');
+
+    await request(baseUrl, auth, '/api/project/settings', {
+      method: 'POST',
+      body: form({
+        instructions: 'P2 project instruction',
+        model: '',
+        context_byte_budget: '16384',
+        maximum_output_tokens: '512',
+        automatic_compaction: '0',
+      }),
+    });
+    const first = await activeChatState(baseUrl, auth);
+    const firstChatId = requireString(first.active_chat_id, 'active_chat_id');
+    if (first.project_title !== title || first.context_byte_budget !== 16384 ||
+        first.automatic_compaction !== false) {
+      throw new Error('Project settings were not returned by active chat state');
+    }
+    await request(baseUrl, auth, '/api/chat/instructions', {
+      method: 'POST',
+      body: form({instructions: 'P2 first chat instruction'}),
+    });
+    await request(baseUrl, auth, '/api/chat/new', {method: 'POST', body: form({})});
+    const second = await activeChatState(baseUrl, auth);
+    if (second.active_chat_id === firstChatId || second.instructions !== '') {
+      throw new Error('New project chat did not start with independent instructions');
+    }
+    await request(baseUrl, auth, '/api/chat/select', {
+      method: 'POST',
+      body: form({id: firstChatId}),
+    });
+    const selected = await activeChatState(baseUrl, auth);
+    if (selected.instructions !== 'P2 first chat instruction') {
+      throw new Error('Selecting the first project chat did not restore its instructions');
+    }
+
+    await request(baseUrl, auth, '/api/project/link', {
+      method: 'POST',
+      body: form({path: workspaceName, linked: '1'}),
+    });
+    linked = true;
+    const linksResponse = await request(
+      baseUrl,
+      auth,
+      '/api/project/links?offset=0',
+      {method: 'GET'},
+    );
+    const links = await linksResponse.json();
+    if (!links.links?.includes(workspaceName)) {
+      throw new Error('Shared workspace link was not persisted for the active project');
+    }
+
+    const exportedResponse = await request(baseUrl, auth, '/api/chat/export-bundle', {
+      method: 'POST',
+      body: form({}),
+    });
+    const exported = await exportedResponse.json();
+    bundleName = requireString(exported.filename, 'filename');
+    const importedResponse = await request(baseUrl, auth, '/api/chat/import', {
+      method: 'POST',
+      body: form({name: bundleName}),
+    });
+    const imported = await importedResponse.json();
+    importedProjectId = requireString(imported.project_id, 'project_id');
+    if (importedProjectId === projectId) {
+      throw new Error('Imported project reused the source project id');
+    }
+    const importedState = await activeChatState(baseUrl, auth);
+    if (importedState.ssh_tools_enabled === true) {
+      throw new Error('Imported project preserved model SSH permission');
+    }
+    await request(baseUrl, auth, '/api/project/delete', {method: 'POST', body: form({})});
+    importedProjectId = '';
+    await request(baseUrl, auth, '/api/project/select', {
+      method: 'POST',
+      body: form({id: projectId}),
+    });
+    await request(baseUrl, auth, '/api/project/link', {
+      method: 'POST',
+      body: form({path: workspaceName, linked: '0'}),
+    });
+    linked = false;
+    return {project_id: projectId, chats: 2, shared_link: 'pass', bundle: 'pass'};
+  } finally {
+    if (importedProjectId) {
+      await request(baseUrl, auth, '/api/project/select', {
+        method: 'POST',
+        body: form({id: importedProjectId}),
+      }).then(() => request(baseUrl, auth, '/api/project/delete', {
+        method: 'POST',
+        body: form({}),
+      })).catch((error) => console.error(`Imported project cleanup failed: ${error.message}`));
+    }
+    if (projectId) {
+      await request(baseUrl, auth, '/api/project/select', {
+        method: 'POST',
+        body: form({id: projectId}),
+      }).then(async () => {
+        if (linked) {
+          await request(baseUrl, auth, '/api/project/link', {
+            method: 'POST',
+            body: form({path: workspaceName, linked: '0'}),
+          });
+        }
+        await request(baseUrl, auth, '/api/project/delete', {
+          method: 'POST',
+          body: form({}),
+        });
+      }).catch((error) => console.error(`P2 project cleanup failed: ${error.message}`));
+    }
+    await request(baseUrl, auth, '/api/project/select', {
+      method: 'POST',
+      body: form({id: originalProjectId}),
+    }).catch((error) => console.error(`Original project restore failed: ${error.message}`));
+    if (bundleName) {
+      await deleteWorkspaceProbe(baseUrl, auth, bundleName).catch((error) => {
+        console.error(`Project bundle cleanup failed: ${error.message}`);
+      });
+    }
+  }
+}
+
 async function deleteWorkspaceProbe(baseUrl, auth, name) {
   await request(baseUrl, auth, '/api/file/delete', {
     method: 'POST',
@@ -316,6 +481,12 @@ async function main() {
     await uploadWorkspaceProbe(baseUrl, auth, workspaceProbe, workspaceMarker);
     workspaceProbeCreated = true;
     await verifyWorkspaceRoundTrip(baseUrl, auth, workspaceProbe, workspaceMarker);
+    await verifyWorkspaceWindowSave(baseUrl, auth, workspaceProbe, workspaceMarker);
+    const projectRoundTrip = await verifyProjectRoundTrip(
+      baseUrl,
+      auth,
+      workspaceProbe,
+    );
     await exerciseStatePolling(baseUrl, auth, 20);
     const activeSshPromptMs = await prompt(baseUrl, auth, 'WEB-E2E-SSH-OK');
     await deleteWorkspaceProbe(baseUrl, auth, workspaceProbe);
@@ -336,6 +507,8 @@ async function main() {
       ssh_device_open_ms: connected.ssh_open_ms,
       interactive_ssh: 'pass',
       workspace_sd: 'pass',
+      workspace_window_save: 'pass',
+      project_round_trip: projectRoundTrip,
       state_poll_iterations: 20,
       active_ssh_prompt_ms: activeSshPromptMs,
       closed_ssh_prompt_ms: closedSshPromptMs,

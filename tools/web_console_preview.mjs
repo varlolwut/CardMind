@@ -20,14 +20,25 @@ const previewState = {
     reset_reason: 1,
     sd_used_bytes: 3145728,
     sd_total_bytes: 31914983424,
+    active_project_id: "project-1",
+    project_id: "project-1",
+    project_title: "CardMind development",
+    project_archived: false,
+    project_instructions: "Keep project decisions consistent across chats.",
+    project_model: "",
+    context_byte_budget: 32768,
+    maximum_output_tokens: 1024,
+    automatic_compaction: true,
     active_chat_id: "chat-1",
     active_chat_title: "CardMind UX review",
+    total_messages: 18,
     active_context_messages: 18,
     active_context_bytes: 12480,
     maximum_context_messages: 64,
     maximum_context_bytes: 32768,
     archived_messages: 6,
     instructions: "Answer clearly and keep code examples compact.",
+    history_before_offset: 6,
     ssh_tools_enabled: false,
     status: "",
     firmware_version: "1.12.0-preview",
@@ -50,6 +61,17 @@ const previewState = {
     screen_sleep_minutes: 5,
     keyboard_repeat_ms: 125,
     power_profile: 1,
+    projects_revision: 1,
+    chats_revision: 1,
+    chat_revision: 1,
+    files_revision: 1,
+    settings_revision: 1,
+    projects: [
+        {id: "project-1", title: "CardMind development", archived: false, chat_count: 3},
+        {id: "project-2", title: "Language practice", archived: false, chat_count: 2},
+    ],
+    next_offset: 0,
+    eof: true,
     python_layout_ready: true,
     python_image_ready: true,
     python_error: "",
@@ -75,6 +97,8 @@ const previewState = {
     ssh_username: "cardmind",
     ssh_auth_mode: "key",
     ssh_terminal_open: false,
+    ssh_stage: "idle",
+    ssh_error: "",
     ssh_key_installed: true,
     ssh_configured: true,
     files: [
@@ -82,6 +106,25 @@ const previewState = {
         {name: "report.txt", size: 92480},
         {name: "settings.json", size: 1482},
     ],
+};
+
+const apiStates = {
+    "/api/status": previewState,
+    "/api/projects": previewState,
+    "/api/chats": previewState,
+    "/api/chat": previewState,
+    "/api/files": previewState,
+    "/api/ssh/state": previewState,
+    "/api/settings": previewState,
+    "/api/project/links": {links: ["notes.md"], next_offset: 0, eof: true},
+    "/api/file": {
+        name: "notes.md",
+        content: "# CardMind notes\n\nThis preview uses the same windowed editor as the device.",
+        offset: 0,
+        next_offset: 73,
+        total_bytes: 73,
+        eof: true,
+    },
 };
 
 const stateScript = `const previewState=${JSON.stringify(previewState)};\n`;
@@ -93,7 +136,27 @@ const page = source
         "showPanel(location.hash.slice(1)||'chat');",
     );
 const server = createServer((request, response) => {
-    if (request.url !== "/" && request.url !== "/index.html") {
+    const url = new URL(request.url, "http://127.0.0.1:8765");
+    if (url.pathname.startsWith("/api/") && request.method === "GET") {
+        const payload = apiStates[url.pathname];
+        if (payload === undefined) {
+            response.writeHead(404, {"Content-Type": "application/json"});
+            response.end(JSON.stringify({error: `Preview route ${url.pathname} is not implemented`}));
+            return;
+        }
+        response.writeHead(200, {"Content-Type": "application/json; charset=utf-8"});
+        response.end(JSON.stringify(payload));
+        return;
+    }
+    if (url.pathname.startsWith("/api/") && request.method === "POST") {
+        request.resume();
+        request.on("end", () => {
+            response.writeHead(200, {"Content-Type": "application/json; charset=utf-8"});
+            response.end(JSON.stringify({success: true}));
+        });
+        return;
+    }
+    if (url.pathname !== "/" && url.pathname !== "/index.html") {
         response.writeHead(404, {"Content-Type": "text/plain; charset=utf-8"});
         response.end("Not found");
         return;

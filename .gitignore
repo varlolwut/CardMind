@@ -1,6 +1,8 @@
 build/
+artifacts/
 vendor/
 ROADMAP.md
+AGENTS.md
 .repo-git/
 .secrets/
 .agents/

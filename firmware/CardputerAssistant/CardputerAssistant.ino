@@ -21,8 +21,12 @@
 #include "src/ota_update.h"
 #include "src/provisioning.h"
 #include "src/python_mode.h"
+#include "src/project_chat_storage.h"
+#include "src/project_bundle.h"
+#include "src/project_storage.h"
 #include "src/stt_client.h"
 #include "src/storage.h"
+#include "src/storage_migration.h"
 #include "src/ssh_client.h"
 #include "src/ssh_terminal.h"
 #include "src/ssh_tool.h"
@@ -47,7 +51,7 @@ SET_LOOP_TASK_STACK_SIZE(16384);
 namespace {
 
 constexpr const char* kFirmwareVersion = "1.12.1";
-constexpr std::size_t kMaximumInputBytes = 1200;
+constexpr std::size_t kMaximumInputBytes = 16384;
 constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
 constexpr std::uint32_t kBatteryRefreshIntervalMs = 30000;
@@ -83,6 +87,10 @@ enum class Screen {
     AiMenu,
     ModelPicker,
     GlobalInstructions,
+    ProjectList,
+    ProjectActions,
+    ProjectModelPicker,
+    ProjectInstructions,
     ChatList,
     ChatActions,
     ArchivedChatViewer,
@@ -109,6 +117,7 @@ enum class WorkspaceListMode {
 cardputer::Settings settings;
 std::vector<cardputer::Message> history;
 std::vector<cardputer::ChatSummary> chats;
+std::vector<cardputer::ProjectSummary> projects;
 std::vector<String> availableModels;
 std::string inputBuffer;
 std::string persistedDraft;
@@ -126,6 +135,8 @@ std::uint32_t keyboardRepeatStartedAt = 0;
 std::uint32_t lastKeyboardRepeatAt = 0;
 Screen currentScreen = Screen::MainCarousel;
 String activeChatId;
+String activeProjectId;
+String activeProjectTitle;
 String activeChatTitle = "New chat";
 std::string activeChatInstructions;
 bool activeChatPinned = false;
@@ -137,6 +148,20 @@ String chatStorageError;
 bool fileWorkspaceReady = false;
 String fileWorkspaceError;
 std::size_t chatListIndex = 0;
+std::uint32_t chatPageOffset = 0;
+std::uint32_t chatNextPageOffset = 0;
+bool chatPageEof = true;
+std::vector<std::uint32_t> chatPreviousPageOffsets;
+std::size_t projectListIndex = 0;
+std::size_t projectActionsIndex = 0;
+std::string projectInstructionsInput;
+String projectInstructionsStatus;
+std::uint32_t projectPageOffset = 0;
+std::uint32_t projectNextPageOffset = 0;
+bool projectPageEof = true;
+std::vector<std::uint32_t> projectPreviousPageOffsets;
+String selectedProjectId;
+String selectedProjectTitle;
 std::size_t chatActionsIndex = 0;
 std::size_t searchSourceIndex = 0;
 std::vector<cardputer::WebSearchSource> searchSources;
@@ -168,6 +193,10 @@ std::size_t utilitiesMenuIndex = 0;
 std::size_t timerMenuIndex = 0;
 std::size_t filesMenuIndex = 0;
 std::size_t workspaceFileIndex = 0;
+std::uint32_t workspacePageOffset = 0;
+std::uint32_t workspaceNextPageOffset = 0;
+bool workspacePageEof = true;
+std::vector<std::uint32_t> workspacePreviousPageOffsets;
 std::size_t fileActionsIndex = 0;
 std::size_t diagnosticsIndex = 0;
 std::size_t controlsHelpIndex = 0;
@@ -246,6 +275,10 @@ void renderChatActions();
 void renderChatInstructions();
 void renderSearchSources();
 void renderChatList();
+void renderProjectList();
+void renderProjectActions();
+void renderProjectModelPicker();
+void renderProjectInstructions();
 void renderControlsHelp();
 void renderAiMenu();
 void renderGlobalInstructions();
@@ -269,6 +302,7 @@ void renderWifiPassword();
 void renderWifiPicker();
 void renderWorkspaceFileList();
 void openSelectedWorkspaceFile();
+void openProjectList();
 void openAiMenu();
 void openWebConsole(Screen returnScreen);
 cardputer::OperationResult runSshTerminal();
@@ -322,14 +356,40 @@ std::uint64_t currentChatTimestamp()
     return current >= 1700000000 ? static_cast<std::uint64_t>(current) : 0;
 }
 
-cardputer::OperationResult refreshChatList()
+cardputer::OperationResult refreshChatPage(std::uint32_t offset)
 {
-    const cardputer::ChatsResult result = cardputer::listChats();
+    if (activeProjectId.isEmpty()) {
+        return {false, "No active project is selected"};
+    }
+    const cardputer::ProjectChatsPageResult result = cardputer::listProjectChatsPage(
+        activeProjectId, offset, cardputer::kMaximumProjectPageEntries);
     if (!result.success) {
         return {false, result.error};
     }
     chats = result.chats;
+    chatPageOffset = offset;
+    chatNextPageOffset = result.nextOffset;
+    chatPageEof = result.eof;
+    chatListIndex = 0;
     return {true, ""};
+}
+
+cardputer::OperationResult refreshChatList()
+{
+    chatPreviousPageOffsets.clear();
+    return refreshChatPage(0);
+}
+
+cardputer::OperationResult saveActiveProjectSelection(const String& projectId)
+{
+    cardputer::ProjectStorageManifestResult manifest =
+        cardputer::loadProjectStorageManifest();
+    if (!manifest.success) {
+        return {false, manifest.error};
+    }
+    manifest.manifest.activeProjectId = projectId;
+    ++manifest.manifest.revision;
+    return cardputer::saveProjectStorageManifest(manifest.manifest);
 }
 
 cardputer::OperationResult saveCurrentChat()
@@ -338,24 +398,22 @@ cardputer::OperationResult saveCurrentChat()
         return {false, chatStorageError.isEmpty() ? String("Persistent chat storage is unavailable")
                                                   : chatStorageError};
     }
-    std::uint64_t updatedAt = currentChatTimestamp();
-    if (updatedAt == 0) {
-        for (const auto& chat : chats) {
-            if (chat.id == activeChatId) {
-                updatedAt = chat.updatedAt;
-                break;
-            }
-        }
+    cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
+        activeProjectId, activeChatId, 1, 1);
+    if (!loaded.success) {
+        return {false, loaded.error};
     }
-    const cardputer::ChatDocument document = {
-        {activeChatId, activeChatTitle, updatedAt, static_cast<std::uint32_t>(history.size()),
-         activeChatPinned, activeChatArchived, activeChatArchivedMessageCount},
-        history,
-        activeChatInstructions,
-        inputBuffer,
-        activeChatSshToolsEnabled,
-    };
-    const cardputer::OperationResult result = cardputer::saveChat(document);
+    loaded.chat.summary.title = activeChatTitle;
+    const std::uint64_t updatedAt = currentChatTimestamp();
+    if (updatedAt != 0) {
+        loaded.chat.summary.updatedAt = updatedAt;
+    }
+    loaded.chat.summary.pinned = activeChatPinned;
+    loaded.chat.summary.archived = activeChatArchived;
+    loaded.chat.instructions = activeChatInstructions;
+    loaded.chat.draft = inputBuffer;
+    loaded.chat.sshToolsEnabled = activeChatSshToolsEnabled;
+    const cardputer::OperationResult result = cardputer::saveProjectChatMetadata(loaded.chat);
     if (result.success) {
         persistedDraft = inputBuffer;
     }
@@ -364,11 +422,17 @@ cardputer::OperationResult saveCurrentChat()
 
 cardputer::OperationResult activateChat(const String& id)
 {
-    const cardputer::ChatDocumentResult loaded = cardputer::loadChat(id);
+    const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
+        activeProjectId, id, 64, 65536);
     if (!loaded.success) {
         return {false, loaded.error};
     }
-    const cardputer::OperationResult activeResult = cardputer::saveActiveChatId(id);
+    cardputer::ProjectDocumentResult project = cardputer::loadProject(activeProjectId);
+    if (!project.success) {
+        return {false, project.error};
+    }
+    project.project.activeChatId = id;
+    cardputer::OperationResult activeResult = cardputer::saveProject(project.project);
     if (!activeResult.success) {
         return activeResult;
     }
@@ -378,7 +442,7 @@ cardputer::OperationResult activateChat(const String& id)
     activeChatInstructions = loaded.chat.instructions;
     activeChatPinned = loaded.chat.summary.pinned;
     activeChatArchived = loaded.chat.summary.archived;
-    activeChatArchivedMessageCount = loaded.chat.summary.archivedMessageCount;
+    activeChatArchivedMessageCount = 0;
     activeChatSshToolsEnabled = loaded.chat.sshToolsEnabled;
     activeResponse.clear();
     inputBuffer = loaded.chat.draft;
@@ -390,13 +454,10 @@ cardputer::OperationResult activateChat(const String& id)
 
 cardputer::OperationResult createAndActivateChat()
 {
-    const cardputer::ChatDocumentResult created = cardputer::createChat("New chat");
+    const cardputer::ChatDocumentResult created = cardputer::createProjectChat(
+        activeProjectId, "New chat");
     if (!created.success) {
         return {false, created.error};
-    }
-    const cardputer::OperationResult activeResult = cardputer::saveActiveChatId(created.chat.summary.id);
-    if (!activeResult.success) {
-        return activeResult;
     }
     activeChatId = created.chat.summary.id;
     activeChatTitle = created.chat.summary.title;
@@ -411,27 +472,36 @@ cardputer::OperationResult createAndActivateChat()
     persistedDraft.clear();
     lastDraftAutosaveAt = millis();
     scrollOffset = 0;
-    return refreshChatList();
+    cardputer::ProjectDocumentResult project = cardputer::loadProject(activeProjectId);
+    if (!project.success) {
+        return {false, project.error};
+    }
+    project.project.activeChatId = activeChatId;
+    const cardputer::OperationResult saved = cardputer::saveProject(project.project);
+    return saved.success ? refreshChatList() : saved;
 }
 
 cardputer::OperationResult initializeChats()
 {
-    cardputer::OperationResult result = cardputer::initializeChatStorage();
-    if (!result.success) {
-        return result;
+    const cardputer::ProjectStorageManifestResult manifest =
+        cardputer::loadProjectStorageManifest();
+    if (!manifest.success) {
+        return {false, manifest.error};
     }
-    result = refreshChatList();
+    activeProjectId = manifest.manifest.activeProjectId;
+    const cardputer::ProjectDocumentResult project = cardputer::loadProject(activeProjectId);
+    if (!project.success) {
+        return {false, project.error};
+    }
+    activeProjectTitle = project.project.summary.title;
+    cardputer::OperationResult result = refreshChatList();
     if (!result.success) {
         return result;
     }
     if (chats.empty()) {
         return createAndActivateChat();
     }
-    String storedId;
-    result = cardputer::loadActiveChatId(storedId);
-    if (!result.success) {
-        return result;
-    }
+    const String storedId = project.project.activeChatId;
     if (!storedId.isEmpty()) {
         for (const auto& chat : chats) {
             if (chat.id == storedId) {
@@ -441,6 +511,171 @@ cardputer::OperationResult initializeChats()
         Serial.println("WARN event=active_chat reason=stored_id_not_found");
     }
     return activateChat(chats.front().id);
+}
+
+cardputer::OperationResult refreshProjectPage(std::uint32_t offset)
+{
+    const cardputer::ProjectsPageResult page = cardputer::listProjectsPage(
+        offset, cardputer::kMaximumProjectPageEntries);
+    if (!page.success) {
+        return {false, page.error};
+    }
+    projects = page.projects;
+    projectPageOffset = offset;
+    projectNextPageOffset = page.nextOffset;
+    projectPageEof = page.eof;
+    projectListIndex = 0;
+    return {true, ""};
+}
+
+cardputer::OperationResult activateProject(const String& projectId)
+{
+    if (!activeChatId.isEmpty()) {
+        const cardputer::OperationResult saved = saveCurrentChat();
+        if (!saved.success) {
+            return saved;
+        }
+    }
+    const cardputer::ProjectDocumentResult project = cardputer::loadProject(projectId);
+    if (!project.success) {
+        return {false, project.error};
+    }
+    cardputer::OperationResult result = saveActiveProjectSelection(projectId);
+    if (!result.success) {
+        return result;
+    }
+    activeProjectId = projectId;
+    activeProjectTitle = project.project.summary.title;
+    activeChatId.clear();
+    result = refreshChatList();
+    if (!result.success) {
+        return result;
+    }
+    if (chats.empty()) {
+        return createAndActivateChat();
+    }
+    if (!project.project.activeChatId.isEmpty()) {
+        for (const cardputer::ChatSummary& chat : chats) {
+            if (chat.id == project.project.activeChatId) {
+                return activateChat(chat.id);
+            }
+        }
+    }
+    return activateChat(chats.front().id);
+}
+
+std::vector<String> projectListItems()
+{
+    std::vector<String> items = {"+ New project"};
+    items.reserve(projects.size() + 3);
+    for (const cardputer::ProjectSummary& project : projects) {
+        const String marker = project.id == activeProjectId ? "[ON] " :
+            (project.pinned ? "[PIN] " : (project.archived ? "[ARC] " : ""));
+        items.push_back(marker + project.title + "  [" + project.chatCount + "]");
+    }
+    if (!projectPreviousPageOffsets.empty()) {
+        items.push_back("< Previous projects");
+    }
+    if (!projectPageEof) {
+        items.push_back("Next projects >");
+    }
+    return items;
+}
+
+void renderProjectList()
+{
+    cardputer::showSelectionList("PROJECTS", projectListItems(), projectListIndex,
+                                 menuStatus.isEmpty()
+                                     ? String("UP/DOWN  ENTER open  ESC home")
+                                     : menuStatus);
+}
+
+std::vector<String> projectActionItems()
+{
+    const cardputer::ProjectDocumentResult project = cardputer::loadProject(selectedProjectId);
+    if (!project.success) {
+        return {"Back"};
+    }
+    return {
+        "Open chats",
+        project.project.model.isEmpty()
+            ? String("Model: Global default")
+            : String("Model: ") + project.project.model,
+        project.project.instructions.empty()
+            ? String("Project instructions: OFF")
+            : String("Project instructions: ON"),
+        "Context: " + String(project.project.contextByteBudget / 1024) + " KiB",
+        "Output: " + String(project.project.maximumOutputTokens) + " tokens",
+        String("Auto compact: ") + (project.project.automaticCompaction ? "ON" : "OFF"),
+        "Duplicate project",
+        project.project.summary.archived ? "Restore project" : "Archive project",
+        "Export project bundle",
+        "Back",
+    };
+}
+
+std::vector<String> projectModelItems()
+{
+    std::vector<String> items = {"Use global default"};
+    items.reserve(availableModels.size() + 1);
+    items.insert(items.end(), availableModels.begin(), availableModels.end());
+    return items;
+}
+
+void renderProjectModelPicker()
+{
+    cardputer::showSelectionList("PROJECT MODEL", projectModelItems(), modelPickerIndex,
+                                 menuStatus.isEmpty()
+                                     ? String("UP/DOWN  ENTER  ESC project")
+                                     : menuStatus);
+}
+
+void renderProjectInstructions()
+{
+    cardputer::showTextEditor(
+        "PROJECT INSTRUCTIONS", projectInstructionsInput, keyboardLayout,
+        cardputer::kMaximumProjectInstructionsBytes, projectInstructionsStatus,
+        "Applied after global instructions",
+        "ENTER save  FN+DEL clear  ESC back");
+}
+
+void renderProjectActions()
+{
+    cardputer::showSelectionList(selectedProjectTitle, projectActionItems(),
+                                 projectActionsIndex,
+                                 menuStatus.isEmpty()
+                                     ? String("UP/DOWN  ENTER  ESC projects")
+                                     : menuStatus);
+}
+
+void openProjectActions(const cardputer::ProjectSummary& project)
+{
+    selectedProjectId = project.id;
+    selectedProjectTitle = project.title;
+    projectActionsIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::ProjectActions;
+    renderProjectActions();
+}
+
+void openProjectList()
+{
+    projectPreviousPageOffsets.clear();
+    const cardputer::OperationResult result = refreshProjectPage(0);
+    if (!result.success) {
+        menuStatus = result.error;
+        renderCarousel();
+        return;
+    }
+    menuStatus = "";
+    currentScreen = Screen::ProjectList;
+    for (std::size_t index = 0; index < projects.size(); ++index) {
+        if (projects[index].id == activeProjectId) {
+            projectListIndex = index + 1;
+            break;
+        }
+    }
+    renderProjectList();
 }
 
 std::vector<String> chatListItems()
@@ -453,12 +688,20 @@ std::vector<String> chatListItems()
         const std::uint32_t totalMessages = chat.messageCount + chat.archivedMessageCount;
         items.push_back(marker + chat.title + "  [" + totalMessages + "]");
     }
+    if (!chatPreviousPageOffsets.empty()) {
+        items.push_back("< Previous chats");
+    }
+    if (!chatPageEof) {
+        items.push_back("Next chats >");
+    }
     return items;
 }
 
 void renderChatList()
 {
-    cardputer::showSelectionList("CHATS", chatListItems(), chatListIndex,
+    const String title = activeProjectTitle.isEmpty()
+        ? String("CHATS") : activeProjectTitle;
+    cardputer::showSelectionList(title, chatListItems(), chatListIndex,
                                  menuStatus.isEmpty()
                                      ? String("UP/DOWN  ENTER options  FN+DEL")
                                      : menuStatus);
@@ -477,9 +720,7 @@ std::vector<String> chatActionItems()
         "Open chat",
         "Chat instructions",
         String("LLM SSH access: ") + (selectedChatSshToolsEnabled ? "ON" : "OFF"),
-        "Context: " + String(selected.messageCount) + "/" +
-            String(cardputer::kMaximumStoredMessages) + " + " +
-            String(selected.archivedMessageCount) + " archived",
+        "View full history (" + String(selected.messageCount) + ")",
         selected.id == activeChatId && !retryPrompt.empty()
             ? String("Retry failed request") : String("Retry unavailable"),
         "Latest search sources",
@@ -487,7 +728,8 @@ std::vector<String> chatActionItems()
         selected.archived ? "Restore from archive" : "Archive chat",
         "Duplicate chat",
         "Export Markdown",
-        "Export portable bundle",
+        "Export project bundle",
+        "Regenerate context summary",
         "Clear messages",
         "Delete chat",
         "Back",
@@ -518,7 +760,8 @@ void renderSearchSources()
 cardputer::OperationResult loadArchivedChatViewerPage(std::uint32_t offset)
 {
     const cardputer::ArchivedMessagesPageResult loaded =
-        cardputer::readArchivedChatMessages(selectedChatId, offset, 8, 12000);
+        cardputer::readProjectChatMessages(activeProjectId, selectedChatId,
+                                           offset, 8, 12000);
     if (!loaded.success) {
         return {false, loaded.error};
     }
@@ -526,7 +769,7 @@ cardputer::OperationResult loadArchivedChatViewerPage(std::uint32_t offset)
     std::vector<std::string> lines;
     for (const auto& message : loaded.messages) {
         const std::string heading = message.role == "user"
-            ? std::string("YOU - ARCHIVED") : std::string("AI - ARCHIVED");
+            ? std::string("YOU") : std::string("AI");
         const std::vector<std::string> wrapped = cardputer::wrapUtf8Text(
             heading + "\n" + message.content, 38);
         lines.insert(lines.end(), wrapped.begin(), wrapped.end());
@@ -573,7 +816,8 @@ void openChatActions(const cardputer::ChatSummary& chat)
 {
     selectedChatId = chat.id;
     selectedChatTitle = chat.title;
-    const cardputer::ChatDocumentResult loaded = cardputer::loadChat(chat.id);
+    const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
+        activeProjectId, chat.id, 1, 1);
     selectedChatSshToolsEnabled = loaded.success && loaded.chat.sshToolsEnabled;
     chatActionsIndex = 0;
     menuStatus = loaded.success ? String("") : loaded.error;
@@ -584,7 +828,7 @@ void openChatActions(const cardputer::ChatSummary& chat)
 void renderChatInstructions()
 {
     cardputer::showTextEditor("CHAT INSTRUCTIONS", instructionsInput, keyboardLayout,
-                             cardputer::kMaximumChatInstructionsBytes, instructionsStatus,
+                             cardputer::kMaximumProjectChatInstructionsBytes, instructionsStatus,
                              "(No instructions)",
                              "ENTER save  ESC cancel  Fn+3 lang");
 }
@@ -709,6 +953,18 @@ void render()
         return;
     case Screen::GlobalInstructions:
         renderGlobalInstructions();
+        return;
+    case Screen::ProjectList:
+        renderProjectList();
+        return;
+    case Screen::ProjectActions:
+        renderProjectActions();
+        return;
+    case Screen::ProjectModelPicker:
+        renderProjectModelPicker();
+        return;
+    case Screen::ProjectInstructions:
+        renderProjectInstructions();
         return;
     case Screen::ChatList:
         renderChatList();
@@ -839,6 +1095,97 @@ void beginConfiguredNetwork()
     Serial.println("NETWORK startup=background");
 }
 
+std::string effectiveProjectChatInstructions(const cardputer::ProjectDocument& project,
+                                             const cardputer::ChatDocument& chat)
+{
+    std::string result;
+    if (!project.instructions.empty()) {
+        result = "Project instructions supplied by the user:\n" + project.instructions;
+    }
+    if (!chat.instructions.empty()) {
+        if (!result.empty()) {
+            result += "\n\n";
+        }
+        result += "Chat-specific instructions override conflicting project instructions:\n";
+        result += chat.instructions;
+    }
+    if (!chat.contextSummary.empty()) {
+        if (!result.empty()) {
+            result += "\n\n";
+        }
+        result += "Conversation summary for turns omitted from the active context:\n";
+        result += chat.contextSummary;
+    }
+    return result;
+}
+
+cardputer::OperationResult regenerateActiveContextSummary(
+    const cardputer::ProjectDocument& project,
+    const std::vector<cardputer::Message>& source,
+    std::uint32_t summarizedMessageCount)
+{
+    if (source.empty()) {
+        return {false, "No omitted messages are available to summarize"};
+    }
+    const cardputer::ChatDocumentResult current = cardputer::loadProjectChat(
+        activeProjectId, activeChatId, 1, 1);
+    if (!current.success) {
+        return {false, current.error};
+    }
+    if (summarizedMessageCount < current.chat.summarizedMessageCount ||
+        summarizedMessageCount > current.chat.summary.messageCount) {
+        return {false, "Context summary message range is invalid"};
+    }
+    std::string transcript;
+    transcript.reserve(std::min<std::size_t>(project.contextByteBudget, 32768));
+    if (!current.chat.contextSummary.empty()) {
+        transcript += "Previous summary:\n";
+        transcript += current.chat.contextSummary;
+        transcript += "\n\nNewly omitted messages:\n";
+    }
+    for (const cardputer::Message& message : source) {
+        const std::string prefix = message.role == "user" ? "You: " : "AI: ";
+        if (transcript.size() + prefix.size() + message.content.size() + 1 > 32768) {
+            break;
+        }
+        transcript += prefix;
+        transcript += message.content;
+        transcript += '\n';
+    }
+    if (transcript.empty()) {
+        return {false, "Messages selected for summary exceed the safe request budget"};
+    }
+    cardputer::Settings summarySettings = settings;
+    summarySettings.globalInstructions = "";
+    if (!project.model.isEmpty()) {
+        summarySettings.model = project.model;
+    }
+    const std::vector<cardputer::Message> summaryRequest = {{
+        "user",
+        "Create a compact factual conversation summary. Preserve decisions, names, "
+        "constraints, unresolved questions and file or command references. Do not add "
+        "facts. Return only the summary.\n\n" + transcript,
+    }};
+    const cardputer::ChatResult summary = cardputer::streamChatCompletionWithBudget(
+        summarySettings, summaryRequest,
+        "This is a context compaction operation, not a user-facing answer.",
+        768, [](const std::string&) {}, []() {
+            M5Cardputer.update();
+            return cardputerEscapePressed();
+        });
+    if (!summary.success) {
+        return {false, "Context summary failed: " + summary.error};
+    }
+    cardputer::ChatDocumentResult stored = cardputer::loadProjectChat(
+        activeProjectId, activeChatId, 1, 1);
+    if (!stored.success) {
+        return {false, stored.error};
+    }
+    stored.chat.contextSummary = summary.response;
+    stored.chat.summarizedMessageCount = summarizedMessageCount;
+    return cardputer::saveProjectChatMetadata(stored.chat);
+}
+
 void submitPrompt()
 {
     if (inputBuffer.empty()) {
@@ -870,42 +1217,44 @@ void submitPrompt()
         return;
     }
 
+    const cardputer::ProjectDocumentResult activeProject =
+        cardputer::loadProject(activeProjectId);
+    const cardputer::ChatDocumentResult storedChat = cardputer::loadProjectChat(
+        activeProjectId, activeChatId, 1, 1);
+    if (!activeProject.success || !storedChat.success) {
+        statusMessage = activeProject.success ? storedChat.error : activeProject.error;
+        render();
+        return;
+    }
+    cardputer::Settings requestSettings = settings;
+    if (!activeProject.project.model.isEmpty()) {
+        requestSettings.model = activeProject.project.model;
+    }
+    const std::string effectiveInstructions = effectiveProjectChatInstructions(
+        activeProject.project, storedChat.chat);
     std::vector<cardputer::Message> pendingHistory = history;
     pendingHistory.push_back({"user", prompt});
-    cardputer::HistoryFitResult pendingFit =
-        cardputer::fitHistoryToActiveContext(pendingHistory);
-    if (!pendingFit.archived.empty()) {
-        const cardputer::OperationResult archived = cardputer::archiveChatMessages(
-            activeChatId, pendingFit.archived);
-        if (!archived.success) {
-            statusMessage = archived.error;
-            render();
-            return;
-        }
-        activeChatArchivedMessageCount +=
-            static_cast<std::uint32_t>(pendingFit.archived.size());
-    }
+    cardputer::ContextWindowResult pendingFit = cardputer::fitMessagesToByteBudget(
+        pendingHistory, activeProject.project.contextByteBudget);
     const String pendingTitle = history.empty()
         ? String(cardputer::makeChatTitle(prompt, cardputer::kMaximumChatTitleCells).c_str())
         : activeChatTitle;
-    cardputer::ChatDocument pendingDocument = {
-        {activeChatId, pendingTitle, currentChatTimestamp(),
-         static_cast<std::uint32_t>(pendingFit.retained.size()), activeChatPinned,
-         activeChatArchived, activeChatArchivedMessageCount},
-        std::move(pendingFit.retained),
-        activeChatInstructions,
-        "",
-        activeChatSshToolsEnabled,
-    };
-    const cardputer::OperationResult pendingSave = cardputer::saveChat(pendingDocument);
+    const cardputer::OperationResult pendingSave = cardputer::appendProjectChatMessages(
+        activeProjectId, activeChatId, {{"user", prompt}}, currentChatTimestamp());
     if (!pendingSave.success) {
         statusMessage = pendingSave.error;
         render();
         return;
     }
-    history = std::move(pendingDocument.messages);
+    history = std::move(pendingFit.retained);
     activeChatTitle = pendingTitle;
     inputBuffer.clear();
+    const cardputer::OperationResult pendingMetadataSave = saveCurrentChat();
+    if (!pendingMetadataSave.success) {
+        statusMessage = pendingMetadataSave.error;
+        render();
+        return;
+    }
     activeResponse.clear();
     scrollOffset = 0;
     statusMessage = "Streaming...";
@@ -932,16 +1281,18 @@ void submitPrompt()
         return cardputerEscapePressed();
     };
     const cardputer::ChatResult result = useTools
-        ? cardputer::streamChatCompletionWithTools(
-              settings, history, activeChatInstructions, toolPolicy.sshEnabled, onText,
+        ? cardputer::streamChatCompletionWithToolsAndBudget(
+              requestSettings, history, effectiveInstructions, toolPolicy.sshEnabled,
+              activeProject.project.maximumOutputTokens, onText,
               [&toolPolicy, &isCancelled](const cardputer::ToolCall& call) {
                   statusMessage = "Tool: " + String(call.name.c_str());
                   render();
-                  return cardputer::routeToolCall(
-                      settings, toolPolicy, call, isCancelled);
+                  return cardputer::routeProjectToolCall(
+                      settings, toolPolicy, activeProjectId, call, isCancelled);
               }, isCancelled)
-        : cardputer::streamChatCompletion(
-              settings, history, activeChatInstructions, onText, isCancelled);
+        : cardputer::streamChatCompletionWithBudget(
+              requestSettings, history, effectiveInstructions,
+              activeProject.project.maximumOutputTokens, onText, isCancelled);
     cardputer::markOperation("idle");
     if (!result.success) {
         activeResponse = result.response;
@@ -964,22 +1315,28 @@ void submitPrompt()
     }
     history.push_back({"assistant", result.response});
     retryPrompt.clear();
-    cardputer::HistoryFitResult finalFit = cardputer::fitHistoryToActiveContext(history);
-    if (!finalFit.archived.empty()) {
-        const cardputer::OperationResult archived = cardputer::archiveChatMessages(
-            activeChatId, finalFit.archived);
-        if (!archived.success) {
-            activeResponse.clear();
-            statusMessage = "Response received but history archive failed: " + archived.error;
-            render();
-            return;
-        }
-        activeChatArchivedMessageCount +=
-            static_cast<std::uint32_t>(finalFit.archived.size());
+    cardputer::ContextWindowResult finalFit = cardputer::fitMessagesToByteBudget(
+        history, activeProject.project.contextByteBudget);
+    std::vector<cardputer::Message> compactedMessages;
+    if (finalFit.droppedMessages > 0) {
+        compactedMessages.assign(history.begin(),
+                                 history.begin() + finalFit.droppedMessages);
     }
     history = std::move(finalFit.retained);
     activeResponse.clear();
-    const cardputer::OperationResult finalSave = saveCurrentChat();
+    cardputer::OperationResult finalSave = cardputer::appendProjectChatMessages(
+        activeProjectId, activeChatId, {{"assistant", result.response}},
+        currentChatTimestamp());
+    if (finalSave.success) {
+        finalSave = saveCurrentChat();
+    }
+    if (finalSave.success && activeProject.project.automaticCompaction &&
+        !compactedMessages.empty()) {
+        finalSave = regenerateActiveContextSummary(
+            activeProject.project, compactedMessages,
+            storedChat.chat.summarizedMessageCount +
+                static_cast<std::uint32_t>(compactedMessages.size()));
+    }
     if (!finalSave.success) {
         statusMessage = "Response received but chat save failed: " + finalSave.error;
         Serial.println("ERROR event=chat_save result=failed stage=assistant");
@@ -1024,27 +1381,15 @@ void submitPrompt()
 
 void runUiSearchEndToEndTest()
 {
-    if (!chatStorageReady || activeChatId.isEmpty()) {
+    if (!chatStorageReady || activeProjectId.isEmpty() || activeChatId.isEmpty()) {
         Serial.println("E2ETEST result=failed stage=storage_not_ready");
         return;
     }
+    const String originalProjectId = activeProjectId;
     const String originalChatId = activeChatId;
     const Screen originalScreen = currentScreen;
-    const cardputer::ChatsResult existing = cardputer::listChats();
-    if (!existing.success) {
-        Serial.println("E2ETEST result=failed stage=list_chats");
-        return;
-    }
-    for (const auto& chat : existing.chats) {
-        if (chat.title == "E2E search test") {
-            const cardputer::OperationResult cleanup = cardputer::deleteChat(chat.id);
-            if (!cleanup.success) {
-                Serial.println("E2ETEST result=failed stage=stale_cleanup");
-                return;
-            }
-        }
-    }
-    const cardputer::ChatDocumentResult created = cardputer::createChat("E2E search test");
+    const cardputer::ChatDocumentResult created = cardputer::createProjectChat(
+        activeProjectId, "E2E search " + String(millis()));
     if (!created.success) {
         Serial.println("E2ETEST result=failed stage=create_chat");
         return;
@@ -1067,14 +1412,17 @@ void runUiSearchEndToEndTest()
         !history.back().content.empty();
     const String submissionStatus = statusMessage;
     const String testChatId = activeChatId;
-    const cardputer::OperationResult cleanup = cardputer::deleteChat(testChatId);
-    const cardputer::ChatDocumentResult restored = cardputer::loadChat(originalChatId);
+    const cardputer::OperationResult cleanup = cardputer::deleteProjectChat(
+        activeProjectId, testChatId);
+    const cardputer::ChatDocumentResult restored = cardputer::loadProjectChat(
+        originalProjectId, originalChatId, 64, 65536);
     if (!restored.success) {
         Serial.println("E2ETEST result=failed stage=restore_chat");
         statusMessage = restored.error;
         render();
         return;
     }
+    activeProjectId = originalProjectId;
     activeChatId = restored.chat.summary.id;
     activeChatTitle = restored.chat.summary.title;
     history = restored.chat.messages;
@@ -1202,21 +1550,37 @@ void setup()
         }
     }
 
-    const cardputer::OperationResult chatResult = voiceStorageReady
-        ? initializeChats()
+    const cardputer::OperationResult legacyChatResult = voiceStorageReady
+        ? cardputer::initializeChatStorage()
         : cardputer::OperationResult{false, voiceStorageError};
+
+    const cardputer::OperationResult workspaceResult = legacyChatResult.success
+        ? cardputer::initializeFileWorkspace()
+        : cardputer::OperationResult{false, legacyChatResult.error};
+    cardputer::ProjectMigrationResult migrationResult = {
+        false, false, "", 0,
+        workspaceResult.success ? String() : workspaceResult.error,
+    };
+    if (workspaceResult.success) {
+        cardputer::showBusyScreen("CARDMIND", "Checking project storage...");
+        migrationResult = cardputer::migrateLegacyStorageToProjects();
+    }
+    const cardputer::OperationResult chatResult = migrationResult.success
+        ? initializeChats()
+        : cardputer::OperationResult{false, migrationResult.error};
     chatStorageReady = chatResult.success;
     chatStorageError = chatResult.success ? String() : chatResult.error;
     Serial.printf("CHAT_STORAGE result=%s count=%u\n",
                   chatStorageReady ? "ready" : "failed",
                   static_cast<unsigned int>(chats.size()));
-
-    const cardputer::OperationResult workspaceResult = chatStorageReady
-        ? cardputer::initializeFileWorkspace()
-        : cardputer::OperationResult{false, chatStorageError};
-    fileWorkspaceReady = workspaceResult.success;
-    fileWorkspaceError = workspaceResult.success ? String() : workspaceResult.error;
+    fileWorkspaceReady = workspaceResult.success && migrationResult.success &&
+        chatStorageReady;
+    fileWorkspaceError = fileWorkspaceReady ? String() : migrationResult.error;
     Serial.printf("FILE_WORKSPACE result=%s\n", fileWorkspaceReady ? "ready" : "failed");
+    Serial.printf("PROJECT_STORAGE result=%s migrated=%s chats=%u\n",
+                  migrationResult.success ? "ready" : "failed",
+                  migrationResult.migrated ? "yes" : "no",
+                  static_cast<unsigned int>(migrationResult.migratedChats));
 
     const cardputer::OperationResult journalResult = voiceStorageReady
         ? cardputer::appendBootJournal(kFirmwareVersion)

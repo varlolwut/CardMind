@@ -463,26 +463,67 @@ bool isValidChatId(const std::string& value)
 
 bool isValidWorkspaceFilename(const std::string& value)
 {
-    if (value.empty() || value.size() > 48 || value.front() == '.' ||
-        value.find("..") != std::string::npos) {
+    if (!isValidStorageRelativePath(value, 512)) {
         return false;
     }
-    for (const char character : value) {
-        const bool allowed = std::isalnum(static_cast<unsigned char>(character)) ||
-            character == '-' || character == '_' || character == '.';
-        if (!allowed) {
+    const std::size_t finalSeparator = value.rfind('/');
+    const std::string finalSegment = finalSeparator == std::string::npos
+        ? value : value.substr(finalSeparator + 1);
+    return finalSegment.size() < 4 ||
+        (finalSegment.compare(finalSegment.size() - 4, 4, ".tmp") != 0 &&
+         finalSegment.compare(finalSegment.size() - 4, 4, ".bak") != 0);
+}
+
+bool isValidStorageRelativePath(const std::string& path, std::size_t maximumBytes)
+{
+    if (path.empty() || path.size() > maximumBytes || !isValidUtf8(path) ||
+        path.front() == '/' || path.back() == '/' || path.find('\\') != std::string::npos) {
+        return false;
+    }
+    std::size_t segmentStart = 0;
+    while (segmentStart < path.size()) {
+        const std::size_t separator = path.find('/', segmentStart);
+        const std::size_t segmentEnd = separator == std::string::npos ? path.size() : separator;
+        const std::string segment = path.substr(segmentStart, segmentEnd - segmentStart);
+        if (segment.empty() || segment == "." || segment == "..") {
             return false;
         }
+        for (const unsigned char byte : segment) {
+            if (byte < 0x20 || byte == 0x7f || byte == ':') {
+                return false;
+            }
+        }
+        if (separator == std::string::npos) {
+            break;
+        }
+        segmentStart = separator + 1;
     }
-    const std::size_t dot = value.rfind('.');
-    if (dot == std::string::npos) {
-        return false;
+    return true;
+}
+
+ContextWindowResult fitMessagesToByteBudget(const std::vector<Message>& messages,
+                                            std::size_t maximumBytes)
+{
+    ContextWindowResult result = {{}, 0, 0};
+    if (maximumBytes == 0) {
+        result.droppedMessages = static_cast<std::uint32_t>(messages.size());
+        return result;
     }
-    const std::string extension = value.substr(dot);
-    return extension == ".txt" || extension == ".md" || extension == ".json" ||
-           extension == ".jsonl" ||
-           extension == ".csv" || extension == ".html" || extension == ".svg" ||
-           extension == ".py";
+    std::size_t firstRetained = messages.size();
+    while (firstRetained > 0) {
+        const Message& candidate = messages[firstRetained - 1];
+        const std::size_t candidateBytes = candidate.role.length() +
+            candidate.content.size() + 16;
+        if (result.retainedBytes + candidateBytes > maximumBytes &&
+            firstRetained < messages.size()) {
+            break;
+        }
+        result.retainedBytes += candidateBytes;
+        --firstRetained;
+    }
+    result.droppedMessages = static_cast<std::uint32_t>(firstRetained);
+    result.retained.assign(messages.begin() + firstRetained, messages.end());
+    return result;
 }
 
 bool requestsWorkspaceAccess(const std::string& prompt)

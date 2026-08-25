@@ -10,12 +10,13 @@ the device; it does not run alongside Bruce or another firmware.
 
 ## What it does
 
-- Text chat with SSE streaming, separate conversations, per-chat instructions, and
-  English/Russian keyboard layouts.
+- SD-backed projects with independent chats, project defaults, per-chat instructions,
+  configurable context budgets, SSE streaming, and English/Russian keyboard layouts.
 - Voice input through a configurable OpenAI-compatible transcription endpoint and
   optional spoken replies through a configurable TTS service.
 - Model-assisted web search and page extraction through an optional search service.
-- Large UTF-8 workspace files on microSD with normal open, edit, and save workflows.
+- A Shared microSD workspace with nested UTF-8 paths, explicit project links, and files
+  up to 256 MiB using bounded viewing, editing, upload, download, and SFTP transfers.
 - Standalone SSH terminal and SFTP browser on the Cardputer and in the protected Web
   console.
 - A MicroPython mode for small scripts stored in the same microSD workspace that
@@ -48,9 +49,11 @@ described in [Getting started](docs/getting-started.md).
   and SSE `choices[0].delta.content`; model discovery uses `GET /v1/models`.
 - TLS verification is always enabled. Endpoints with an unsupported private or custom
   CA fail explicitly.
-- Current active-chat context is bounded to 64 messages and 32,768 UTF-8 bytes;
-  older complete turns are archived to microSD.
-- A workspace file is limited to 491,520 bytes; internal streaming is hidden from the user.
+- Raw chat history is retained on microSD. Each project has a configurable 8–256 KiB
+  request-context budget and optional model-generated compaction; compaction never
+  deletes the original turns.
+- A workspace file is limited to 256 MiB. Text editors expose one bounded window at a
+  time; uploads, downloads, search, copying, and SFTP are streamed.
 - Cardputer ADV has no PSRAM. Memory-heavy network operations are deliberately
   serialized.
 
@@ -64,6 +67,7 @@ configuration, security, limits, and troubleshooting.
 
 - [Getting started](docs/getting-started.md)
 - [User guide and controls](docs/user-guide.md)
+- [Projects and Shared workspace](docs/projects-workspace.md)
 - [Service configuration](docs/configuration.md)
 - [Web console](docs/web-console.md)
 - [SSH and SFTP](docs/ssh-sftp.md)

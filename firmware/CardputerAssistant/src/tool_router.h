@@ -22,5 +22,10 @@ ToolExecutionResult routeToolCall(const Settings& settings,
                                   const ChatToolPolicy& policy,
                                   const ToolCall& call,
                                   const CancelCallback& isCancelled);
+ToolExecutionResult routeProjectToolCall(const Settings& settings,
+                                         const ChatToolPolicy& policy,
+                                         const String& projectId,
+                                         const ToolCall& call,
+                                         const CancelCallback& isCancelled);
 
 }  // namespace cardputer
