@@ -533,6 +533,12 @@ bool keyboardWordContains(const Keyboard_Class::KeysState& keys, char expected)
     return std::find(keys.word.begin(), keys.word.end(), expected) != keys.word.end();
 }
 
+bool cardputerEscapePressed()
+{
+    const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+    return keys.esc || keyboardWordContains(keys, '`');
+}
+
 void waitForModalKeyRelease()
 {
     while (!M5Cardputer.Keyboard.keyList().empty()) {
