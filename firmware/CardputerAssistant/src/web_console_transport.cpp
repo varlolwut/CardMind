@@ -1,6 +1,7 @@
 #include "web_console_transport.h"
 
 #include "web_console_asset.h"
+#include "web_console_metrics.h"
 
 #include <algorithm>
 #include <cstring>
@@ -75,6 +76,7 @@ void sendWebJson(WebServer& server, int statusCode, const JsonDocument& document
 {
     const std::size_t expectedBytes = measureJson(document);
     server.sendHeader("Cache-Control", "no-store");
+    addWebResponseMetrics(server, expectedBytes);
     server.setContentLength(expectedBytes);
     server.send(statusCode, "application/json; charset=utf-8", "");
     BufferedJsonWriter writer(server.client());

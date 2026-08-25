@@ -2,6 +2,14 @@ import { readFile } from 'node:fs/promises';
 
 const credentialPath = new URL('../.secrets/ui-test-credentials.json', import.meta.url);
 const maximumRequestMs = 45_000;
+const statePaths = {
+  status: '/api/status',
+  chats: '/api/chats',
+  chat: '/api/chat',
+  files: '/api/files',
+  ssh: '/api/ssh/state',
+  settings: '/api/settings',
+};
 
 function requireString(value, field) {
   if (typeof value !== 'string' || value.length === 0) {
@@ -71,29 +79,40 @@ async function state(baseUrl, auth) {
   const statusResponse = await request(
     baseUrl,
     auth,
-    '/api/state?view=status',
+    statePaths.status,
     {method: 'GET'},
   );
   const status = await statusResponse.json();
   const sshResponse = await request(
     baseUrl,
     auth,
-    '/api/state?view=ssh',
+    statePaths.ssh,
     {method: 'GET'},
   );
   return {...status, ...await sshResponse.json()};
 }
 
 async function timedStateView(baseUrl, auth, view) {
+  const path = statePaths[view];
+  if (path === undefined) {
+    throw new Error(`Unknown state view '${view}'`);
+  }
   const startedAt = performance.now();
   const response = await request(
     baseUrl,
     auth,
-    `/api/state?view=${encodeURIComponent(view)}`,
+    path,
     {method: 'GET'},
   );
   const body = await response.text();
   const elapsedMs = Math.round(performance.now() - startedAt);
+  const measuredBytes = Number(response.headers.get('x-cardmind-response-bytes'));
+  if (!Number.isFinite(measuredBytes) || measuredBytes !== Buffer.byteLength(body, 'utf8')) {
+    throw new Error(`${path} returned an invalid response byte metric`);
+  }
+  if (!response.headers.has('server-timing')) {
+    throw new Error(`${path} did not return Server-Timing`);
+  }
   return {
     view,
     elapsed_ms: elapsedMs,
@@ -119,22 +138,30 @@ function recordSnapshot(measurements, label, document) {
 }
 
 async function startSsh(baseUrl, auth) {
-  const response = await request(baseUrl, auth, '/api/ssh/start', {method: 'POST'});
-  const document = await response.json();
-  if (document.trust_required === true) {
-    const trustResponse = await request(baseUrl, auth, '/api/ssh/trust', {
-      method: 'POST',
-      body: form({fingerprint: requireString(document.fingerprint, 'fingerprint')}),
-    });
-    const trusted = await trustResponse.json();
-    if (trusted.open !== true) {
-      throw new Error('SSH trust completed without opening the terminal');
+  await request(baseUrl, auth, '/api/ssh/start', {method: 'POST'});
+  const deadline = performance.now() + maximumRequestMs;
+  let trustSubmitted = false;
+  while (performance.now() < deadline) {
+    const response = await request(baseUrl, auth, statePaths.ssh, {method: 'GET'});
+    const document = await response.json();
+    if (document.ssh_stage === 'connected' && document.ssh_terminal_open === true) {
+      return document;
     }
-    return;
+    if (document.ssh_stage === 'awaiting_trust' && !trustSubmitted) {
+      await request(baseUrl, auth, '/api/ssh/trust', {
+        method: 'POST',
+        body: form({
+          fingerprint: requireString(document.ssh_fingerprint, 'ssh_fingerprint'),
+        }),
+      });
+      trustSubmitted = true;
+    }
+    if (document.ssh_stage === 'failed') {
+      throw new Error(`SSH background connection failed: ${document.ssh_error}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (document.open !== true) {
-    throw new Error('SSH start completed without opening the terminal');
-  }
+  throw new Error('SSH background connection did not reach connected state');
 }
 
 async function stopSsh(baseUrl, auth) {
@@ -142,6 +169,14 @@ async function stopSsh(baseUrl, auth) {
     method: 'POST',
     body: form({}),
   });
+  const deadline = performance.now() + maximumRequestMs;
+  while (performance.now() < deadline) {
+    const response = await request(baseUrl, auth, statePaths.ssh, {method: 'GET'});
+    const document = await response.json();
+    if (document.ssh_stage === 'idle' && document.ssh_terminal_open !== true) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('SSH background connection did not stop');
 }
 
 async function verifyInteractiveSsh(baseUrl, auth) {
@@ -168,6 +203,51 @@ async function verifyInteractiveSsh(baseUrl, auth) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`SSH terminal did not return marker '${marker}'`);
+}
+
+async function uploadWorkspaceProbe(baseUrl, auth, name, marker) {
+  const upload = new FormData();
+  upload.append('file', new Blob([`${marker}\n`], {type: 'text/plain'}), name);
+  await request(
+    baseUrl,
+    auth,
+    `/api/file/upload?name=${encodeURIComponent(name)}`,
+    {method: 'POST', body: upload},
+  );
+}
+
+async function verifyWorkspaceRoundTrip(baseUrl, auth, name, marker) {
+  const filesResponse = await request(baseUrl, auth, statePaths.files, {method: 'GET'});
+  const files = await filesResponse.json();
+  if (!files.files?.some((file) => file.name === name)) {
+    throw new Error(`Workspace index did not include '${name}' after upload`);
+  }
+  const readResponse = await request(
+    baseUrl,
+    auth,
+    `/api/file?name=${encodeURIComponent(name)}&offset=0`,
+    {method: 'GET'},
+  );
+  const read = await readResponse.json();
+  if (read.content !== `${marker}\n` || read.eof !== true) {
+    throw new Error(`Workspace round trip returned unexpected content for '${name}'`);
+  }
+}
+
+async function deleteWorkspaceProbe(baseUrl, auth, name) {
+  await request(baseUrl, auth, '/api/file/delete', {
+    method: 'POST',
+    body: form({name}),
+  });
+}
+
+async function exerciseStatePolling(baseUrl, auth, iterations) {
+  for (let index = 0; index < iterations; index += 1) {
+    await Promise.all([
+      request(baseUrl, auth, statePaths.status, {method: 'GET'}),
+      request(baseUrl, auth, statePaths.ssh, {method: 'GET'}),
+    ]);
+  }
 }
 
 function parseSse(text) {
@@ -211,7 +291,7 @@ async function main() {
   const auth = await login(baseUrl, password);
   const measurements = [];
   const stateTimings = [];
-  for (const view of ['status', 'chat', 'files', 'ssh', 'settings']) {
+  for (const view of ['status', 'chats', 'chat', 'files', 'ssh', 'settings']) {
     const timing = await timedStateView(baseUrl, auth, view);
     stateTimings.push({
       view: timing.view,
@@ -223,27 +303,50 @@ async function main() {
   console.log(JSON.stringify({stage: 'state_views', samples: stateTimings}));
   recordSnapshot(measurements, 'baseline', baseline);
   let sshStarted = false;
+  const workspaceProbe = `cardmind_web_e2e_${Date.now()}.txt`;
+  let workspaceProbeCreated = false;
   try {
     const sshStartedAt = performance.now();
-    await startSsh(baseUrl, auth);
+    const connected = await startSsh(baseUrl, auth);
     const sshConnectMs = Math.round(performance.now() - sshStartedAt);
     sshStarted = true;
     recordSnapshot(measurements, 'ssh_open', await state(baseUrl, auth));
     await verifyInteractiveSsh(baseUrl, auth);
+    const workspaceMarker = `SD-E2E-OK-${Date.now()}`;
+    await uploadWorkspaceProbe(baseUrl, auth, workspaceProbe, workspaceMarker);
+    workspaceProbeCreated = true;
+    await verifyWorkspaceRoundTrip(baseUrl, auth, workspaceProbe, workspaceMarker);
+    await exerciseStatePolling(baseUrl, auth, 20);
     const activeSshPromptMs = await prompt(baseUrl, auth, 'WEB-E2E-SSH-OK');
+    await deleteWorkspaceProbe(baseUrl, auth, workspaceProbe);
+    workspaceProbeCreated = false;
     await stopSsh(baseUrl, auth);
     sshStarted = false;
     recordSnapshot(measurements, 'ssh_closed', await state(baseUrl, auth));
     const closedSshPromptMs = await prompt(baseUrl, auth, 'WEB-E2E-CLOSED-OK');
+    const recovered = measurements.at(-1);
+    if (recovered.free_heap < 85_000 || recovered.largest_heap < 28_000) {
+      throw new Error(`Heap did not recover after SSH: ${JSON.stringify(recovered)}`);
+    }
     console.log(JSON.stringify({
       result: 'pass',
       ssh_connect_ms: sshConnectMs,
+      ssh_device_connect_ms: connected.ssh_connect_ms,
+      ssh_device_authenticate_ms: connected.ssh_authenticate_ms,
+      ssh_device_open_ms: connected.ssh_open_ms,
       interactive_ssh: 'pass',
+      workspace_sd: 'pass',
+      state_poll_iterations: 20,
       active_ssh_prompt_ms: activeSshPromptMs,
       closed_ssh_prompt_ms: closedSshPromptMs,
       measurements,
     }));
   } finally {
+    if (workspaceProbeCreated) {
+      await deleteWorkspaceProbe(baseUrl, auth, workspaceProbe).catch((error) => {
+        console.error(`Workspace cleanup failed: ${error.message}`);
+      });
+    }
     if (sshStarted) {
       await stopSsh(baseUrl, auth).catch((error) => {
         console.error(`SSH cleanup failed: ${error.message}`);

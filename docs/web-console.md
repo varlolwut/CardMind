@@ -59,6 +59,10 @@ save does not replace the last valid copy.
 - Create, select, update, or remove the same named SSH profiles used on-device.
 - Connect an interactive PTY. A hardware keyboard can type into the focused terminal;
   the command field supports phone touch keyboards.
+- Connection, authentication, and PTY setup run in the background. Their current
+  stage remains visible and the rest of the Web console stays responsive.
+- The terminal supports arrows, Backspace, Delete, Home/End, Tab, Enter,
+  Ctrl+C/D/L, ANSI colors, cursor movement, and alternate-screen applications.
 - Confirm a new or changed SHA-256 host fingerprint before authentication.
 - Browse remote directories and transfer files between the remote host and the
   CardMind microSD workspace.
@@ -85,6 +89,8 @@ prompts, so confirmation remains usable and visually consistent on desktop and m
 - Refresh the provider model list and test chat API authentication.
 - View and export firmware, reset, uptime, CPU, stack, heap, battery, Wi-Fi, microSD,
   service, and Python diagnostics.
+- Temporarily enable detailed request timing for diagnostics. The switch is
+  session-only and does not expose API keys, passwords, or SSH secrets.
 - Start the installed Python workspace directly from the Settings page.
 - Choose browser-only density, motion, contrast, and terminal wake-lock preferences.
 

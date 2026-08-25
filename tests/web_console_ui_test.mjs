@@ -9,8 +9,18 @@ const headerPath = new URL(
     "../firmware/CardputerAssistant/src/web_console_asset.h",
     import.meta.url,
 );
+const routesPath = new URL(
+    "../firmware/CardputerAssistant/src/web_console_routes.cpp",
+    import.meta.url,
+);
+const statePath = new URL(
+    "../firmware/CardputerAssistant/src/web_console_state.cpp",
+    import.meta.url,
+);
 const page = readFileSync(pagePath, "utf8").replace(/\r\n/g, "\n");
 const header = readFileSync(headerPath, "utf8");
+const routes = readFileSync(routesPath, "utf8");
+const stateBuilder = readFileSync(statePath, "utf8");
 const compressed = Buffer.from(
     [...header.matchAll(/0x([0-9a-f]{2})/g)]
         .map((match) => Number.parseInt(match[1], 16)),
@@ -46,6 +56,7 @@ const requiredFragments = [
     'id="refreshModels"',
     'id="startPython"',
     'id="globalInstructions"',
+    'id="diagnosticMetrics"',
     "fetch('/api/session'",
     "let csrf=''",
     'const changedSecrets=new Set()',
@@ -62,6 +73,7 @@ const requiredFragments = [
     'data-panel="settings"><span class="nav-glyph">04</span>Settings</button>',
     '[data-view="files"] .split-layout{height:auto;min-height:0}',
     '[data-view="files"] .file-editor{min-height:44vh}',
+    '.terminal-layout>*{min-width:0}',
     '/api/file/upload?replace=1&name=',
     '/api/qr/show',
     '/api/qr/file?name=',
@@ -76,13 +88,19 @@ const requiredFragments = [
     "event.type==='notice'",
     "userMessage.textContent='You: '+prompt",
     'pointer-events:none',
-    "q('#connectSsh').disabled=sshConnected",
-    '/api/state?view=',
+    "const stateEndpoints={status:'/api/status',chats:'/api/chats',chat:'/api/chat',files:'/api/files',ssh:'/api/ssh/state',settings:'/api/settings'}",
+    'function monitorSshConnection()',
+    'function shouldRenderRevision(kind,revision)',
+    'requestAnimationFrame(()=>',
+    'function chatDraftKey(id)',
     '/api/ssh/resize',
     "e.key==='Backspace')d='\\x7f'",
     "e.key==='ArrowUp')d='\\x1b[A'",
     'new ResizeObserver(queueTerminalResize)',
     'function terminalFeed(value)',
+    'function terminalAlternateScreen(enabled)',
+    'function terminalInsertCharacters(amount)',
+    'function terminalDeleteCharacters(amount)',
     'function renderStatusState(s)',
     'function renderChatState(s)',
     'function renderFilesState(s)',
@@ -216,5 +234,34 @@ terminalHarness.feed("\x1b[2J\x1b[Hready");
 if (terminalHarness.screen.lines.length !== 1 ||
     terminalHarness.screen.lines[0].map((cell) => cell.character).join("") !== "ready") {
     throw new Error("SSH terminal clear-screen and cursor-home handling failed");
+}
+for (const endpoint of [
+    "/api/status",
+    "/api/chats",
+    "/api/chat",
+    "/api/files",
+    "/api/ssh/state",
+    "/api/settings",
+]) {
+    if (!routes.includes(`server.on("${endpoint}"`)) {
+        throw new Error(`Specialized Web Console route is missing: ${endpoint}`);
+    }
+}
+if (!routes.includes("beginWebRequestMetrics(endpoint.c_str())") ||
+    !routes.includes("finishWebRequestMetrics()")) {
+    throw new Error("Web Console routes are not wrapped in request metrics");
+}
+if (stateBuilder.includes("listWorkspaceFiles()") ||
+    stateBuilder.includes("loadSshProfiles(")) {
+    throw new Error("Web Console state builders bypass the RAM indexes and read microSD");
+}
+terminalHarness.feed("\x1b[2Jabc\r\x1b[1@X\x1b[1P");
+if (!terminalHarness.screen.lines[0].map((cell) => cell.character).join("").startsWith("Xbc")) {
+    throw new Error("SSH terminal insert/delete character handling failed");
+}
+terminalHarness.feed("\x1b[?1049hwide:界\x1b[?1049l");
+if (terminalHarness.screen.normalLines !== null ||
+    terminalHarness.screen.lines[0].map((cell) => cell.character).join("").startsWith("wide:")) {
+    throw new Error("SSH terminal alternate-screen restore failed");
 }
 console.log("WEB_CONSOLE_UI_TEST result=pass");
