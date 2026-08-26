@@ -1,6 +1,7 @@
 #include "chat_storage.h"
 
 #include "file_workspace.h"
+#include "sd_storage.h"
 #include "text_utils.h"
 
 #include <ArduinoJson.h>
@@ -19,6 +20,10 @@ constexpr const char* kAssistantDirectory = "/assistant";
 constexpr const char* kChatsDirectory = "/assistant/chats";
 constexpr std::uint32_t kFormatVersion = 4;
 constexpr std::uint32_t kOldestSupportedFormatVersion = 1;
+constexpr std::size_t kPortableChatHeaderLineBytes =
+    6 * (120 + kMaximumChatInstructionsBytes) + 512;
+constexpr std::size_t kPortableChatMessageLineBytes =
+    6 * (9 + kMaximumStoredHistoryBytes) + 512;
 
 String chatPath(const String& id, const char* extension)
 {
@@ -548,21 +553,43 @@ OperationResult exportChatToWorkspace(const String& id, const String& filename)
         deleteWorkspaceFile(filename);
         return {false, "Failed to open chat export file"};
     }
-    std::size_t writtenBytes = 0;
+    std::uint32_t writtenBytes = 0;
     const String heading = "# " + loaded.chat.summary.title + "\n\n";
+    if (heading.length() > kMaximumWorkspaceFileBytes) {
+        output.close();
+        deleteWorkspaceFile(filename);
+        return {false, "Chat export heading exceeds the supported 32-bit file range"};
+    }
+    OperationResult space = checkSdOperationSpace(
+        heading.length(), kStorageOperationalFloorBytes);
+    if (!space.success) {
+        output.close();
+        deleteWorkspaceFile(filename);
+        return space;
+    }
     const std::size_t headingBytes = output.print(heading);
     if (headingBytes != heading.length()) {
         output.close();
         deleteWorkspaceFile(filename);
         return {false, "Failed while writing the chat export heading"};
     }
-    writtenBytes += headingBytes;
+    writtenBytes = static_cast<std::uint32_t>(headingBytes);
     String exportError;
     auto writeMessage = [&output, &writtenBytes, &exportError](const Message& message) -> bool {
         const String headingText = message.role == "user" ? "## You\n\n" : "## Assistant\n\n";
-        const std::size_t required = headingText.length() + message.content.size() + 2;
-        if (required > kMaximumWorkspaceFileBytes - writtenBytes) {
-            exportError = "Chat export exceeds the 256 MiB workspace file limit";
+        const std::size_t available = kMaximumWorkspaceFileBytes - writtenBytes;
+        if (headingText.length() > available ||
+            message.content.size() > available - headingText.length() ||
+            2 > available - headingText.length() - message.content.size()) {
+            exportError = "Chat export exceeds the supported 32-bit file range";
+            return false;
+        }
+        const std::size_t required =
+            headingText.length() + message.content.size() + 2;
+        const OperationResult space = checkSdOperationSpace(
+            required, kStorageOperationalFloorBytes);
+        if (!space.success) {
+            exportError = space.error;
             return false;
         }
         const std::size_t headingWritten = output.print(headingText);
@@ -575,7 +602,8 @@ OperationResult exportChatToWorkspace(const String& id, const String& filename)
             exportError = "Failed while writing a chat export message";
             return false;
         }
-        writtenBytes += headingWritten + contentWritten + separatorWritten;
+        writtenBytes += static_cast<std::uint32_t>(
+            headingWritten + contentWritten + separatorWritten);
         return true;
     };
     File archive = SD.open(chatArchivePath(id), FILE_READ);
@@ -629,16 +657,23 @@ OperationResult exportChatBundleToWorkspace(const String& id, const String& file
         deleteWorkspaceFile(filename);
         return {false, "Failed to open portable chat bundle"};
     }
-    std::size_t writtenBytes = 0;
+    std::uint32_t writtenBytes = 0;
     auto writeJsonLine = [&output, &writtenBytes](JsonDocument& document) -> OperationResult {
-        const std::size_t required = measureJson(document) + 1;
-        if (required > kMaximumWorkspaceFileBytes - writtenBytes) {
-            return {false, "Portable chat bundle exceeds the 256 MiB workspace file limit"};
+        const std::size_t jsonBytes = measureJson(document);
+        const std::size_t available = kMaximumWorkspaceFileBytes - writtenBytes;
+        if (jsonBytes >= available) {
+            return {false, "Portable chat bundle exceeds the supported 32-bit file range"};
+        }
+        const std::size_t required = jsonBytes + 1;
+        const OperationResult space = checkSdOperationSpace(
+            required, kStorageOperationalFloorBytes);
+        if (!space.success) {
+            return space;
         }
         if (serializeJson(document, output) != required - 1 || output.write('\n') != 1) {
             return {false, "Failed while writing portable chat bundle"};
         }
-        writtenBytes += required;
+        writtenBytes += static_cast<std::uint32_t>(required);
         return {true, ""};
     };
 
@@ -696,9 +731,15 @@ ChatDocumentResult importChatBundleFromWorkspace(const String& filename)
     if (!input) {
         return {false, {}, "Portable chat bundle was not found in the workspace"};
     }
-    const String headerLine = input.readStringUntil('\n');
+    const StorageLineResult headerLine = readBoundedSdLine(
+        input, kPortableChatHeaderLineBytes, "Portable chat header");
+    if (!headerLine.success || headerLine.eof) {
+        input.close();
+        return {false, {}, headerLine.success
+            ? String("Portable chat bundle is empty") : headerLine.error};
+    }
     JsonDocument header;
-    const DeserializationError headerError = deserializeJson(header, headerLine);
+    const DeserializationError headerError = deserializeJson(header, headerLine.line);
     if (headerError || !header["type"].is<const char*>() ||
         String(header["type"].as<const char*>()) != "cardmind_chat" ||
         !header["format"].is<std::uint32_t>() ||
@@ -728,13 +769,21 @@ ChatDocumentResult importChatBundleFromWorkspace(const String& filename)
     std::size_t activeBytes = 0;
     std::uint32_t messageIndex = 0;
     OperationResult result = {true, ""};
-    while (input.available() && result.success) {
-        const String line = input.readStringUntil('\n');
-        if (line.isEmpty()) {
+    while (result.success) {
+        const StorageLineResult line = readBoundedSdLine(
+            input, kPortableChatMessageLineBytes, "Portable chat message");
+        if (!line.success) {
+            result = {false, line.error};
+            break;
+        }
+        if (line.eof) {
+            break;
+        }
+        if (line.line.isEmpty()) {
             continue;
         }
         JsonDocument item;
-        const DeserializationError itemError = deserializeJson(item, line);
+        const DeserializationError itemError = deserializeJson(item, line.line);
         if (itemError || !item["role"].is<const char*>() ||
             !item["content"].is<const char*>()) {
             result = {false, "Portable chat bundle contains an invalid message line"};

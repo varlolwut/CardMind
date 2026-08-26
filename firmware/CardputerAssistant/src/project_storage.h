@@ -17,6 +17,7 @@ ProjectStorageManifestResult loadProjectStorageManifest();
 OperationResult saveProjectStorageManifest(const ProjectStorageManifest& manifest);
 OperationResult resetUncommittedProjectStorage();
 ProjectDocumentResult createProject(const String& title);
+ProjectDocumentResult createProjectWithId(const String& title, const String& id);
 ProjectDocumentResult loadProject(const String& id);
 OperationResult saveProject(const ProjectDocument& project);
 OperationResult deleteProject(const String& id);

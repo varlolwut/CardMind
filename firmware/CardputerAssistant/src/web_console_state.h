@@ -25,6 +25,7 @@ void buildWebConsoleChatsState(const std::vector<ChatSummary>& chats,
                                JsonDocument& document);
 void buildWebConsoleChatState(const Settings& settings,
                               const ChatDocument& activeChat,
+                              std::size_t maximumContextBytes,
                               std::uint32_t revision,
                               JsonDocument& document);
 void buildWebConsoleFilesState(const std::vector<WorkspaceFile>& files,

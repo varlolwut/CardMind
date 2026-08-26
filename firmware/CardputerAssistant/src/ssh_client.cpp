@@ -473,7 +473,10 @@ bool sshProfileIsComplete(const SshProfile& profile)
 
 OperationResult initializeSshStorage()
 {
-    return ensureSshDirectory();
+    const OperationResult directory = ensureSshDirectory();
+    return directory.success
+        ? recoverAtomicSdFile(kSshKnownHostsPath)
+        : directory;
 }
 
 OperationResult installSshPrivateKey(const String& temporaryPath)
@@ -593,6 +596,10 @@ OperationResult trustSshHost(const String& host, std::uint16_t port,
     if (!directory.success) {
         return directory;
     }
+    const OperationResult recovered = recoverAtomicSdFile(kSshKnownHostsPath);
+    if (!recovered.success) {
+        return recovered;
+    }
     File source = SD.open(kSshKnownHostsPath, FILE_READ);
     if (source && (source.isDirectory() || source.size() > kMaximumKnownHostsBytes)) {
         source.close();
@@ -635,21 +642,17 @@ OperationResult trustSshHost(const String& host, std::uint16_t port,
     }
     output.flush();
     output.close();
-    if (SD.exists(kSshKnownHostsPath) && !SD.remove(kSshKnownHostsPath)) {
-        SD.remove(kSshKnownHostsTemporaryPath);
-        return {false, "Failed to replace SSH known-hosts file"};
-    }
-    if (!SD.rename(kSshKnownHostsTemporaryPath, kSshKnownHostsPath)) {
-        SD.remove(kSshKnownHostsTemporaryPath);
-        return {false, "Failed to activate SSH known-hosts file"};
-    }
-    return {true, ""};
+    return commitStagedSdFile(kSshKnownHostsPath, kSshKnownHostsTemporaryPath);
 }
 
 OperationResult forgetTrustedSshHost(const String& host, std::uint16_t port)
 {
     if (!isValidSshHost(host) || port == 0) {
         return {false, "Cannot forget an invalid SSH host"};
+    }
+    const OperationResult recovered = recoverAtomicSdFile(kSshKnownHostsPath);
+    if (!recovered.success) {
+        return recovered;
     }
     File source = SD.open(kSshKnownHostsPath, FILE_READ);
     if (!source) {
@@ -679,12 +682,7 @@ OperationResult forgetTrustedSshHost(const String& host, std::uint16_t port)
     source.close();
     output.flush();
     output.close();
-    if (!SD.remove(kSshKnownHostsPath) ||
-        !SD.rename(kSshKnownHostsTemporaryPath, kSshKnownHostsPath)) {
-        SD.remove(kSshKnownHostsTemporaryPath);
-        return {false, "Failed to activate the updated SSH known-hosts file"};
-    }
-    return {true, ""};
+    return commitStagedSdFile(kSshKnownHostsPath, kSshKnownHostsTemporaryPath);
 }
 
 SshRuntimeProbeResult probeSshRuntime()
@@ -1271,6 +1269,10 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
     if (!parent.success) {
         return parent;
     }
+    const OperationResult recovered = recoverAtomicSdFile(localPath);
+    if (!recovered.success) {
+        return recovered;
+    }
     LIBSSH2_SFTP_HANDLE* remote = nullptr;
     const std::uint32_t openDeadline = millis() + timeoutMs;
     while (remote == nullptr && static_cast<std::int32_t>(openDeadline - millis()) > 0) {
@@ -1299,10 +1301,13 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
         return {false, sessionError(implementation_->session, "SFTP remote file stat",
                                     statResult)};
     }
-    if ((attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0) {
+    const bool expectedSizeKnown =
+        (attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0;
+    std::uint32_t expectedSize = 0;
+    if (expectedSizeKnown) {
         if (attributes.filesize > kMaximumWorkspaceFileBytes) {
             closeSftpHandle(remote);
-            return {false, "SFTP file exceeds the 256 MiB workspace limit"};
+            return {false, "SFTP file exceeds the supported 32-bit file range"};
         }
         const OperationResult space = checkSdOperationSpace(
             attributes.filesize, kStorageOperationalFloorBytes);
@@ -1310,8 +1315,9 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
             closeSftpHandle(remote);
             return space;
         }
+        expectedSize = static_cast<std::uint32_t>(attributes.filesize);
     }
-    const String temporaryName = workspaceName + ".sftp-part";
+    const String temporaryName = workspaceName + ".tmp";
     const String temporaryPath = workspaceFilePath(temporaryName);
     SD.remove(temporaryPath);
     File local = SD.open(temporaryPath, FILE_WRITE);
@@ -1319,7 +1325,7 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
         closeSftpHandle(remote);
         return {false, "Failed to create the SFTP download file on microSD"};
     }
-    std::size_t total = 0;
+    std::uint32_t total = 0;
     std::uint8_t buffer[1024] = {};
     std::uint32_t deadline = millis() + timeoutMs;
     bool completed = false;
@@ -1327,17 +1333,30 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
         const ssize_t readBytes = libssh2_sftp_read(
             remote, reinterpret_cast<char*>(buffer), sizeof(buffer));
         if (readBytes > 0) {
-            total += static_cast<std::size_t>(readBytes);
-            if (total > kMaximumWorkspaceFileBytes ||
-                local.write(buffer, static_cast<std::size_t>(readBytes)) !=
-                    static_cast<std::size_t>(readBytes)) {
+            const std::size_t blockBytes = static_cast<std::size_t>(readBytes);
+            if (blockBytes > kMaximumWorkspaceFileBytes - total) {
                 local.close();
                 closeSftpHandle(remote);
                 SD.remove(temporaryPath);
-                return {false, total > kMaximumWorkspaceFileBytes
-                    ? String("SFTP file exceeds the 256 MiB workspace limit")
-                    : String("microSD rejected SFTP download data")};
+                return {false, "SFTP file exceeds the supported 32-bit file range"};
             }
+            if (!expectedSizeKnown) {
+                const OperationResult space = checkSdOperationSpace(
+                    blockBytes, kStorageOperationalFloorBytes);
+                if (!space.success) {
+                    local.close();
+                    closeSftpHandle(remote);
+                    SD.remove(temporaryPath);
+                    return space;
+                }
+            }
+            if (local.write(buffer, blockBytes) != blockBytes) {
+                local.close();
+                closeSftpHandle(remote);
+                SD.remove(temporaryPath);
+                return {false, "microSD rejected SFTP download data"};
+            }
+            total += static_cast<std::uint32_t>(blockBytes);
             deadline = millis() + timeoutMs;
         } else if (readBytes == LIBSSH2_ERROR_EAGAIN) {
             delay(5);
@@ -1358,6 +1377,10 @@ OperationResult SshClient::downloadSftpFile(const String& remotePath,
     if (!completed) {
         SD.remove(temporaryPath);
         return {false, "SFTP download timed out before remote end-of-file"};
+    }
+    if (expectedSizeKnown && total != expectedSize) {
+        SD.remove(temporaryPath);
+        return {false, "SFTP download size differs from the remote stat result"};
     }
     const OperationResult committed = commitWorkspaceBinaryTemporary(
         workspaceName, temporaryName);
@@ -1387,6 +1410,12 @@ OperationResult SshClient::uploadSftpFile(const String& workspaceName,
         if (local) local.close();
         return {false, "SFTP upload source could not be opened from the workspace"};
     }
+    const std::size_t localBytesValue = local.size();
+    if (localBytesValue > kMaximumWorkspaceFileBytes) {
+        local.close();
+        return {false, "SFTP upload source exceeds the supported 32-bit file range"};
+    }
+    const std::uint32_t localBytes = static_cast<std::uint32_t>(localBytesValue);
     LIBSSH2_SFTP_HANDLE* remote = nullptr;
     const std::uint32_t openDeadline = millis() + timeoutMs;
     while (remote == nullptr && static_cast<std::int32_t>(openDeadline - millis()) > 0) {
@@ -1404,8 +1433,11 @@ OperationResult SshClient::uploadSftpFile(const String& workspaceName,
                                     libssh2_session_last_errno(implementation_->session))};
     }
     std::uint8_t buffer[1024] = {};
-    while (local.available()) {
-        const std::size_t readBytes = local.read(buffer, sizeof(buffer));
+    std::uint32_t transferredBytes = 0;
+    while (transferredBytes < localBytes) {
+        const std::size_t blockBytes = std::min<std::size_t>(
+            sizeof(buffer), localBytes - transferredBytes);
+        const std::size_t readBytes = local.read(buffer, blockBytes);
         if (readBytes == 0) {
             local.close();
             closeSftpHandle(remote);
@@ -1433,6 +1465,7 @@ OperationResult SshClient::uploadSftpFile(const String& workspaceName,
             libssh2_sftp_unlink(implementation_->sftp, remotePath.c_str());
             return {false, "SFTP upload timed out"};
         }
+        transferredBytes += static_cast<std::uint32_t>(written);
     }
     local.close();
     closeSftpHandle(remote);

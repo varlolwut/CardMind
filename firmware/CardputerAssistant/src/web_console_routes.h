@@ -14,9 +14,12 @@ enum class WebConsoleRouteHandler : std::size_t {
     Session,
     CloseConsole,
     State,
+    StorageConfirm,
     SelectProject,
     NewProject,
     ProjectSettings,
+    ProjectSettingsRawComplete,
+    ProjectSettingsRawData,
     RenameProject,
     DuplicateProject,
     ArchiveProject,
@@ -24,9 +27,15 @@ enum class WebConsoleRouteHandler : std::size_t {
     ProjectLinks,
     ProjectLinkUpdate,
     Prompt,
+    PromptRawComplete,
+    PromptRawData,
+    PromptRetry,
     SelectChat,
     NewChat,
     Instructions,
+    InstructionsRawComplete,
+    InstructionsRawData,
+    ChatCompact,
     ChatPermissions,
     RenameChat,
     PinChat,
@@ -72,11 +81,13 @@ enum class WebConsoleRouteHandler : std::size_t {
 };
 
 using WebConsoleHandler = void (*)();
+using WebConsoleRouteGuard = bool (*)(WebConsoleRouteHandler route);
 constexpr std::size_t kWebConsoleRouteHandlerCount =
     static_cast<std::size_t>(WebConsoleRouteHandler::Count);
 
 struct WebConsoleRouteHandlers {
     std::array<WebConsoleHandler, kWebConsoleRouteHandlerCount> items;
+    WebConsoleRouteGuard guard;
 };
 
 void configureWebConsoleRoutes(WebServer& server,

@@ -1,8 +1,10 @@
 #include "text_utils.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cctype>
 #include <stdexcept>
+#include <utility>
 
 namespace cardputer {
 namespace {
@@ -10,6 +12,14 @@ namespace {
 struct DecodedCodePoint {
     std::string bytes;
     std::uint32_t value;
+};
+
+constexpr const char* kWorkspaceTextExtensions[] = {
+    ".txt", ".md", ".json", ".jsonl", ".csv", ".html", ".svg", ".py",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".log", ".xml",
+    ".css", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".sh", ".bash", ".zsh",
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".ino",
+    ".env", ".properties", ".sql",
 };
 
 DecodedCodePoint decodeUtf8At(const std::string& value, std::size_t index)
@@ -98,7 +108,10 @@ std::string encodeUtf8CodePoint(std::uint32_t codePoint)
 std::string lowercaseIntentText(const std::string& value)
 {
     std::string result;
-    for (const auto& point : decodeUtf8(value)) {
+    result.reserve(value.size());
+    std::size_t index = 0;
+    while (index < value.size()) {
+        const DecodedCodePoint point = decodeUtf8At(value, index);
         std::uint32_t lowered = point.value;
         if (lowered >= 'A' && lowered <= 'Z') {
             lowered += 'a' - 'A';
@@ -108,8 +121,46 @@ std::string lowercaseIntentText(const std::string& value)
             lowered = 0x0451;
         }
         result += lowered == point.value ? point.bytes : encodeUtf8CodePoint(lowered);
+        index += point.bytes.size();
     }
     return result;
+}
+
+bool endsWithAsciiIgnoreCase(const std::string& value, const char* suffix)
+{
+    const std::size_t suffixBytes = std::char_traits<char>::length(suffix);
+    if (value.size() < suffixBytes) {
+        return false;
+    }
+    const std::size_t first = value.size() - suffixBytes;
+    for (std::size_t index = 0; index < suffixBytes; ++index) {
+        const auto valueByte = static_cast<unsigned char>(value[first + index]);
+        const auto suffixByte = static_cast<unsigned char>(suffix[index]);
+        if (std::tolower(valueByte) != std::tolower(suffixByte)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool containsWorkspaceTextExtensionReference(const std::string& value)
+{
+    for (const char* extension : kWorkspaceTextExtensions) {
+        const std::size_t extensionBytes = std::char_traits<char>::length(extension);
+        std::size_t position = value.find(extension);
+        while (position != std::string::npos) {
+            const std::size_t after = position + extensionBytes;
+            if (after == value.size()) {
+                return true;
+            }
+            const auto next = static_cast<unsigned char>(value[after]);
+            if (!std::isalnum(next) && next != '_' && next != '-' && next != '.') {
+                return true;
+            }
+            position = value.find(extension, position + 1);
+        }
+    }
+    return false;
 }
 
 bool containsAny(const std::string& value, const std::vector<std::string>& fragments)
@@ -378,6 +429,7 @@ bool isValidUtf8(const std::string& value)
         if ((length == 2 && codePoint < 0x80) ||
             (length == 3 && codePoint < 0x800) ||
             (length == 4 && codePoint < 0x10000) ||
+            codePoint == 0 ||
             codePoint > 0x10FFFF ||
             (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
             return false;
@@ -428,10 +480,13 @@ std::string ellipsizeUtf8(const std::string& value, std::size_t maxCells)
 
 std::string makeChatTitle(const std::string& prompt, std::size_t maxCells)
 {
-    const auto points = decodeUtf8(prompt);
     std::string normalized;
+    std::size_t normalizedCells = 0;
     bool pendingSpace = false;
-    for (const auto& point : points) {
+    std::size_t index = 0;
+    while (index < prompt.size()) {
+        const DecodedCodePoint point = decodeUtf8At(prompt, index);
+        index += point.bytes.size();
         const bool whitespace = point.value == ' ' || point.value == '\t' ||
             point.value == '\r' || point.value == '\n';
         if (whitespace) {
@@ -440,9 +495,14 @@ std::string makeChatTitle(const std::string& prompt, std::size_t maxCells)
         }
         if (pendingSpace) {
             normalized += ' ';
+            ++normalizedCells;
             pendingSpace = false;
         }
         normalized += point.bytes;
+        normalizedCells += displayCells(point.value);
+        if (normalizedCells > maxCells) {
+            break;
+        }
     }
     return normalized.empty() ? "New chat" : ellipsizeUtf8(normalized, maxCells);
 }
@@ -474,6 +534,19 @@ bool isValidWorkspaceFilename(const std::string& value)
          finalSegment.compare(finalSegment.size() - 4, 4, ".bak") != 0);
 }
 
+bool isWorkspaceTextFile(const std::string& name)
+{
+    if (!isValidWorkspaceFilename(name)) {
+        return false;
+    }
+    for (const char* extension : kWorkspaceTextExtensions) {
+        if (endsWithAsciiIgnoreCase(name, extension)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool isValidStorageRelativePath(const std::string& path, std::size_t maximumBytes)
 {
     if (path.empty() || path.size() > maximumBytes || !isValidUtf8(path) ||
@@ -501,29 +574,64 @@ bool isValidStorageRelativePath(const std::string& path, std::size_t maximumByte
     return true;
 }
 
-ContextWindowResult fitMessagesToByteBudget(const std::vector<Message>& messages,
-                                            std::size_t maximumBytes)
+namespace {
+
+std::size_t firstMessageWithinByteBudget(const std::vector<Message>& messages,
+                                         std::size_t maximumBytes,
+                                         std::size_t& retainedBytes)
 {
-    ContextWindowResult result = {{}, 0, 0};
+    retainedBytes = 0;
     if (maximumBytes == 0) {
-        result.droppedMessages = static_cast<std::uint32_t>(messages.size());
-        return result;
+        return messages.size();
     }
     std::size_t firstRetained = messages.size();
     while (firstRetained > 0) {
         const Message& candidate = messages[firstRetained - 1];
         const std::size_t candidateBytes = candidate.role.length() +
             candidate.content.size() + 16;
-        if (result.retainedBytes + candidateBytes > maximumBytes &&
+        if (retainedBytes + candidateBytes > maximumBytes &&
             firstRetained < messages.size()) {
             break;
         }
-        result.retainedBytes += candidateBytes;
+        retainedBytes += candidateBytes;
         --firstRetained;
     }
+    return firstRetained;
+}
+
+}  // namespace
+
+ContextWindowResult fitMessagesToByteBudget(const std::vector<Message>& messages,
+                                            std::size_t maximumBytes)
+{
+    ContextWindowResult result = {{}, 0, 0};
+    const std::size_t firstRetained = firstMessageWithinByteBudget(
+        messages, maximumBytes, result.retainedBytes);
     result.droppedMessages = static_cast<std::uint32_t>(firstRetained);
     result.retained.assign(messages.begin() + firstRetained, messages.end());
     return result;
+}
+
+ContextWindowResult fitOwnedMessagesToByteBudget(std::vector<Message> messages,
+                                                 std::size_t maximumBytes)
+{
+    ContextWindowResult result = {{}, 0, 0};
+    const std::size_t firstRetained = firstMessageWithinByteBudget(
+        messages, maximumBytes, result.retainedBytes);
+    result.droppedMessages = static_cast<std::uint32_t>(firstRetained);
+    messages.erase(messages.begin(), messages.begin() + firstRetained);
+    result.retained = std::move(messages);
+    return result;
+}
+
+std::vector<Message> takeMessagesDroppedToByteBudget(
+    std::vector<Message> messages, std::size_t maximumBytes)
+{
+    std::size_t retainedBytes = 0;
+    const std::size_t firstRetained = firstMessageWithinByteBudget(
+        messages, maximumBytes, retainedBytes);
+    messages.erase(messages.begin() + firstRetained, messages.end());
+    return messages;
 }
 
 bool requestsWorkspaceAccess(const std::string& prompt)
@@ -533,10 +641,7 @@ bool requestsWorkspaceAccess(const std::string& prompt)
         value == "/files" || value.rfind("/files ", 0) == 0) {
         return true;
     }
-    const std::vector<std::string> extensions = {
-        ".txt", ".md", ".json", ".csv", ".html", ".svg", ".py",
-    };
-    if (containsAny(value, extensions)) {
+    if (containsWorkspaceTextExtensionReference(value)) {
         return true;
     }
     const std::vector<std::string> actions = {
@@ -554,6 +659,165 @@ bool requestsWorkspaceAccess(const std::string& prompt)
     const bool startsWithFile = value.rfind("file", 0) == 0;
     return containsAny(value, fileQueries) ||
         (containsAny(value, actions) && (startsWithFile || containsAny(value, objects)));
+}
+
+std::uint32_t resolveRequestOutputTokens(std::uint32_t projectTokens,
+                                         std::uint32_t requestOverrideTokens)
+{
+    return requestOverrideTokens == 0 ? projectTokens : requestOverrideTokens;
+}
+
+ResolvedProjectRequestPolicy resolveProjectRequestPolicy(
+    const Settings& settings,
+    const ProjectDocument& project,
+    std::uint32_t requestOutputTokens)
+{
+    return {
+        project.model.length() == 0 ? settings.model : project.model,
+        project.contextByteBudget,
+        resolveRequestOutputTokens(
+            project.maximumOutputTokens, requestOutputTokens),
+        project.automaticCompaction,
+    };
+}
+
+bool shouldAutomaticallyCompactRequest(
+    const ResolvedProjectRequestPolicy& policy,
+    std::uint32_t droppedMessages)
+{
+    return policy.automaticCompaction && droppedMessages > 0;
+}
+
+ContextUsage resolveContextUsage(const ChatDocument& chat,
+                                 std::size_t maximumBytes)
+{
+    const std::uint32_t totalMessages = chat.summary.messageCount;
+    const std::uint32_t summarizedMessages = std::min(
+        chat.summarizedMessageCount, totalMessages);
+    const std::size_t boundedTailMessages = std::min<std::size_t>(
+        totalMessages, chat.messages.size());
+    const std::uint32_t tailMessages = static_cast<std::uint32_t>(
+        boundedTailMessages);
+    const std::uint32_t tailStart = totalMessages - tailMessages;
+    const std::uint32_t firstUnsummarized = std::max(
+        summarizedMessages, tailStart);
+    const std::size_t vectorTailStart = chat.messages.size() - tailMessages;
+    const std::size_t firstUnsummarizedInVector = vectorTailStart +
+        static_cast<std::size_t>(firstUnsummarized - tailStart);
+    std::size_t retainedBytes = 0;
+    std::size_t firstRetained = chat.messages.size();
+    if (maximumBytes > 0) {
+        while (firstRetained > firstUnsummarizedInVector) {
+            const Message& candidate = chat.messages[firstRetained - 1];
+            const std::size_t candidateBytes = candidate.role.length() +
+                candidate.content.size() + 16;
+            if (retainedBytes + candidateBytes > maximumBytes &&
+                firstRetained < chat.messages.size()) {
+                break;
+            }
+            retainedBytes += candidateBytes;
+            --firstRetained;
+        }
+    }
+    const std::uint32_t retainedMessages = static_cast<std::uint32_t>(
+        chat.messages.size() - firstRetained);
+    const std::uint32_t droppedBeforeTail = tailStart > summarizedMessages
+        ? tailStart - summarizedMessages : 0;
+    const std::uint32_t droppedInTail = static_cast<std::uint32_t>(
+        firstRetained - firstUnsummarizedInVector);
+    return {
+        retainedBytes,
+        retainedMessages,
+        droppedBeforeTail + droppedInTail,
+        summarizedMessages,
+        totalMessages,
+    };
+}
+
+RetryRequestResult prepareRetryRequest(const std::vector<Message>& messages,
+                                       std::size_t maximumBytes)
+{
+    if (messages.empty() || messages.back().role != "user" ||
+        messages.back().content.empty()) {
+        return {
+            false, "", {},
+            "The chat does not end with a failed user request"};
+    }
+    const ContextWindowResult fitted = fitMessagesToByteBudget(messages, maximumBytes);
+    if (fitted.retained.empty() || fitted.retained.back().role != "user" ||
+        fitted.retained.back().content != messages.back().content) {
+        return {
+            false, "", {},
+            "The failed user request does not fit the context budget"};
+    }
+    return {true, messages.back().content, fitted.retained, ""};
+}
+
+std::vector<Message> unsummarizedChatTail(const ChatDocument& chat)
+{
+    if (chat.messages.empty()) {
+        return {};
+    }
+    const std::uint32_t tailCount = static_cast<std::uint32_t>(chat.messages.size());
+    const std::uint32_t tailStart = chat.summary.messageCount > tailCount
+        ? chat.summary.messageCount - tailCount : 0;
+    const std::uint32_t coveredInTail = chat.summarizedMessageCount > tailStart
+        ? std::min<std::uint32_t>(
+              tailCount, chat.summarizedMessageCount - tailStart)
+        : 0;
+    return std::vector<Message>(
+        chat.messages.begin() + coveredInTail, chat.messages.end());
+}
+
+ContextSummaryPromptResult buildContextSummaryPrompt(
+    const std::string& previousSummary,
+    const std::vector<Message>& messages,
+    std::size_t maximumBytes)
+{
+    constexpr const char* kRequest =
+        "Create a compact factual conversation summary. Preserve decisions, names, "
+        "constraints, unresolved questions and file or command references. Do not add "
+        "facts. Return only the summary.\n\n";
+    constexpr const char* kPreviousPrefix = "Previous summary:\n";
+    constexpr const char* kNewMessagesPrefix = "\n\nNewly omitted messages:\n";
+    const std::size_t previousBytes = previousSummary.empty()
+        ? 0
+        : std::char_traits<char>::length(kPreviousPrefix) + previousSummary.size() +
+              std::char_traits<char>::length(kNewMessagesPrefix);
+    std::size_t plannedBytes = std::char_traits<char>::length(kRequest) + previousBytes;
+    if (plannedBytes > maximumBytes) {
+        return {false, "", 0,
+                "Existing context summary exceeds the safe compaction request budget"};
+    }
+    std::uint32_t includedMessages = 0;
+    for (const Message& message : messages) {
+        const std::size_t prefixBytes = message.role == "user" ? 5 : 4;
+        const std::size_t messageBytes = prefixBytes + message.content.size() + 1;
+        if (messageBytes > maximumBytes - plannedBytes) {
+            break;
+        }
+        plannedBytes += messageBytes;
+        ++includedMessages;
+    }
+    if (includedMessages == 0) {
+        return {false, "", 0,
+                "Messages selected for summary exceed the safe compaction request budget"};
+    }
+    std::string prompt;
+    prompt.reserve(plannedBytes);
+    prompt += kRequest;
+    if (!previousSummary.empty()) {
+        prompt += kPreviousPrefix;
+        prompt += previousSummary;
+        prompt += kNewMessagesPrefix;
+    }
+    for (std::uint32_t index = 0; index < includedMessages; ++index) {
+        const Message& message = messages[index];
+        prompt += message.role == "user" ? "You: " : "AI: ";
+        prompt += message.content;
+        prompt += '\n';
+    }
+    return {true, std::move(prompt), includedMessages, ""};
 }
 
 bool requestsWorkspaceWrite(const std::string& prompt)

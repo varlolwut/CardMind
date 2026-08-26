@@ -43,8 +43,11 @@ configuration and SFTP controls.
 ### Workspace
 
 - Browse the Shared workspace on microSD, including nested UTF-8 paths.
-- Upload or download arbitrary files up to 256 MiB. Only valid UTF-8 text is opened in
-  the editor or exposed to model text tools.
+- File inventories are fetched in bounded pages, so the number of workspace entries is
+  limited by microSD/filesystem capacity rather than browser or firmware list storage.
+- Upload or download arbitrary files up to the microSD/filesystem limits. Only valid
+  UTF-8 files with CardMind's safe text extensions are opened in the editor, rendered
+  as text QR data, or exposed to model text tools. Other formats remain transfer-only.
 - Open a bounded text window, move with Previous and Next, and save the edited window
   back into the same complete file. Replacement is staged before the original changes.
 - Link or unlink a selected Shared file for the active project. Linked files are the
@@ -59,6 +62,12 @@ silently.
 The browser never needs to hold a complete large document. The Cardputer reads and
 replaces bounded text windows and commits through a temporary file, so an interrupted
 save does not replace the last valid copy.
+
+Saving does not create automatic file versions. Successful range and whole-file
+replacements leave only the current file; target-specific `.tmp` staging and the
+short-lived `.bak` recovery copy are removed after commit. Failed validation or
+filesystem replacement leaves the current bytes unchanged and cleans recoverable
+staging artifacts.
 
 ### SSH and SFTP
 
@@ -92,6 +101,9 @@ prompts, so confirmation remains usable and visually consistent on desktop and m
 - Configure the optional STT, web-search, and TTS providers, automatic speech, and
   speaker volume.
 - Adjust brightness, display sleep, keyboard repeat, and the power profile.
+- Set the per-chat raw-history quota. `0` uses available microSD capacity; a non-zero
+  quota must be 2-4095 MiB. Quota and free-space failures leave the existing archive
+  unchanged, and older turns remain available through **Load earlier**.
 - Refresh the provider model list and test chat API authentication.
 - View and export firmware, reset, uptime, CPU, stack, heap, battery, Wi-Fi, microSD,
   service, and Python diagnostics.

@@ -50,9 +50,10 @@ internal temporary or recovery suffixes.
 
 ## Large files and safe saves
 
-A file may be up to 256 MiB when the microSD card has enough free space. Upload,
-download, copy, search, SFTP, and project bundle operations stream data instead of
-loading the complete file into RAM. Text editors move through one bounded window while
+A file has no CardMind-specific size ceiling. Available microSD capacity, filesystem
+limits, 32-bit file offsets, and the safe free-space reserve are the effective limits.
+Upload, download, copy, search, SFTP, and project bundle operations stream data instead
+of loading the complete file into RAM. Text editors move through one bounded window while
 the user continues to work with a single file.
 
 An edited window is written to a staged replacement, reopened and checked, and only
