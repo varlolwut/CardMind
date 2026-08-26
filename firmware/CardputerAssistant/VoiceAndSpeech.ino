@@ -79,8 +79,8 @@ void handleVoiceInput()
     if (inputBuffer.size() + addedBytes > kMaximumInputBytes) {
         const cardputer::OperationResult cleanup = cardputer::removeVoiceRecording();
         statusMessage = cleanup.success
-            ? String("Voice text exceeds the 1200-byte input limit")
-            : String("Voice text exceeds the 1200-byte input limit; ") + cleanup.error;
+            ? String("Voice text exceeds the 16384-byte input limit")
+            : String("Voice text exceeds the 16384-byte input limit; ") + cleanup.error;
         render();
         return;
     }
@@ -278,31 +278,39 @@ cardputer::OperationResult speakEntireDocument()
 
 void retryLastRequest()
 {
-    if (retryPrompt.empty()) {
+    if (retryPrompt.empty() || retryChatId != activeChatId) {
         menuStatus = "No failed request is available to retry";
         renderChatActions();
         return;
     }
-    if (history.empty() || history.back().role != "user" ||
-        history.back().content != retryPrompt) {
-        menuStatus = "Retry context no longer matches the failed request";
+    const cardputer::ProjectDocumentResult project = cardputer::loadProject(
+        activeProjectId);
+    const cardputer::ChatDocumentResult stored = cardputer::loadProjectChat(
+        activeProjectId, activeChatId, 96, 131072);
+    if (!project.success || !stored.success) {
+        menuStatus = project.success ? stored.error : project.error;
         renderChatActions();
         return;
     }
-    history.pop_back();
-    inputBuffer = retryPrompt;
+    const std::vector<cardputer::Message> retryTail =
+        cardputer::unsummarizedChatTail(stored.chat);
+    cardputer::RetryRequestResult retry = cardputer::prepareRetryRequest(
+        retryTail, project.project.contextByteBudget);
+    if (!retry.success || retry.prompt != retryPrompt) {
+        menuStatus = retry.success
+            ? String("Retry context no longer matches the failed request")
+            : String(retry.error.c_str());
+        renderChatActions();
+        return;
+    }
+    history = std::move(retry.messages);
     activeResponse.clear();
-    const cardputer::OperationResult saved = saveCurrentChat();
-    if (!saved.success) {
-        history.push_back({"user", retryPrompt});
-        inputBuffer.clear();
-        menuStatus = saved.error;
-        renderChatActions();
-        return;
-    }
     currentScreen = Screen::Chat;
     menuStatus = "";
-    submitPrompt();
+    const std::uint32_t outputTokens = retryOutputTokens == 0
+        ? project.project.maximumOutputTokens : retryOutputTokens;
+    executeStoredPromptRequest(
+        retry.prompt, project.project, stored.chat, outputTokens);
 }
 
 }  // namespace

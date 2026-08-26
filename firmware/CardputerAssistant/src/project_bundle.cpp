@@ -15,6 +15,13 @@ namespace cardputer {
 namespace {
 
 constexpr const char* kSharedRoot = "/assistant/files";
+constexpr std::size_t kProjectBundleHeaderLineBytes =
+    6 * (kMaximumProjectInstructionsBytes + kMaximumProjectTitleBytes + 16 +
+         240 + 120 + 120 + 120) + 2048;
+constexpr std::size_t kProjectBundleSharedLinkLineBytes = 6 * 512 + 256;
+constexpr std::size_t kProjectBundleChatHeaderLineBytes =
+    6 * (16 + kMaximumProjectTitleBytes + kMaximumProjectChatInstructionsBytes +
+         kMaximumProjectChatDraftBytes + kMaximumProjectChatSummaryBytes) + 2048;
 
 bool isValidProjectBundleFilename(const String& filename)
 {
@@ -216,7 +223,7 @@ OperationResult exportProjectBundle(const String& projectId, const String& filen
     JsonDocument header = buildProjectHeader(loaded.project, links.count);
     const std::uint64_t expectedBytes = measureJson(header) + 1 + links.bytes + chats.bytes;
     if (expectedBytes > kMaximumProjectBundleBytes) {
-        return {false, "Project bundle exceeds the 256 MiB portable bundle limit"};
+        return {false, "Project bundle exceeds the supported 32-bit file range"};
     }
     OperationResult result = checkSdOperationSpace(expectedBytes, kStorageOperationalFloorBytes);
     if (!result.success) {
@@ -263,19 +270,27 @@ ProjectDocumentResult importProjectBundle(const String& filename)
     if (!input) {
         return {false, {}, "Project bundle does not exist in Shared workspace"};
     }
-    if (input.size() > kMaximumProjectBundleBytes) {
+    const std::size_t inputBytesValue = input.size();
+    if (inputBytesValue > kMaximumProjectBundleBytes) {
         input.close();
-        return {false, {}, "Project bundle exceeds the 256 MiB portable bundle limit"};
+        return {false, {}, "Project bundle exceeds the supported 32-bit file range"};
     }
+    const std::uint32_t inputBytes = static_cast<std::uint32_t>(inputBytesValue);
     const OperationResult space = checkSdOperationSpace(
-        input.size(), kStorageOperationalFloorBytes);
+        inputBytes, kStorageOperationalFloorBytes);
     if (!space.success) {
         input.close();
         return {false, {}, space.error};
     }
-    const String headerLine = input.readStringUntil('\n');
+    const StorageLineResult headerLine = readBoundedSdLine(
+        input, kProjectBundleHeaderLineBytes, "Project bundle header");
+    if (!headerLine.success || headerLine.eof) {
+        input.close();
+        return {false, {}, headerLine.success
+            ? String("Project bundle is empty") : headerLine.error};
+    }
     JsonDocument header;
-    const DeserializationError error = deserializeJson(header, headerLine);
+    const DeserializationError error = deserializeJson(header, headerLine.line);
     if (error || !header["record"].is<const char*>() ||
         String(header["record"].as<const char*>()) != "project" ||
         !header["format"].is<std::uint32_t>() || header["format"].as<std::uint32_t>() != 1 ||
@@ -312,13 +327,20 @@ ProjectDocumentResult importProjectBundle(const String& filename)
     OperationResult result = saveProject(imported);
     const std::uint32_t linkCount = header["shared_link_count"].as<std::uint32_t>();
     for (std::uint32_t index = 0; index < linkCount && result.success; ++index) {
-        if (!input.available()) {
+        if (input.position() >= inputBytes) {
             result = {false, "Project bundle ended before all Shared links were read"};
             break;
         }
-        const String line = input.readStringUntil('\n');
+        const StorageLineResult line = readBoundedSdLine(
+            input, kProjectBundleSharedLinkLineBytes, "Project bundle Shared-link record");
+        if (!line.success || line.eof) {
+            result = {false, line.success
+                ? String("Project bundle ended before all Shared links were read")
+                : line.error};
+            break;
+        }
         JsonDocument record;
-        const DeserializationError recordError = deserializeJson(record, line);
+        const DeserializationError recordError = deserializeJson(record, line.line);
         if (recordError || !record["record"].is<const char*>() ||
             String(record["record"].as<const char*>()) != "shared_link" ||
             !record["path"].is<const char*>()) {
@@ -330,13 +352,20 @@ ProjectDocumentResult importProjectBundle(const String& filename)
     }
     const std::uint32_t chatCount = header["chat_count"].as<std::uint32_t>();
     for (std::uint32_t index = 0; index < chatCount && result.success; ++index) {
-        if (!input.available()) {
+        if (input.position() >= inputBytes) {
             result = {false, "Project bundle ended before all chats were read"};
             break;
         }
-        const String line = input.readStringUntil('\n');
+        const StorageLineResult line = readBoundedSdLine(
+            input, kProjectBundleChatHeaderLineBytes, "Project bundle chat header");
+        if (!line.success || line.eof) {
+            result = {false, line.success
+                ? String("Project bundle ended before all chats were read")
+                : line.error};
+            break;
+        }
         JsonDocument record;
-        const DeserializationError recordError = deserializeJson(record, line);
+        const DeserializationError recordError = deserializeJson(record, line.line);
         if (recordError || !record["record"].is<const char*>() ||
             String(record["record"].as<const char*>()) != "chat" ||
             !record["id"].is<const char*>() || !record["title"].is<const char*>() ||
@@ -366,9 +395,12 @@ ProjectDocumentResult importProjectBundle(const String& filename)
         result = importProjectChatBundleRecords(
             input, imported.summary.id, chat, chat.summary.messageCount);
     }
-    while (result.success && input.available()) {
-        const String trailing = input.readStringUntil('\n');
-        if (!trailing.isEmpty()) {
+    while (result.success && input.position() < inputBytes) {
+        const StorageLineResult trailing = readBoundedSdLine(
+            input, 1, "Project bundle trailing record");
+        if (!trailing.success) {
+            result = {false, trailing.error};
+        } else if (!trailing.eof && !trailing.line.isEmpty()) {
             result = {false, "Project bundle contains unexpected trailing records"};
         }
     }

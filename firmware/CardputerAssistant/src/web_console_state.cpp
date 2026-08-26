@@ -1,6 +1,8 @@
 #include "web_console_state.h"
 
 #include "python_mode.h"
+#include "sd_storage.h"
+#include "text_utils.h"
 
 #include <M5Cardputer.h>
 #include <WiFi.h>
@@ -38,6 +40,10 @@ void buildWebConsoleStatusState(const WebConsoleRuntimeState& runtime,
                                 bool diagnosticsEnabled,
                                 JsonDocument& document)
 {
+    const SdStorageStatus storage = inspectSdStorage();
+    const std::uint64_t freeBytes = storage.totalBytes >= storage.usedBytes
+        ? storage.totalBytes - storage.usedBytes
+        : 0;
     document["ok"] = true;
     document["ip"] = WiFi.localIP().toString();
     document["battery"] = M5Cardputer.Power.getBatteryLevel();
@@ -52,6 +58,15 @@ void buildWebConsoleStatusState(const WebConsoleRuntimeState& runtime,
     document["cpu_mhz"] = getCpuFrequencyMhz();
     document["reset_reason"] = static_cast<int>(esp_reset_reason());
     document["diagnostic_metrics_enabled"] = diagnosticsEnabled;
+    document["sd_state"] = sdStorageStateName(storage.state);
+    document["sd_error_code"] = sdStorageErrorCode(storage.state);
+    document["sd_error"] = storage.error;
+    document["sd_readable"] = storage.state == SdStorageState::Ready ||
+                              storage.state == SdStorageState::Full;
+    document["sd_writable"] = storage.state == SdStorageState::Ready;
+    document["sd_total_bytes"] = storage.totalBytes;
+    document["sd_used_bytes"] = storage.usedBytes;
+    document["sd_free_bytes"] = freeBytes;
 }
 
 void buildWebConsoleChatsState(const std::vector<ChatSummary>& chats,
@@ -73,6 +88,7 @@ void buildWebConsoleChatsState(const std::vector<ChatSummary>& chats,
 
 void buildWebConsoleChatState(const Settings& settings,
                               const ChatDocument& activeChat,
+                              std::size_t maximumContextBytes,
                               std::uint32_t revision,
                               JsonDocument& document)
 {
@@ -81,15 +97,14 @@ void buildWebConsoleChatState(const Settings& settings,
     document["model"] = settings.model;
     document["active_chat_id"] = activeChat.summary.id;
     document["active_chat_title"] = activeChat.summary.title;
-    document["active_context_messages"] = activeChat.summary.messageCount;
+    const ContextUsage contextUsage = resolveContextUsage(
+        activeChat, maximumContextBytes);
+    document["active_context_messages"] = contextUsage.retainedMessages;
+    document["dropped_context_messages"] = contextUsage.droppedMessages;
     document["archived_messages"] = activeChat.summary.archivedMessageCount;
-    std::size_t activeContextBytes = 0;
-    for (const auto& message : activeChat.messages) {
-        activeContextBytes += message.content.size();
-    }
-    document["active_context_bytes"] = activeContextBytes;
-    document["maximum_context_messages"] = kMaximumStoredMessages;
-    document["maximum_context_bytes"] = kMaximumStoredHistoryBytes;
+    document["active_context_bytes"] = contextUsage.retainedBytes;
+    document["maximum_context_messages"] = 0;
+    document["maximum_context_bytes"] = maximumContextBytes;
     document["instructions"] = activeChat.instructions;
     document["ssh_tools_enabled"] = activeChat.sshToolsEnabled;
     appendChatMessages(activeChat, document);
@@ -110,6 +125,7 @@ void buildWebConsoleFilesState(const std::vector<WorkspaceFile>& files,
         JsonObject item = items.add<JsonObject>();
         item["name"] = file.name;
         item["size"] = file.size;
+        item["editable"] = isWorkspaceTextFile(std::string(file.name.c_str()));
     }
 }
 
@@ -158,6 +174,8 @@ void buildWebConsoleSettingsState(const Settings& settings,
     document["wifi_ssid"] = settings.wifiSsid;
     document["model"] = settings.model;
     document["global_instructions"] = settings.globalInstructions;
+    document["project_chat_history_quota_bytes"] =
+        settings.projectChatHistoryQuotaBytes;
     document["api_base_url"] = settings.apiBaseUrl;
     document["api_key_configured"] = settings.apiKey.length() >= 8;
     document["stt_base_url"] = settings.sttBaseUrl;

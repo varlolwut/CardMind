@@ -7,7 +7,7 @@ void appendKeyboardWord(const std::vector<char>& word)
             ? cardputer::mapKeyToRussian(character)
             : std::string(1, character);
         if (inputBuffer.size() + text.size() > kMaximumInputBytes) {
-            statusMessage = "Input limit reached (1200 bytes)";
+            statusMessage = "Input limit reached (16384 bytes)";
             return;
         }
         inputBuffer += text;
@@ -168,6 +168,11 @@ void handleKeyboard()
             menuStatus = saved.success ? String("Project setting saved") : saved.error;
             renderProjectActions();
         } else if (enterPressed && projectActionsIndex == 6) {
+            projectRenameInput = selectedProjectTitle.c_str();
+            projectRenameStatus = "";
+            currentScreen = Screen::ProjectRename;
+            renderProjectRename();
+        } else if (enterPressed && projectActionsIndex == 7) {
             const cardputer::ProjectDocumentResult duplicated = cardputer::duplicateProject(
                 selectedProjectId, selectedProjectTitle + " copy");
             if (!duplicated.success) {
@@ -179,7 +184,7 @@ void handleKeyboard()
             selectedProjectTitle = duplicated.project.summary.title;
             menuStatus = "Project duplicated";
             renderProjectActions();
-        } else if (enterPressed && projectActionsIndex == 7) {
+        } else if (enterPressed && projectActionsIndex == 8) {
             cardputer::ProjectDocumentResult project =
                 cardputer::loadProject(selectedProjectId);
             if (!project.success) {
@@ -191,7 +196,7 @@ void handleKeyboard()
                                            : saved.error;
             }
             renderProjectActions();
-        } else if (enterPressed && projectActionsIndex == 8) {
+        } else if (enterPressed && projectActionsIndex == 9) {
             const String filename = "project_" + selectedProjectId +
                 ".cardmind-project.jsonl";
             const cardputer::OperationResult exported = cardputer::exportProjectBundle(
@@ -314,6 +319,64 @@ void handleKeyboard()
         return;
     }
 
+    if (currentScreen == Screen::ProjectRename) {
+        if (cancelPressed) {
+            projectRenameInput.clear();
+            projectRenameStatus = "";
+            currentScreen = Screen::ProjectActions;
+            renderProjectActions();
+        } else if (keys.fn && keys.f3) {
+            keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
+                ? cardputer::KeyboardLayout::Russian
+                : cardputer::KeyboardLayout::English;
+            projectRenameStatus = keyboardLayout == cardputer::KeyboardLayout::English
+                ? String("English layout") : String("Russian layout");
+            renderProjectRename();
+        } else if (clearDraftPressed) {
+            projectRenameInput.clear();
+            projectRenameStatus = "Project name cannot be empty";
+            renderProjectRename();
+        } else if (backspacePressed) {
+            if (!projectRenameInput.empty()) {
+                projectRenameInput = cardputer::removeLastUtf8CodePoint(projectRenameInput);
+            }
+            projectRenameStatus = "";
+            renderProjectRename();
+        } else if (enterPressed) {
+            const cardputer::OperationResult renamed = cardputer::renameProject(
+                selectedProjectId, projectRenameInput.c_str());
+            if (!renamed.success) {
+                projectRenameStatus = renamed.error;
+                renderProjectRename();
+                return;
+            }
+            selectedProjectTitle = projectRenameInput.c_str();
+            if (selectedProjectId == activeProjectId) {
+                activeProjectTitle = selectedProjectTitle;
+            }
+            projectRenameInput.clear();
+            projectRenameStatus = "";
+            menuStatus = "Project renamed";
+            currentScreen = Screen::ProjectActions;
+            renderProjectActions();
+        } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
+            for (const char character : printableNewKeys(newPresses)) {
+                const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
+                    ? cardputer::mapKeyToRussian(character)
+                    : std::string(1, character);
+                if (projectRenameInput.size() + text.size() >
+                    cardputer::kMaximumProjectTitleBytes) {
+                    projectRenameStatus = "Project name limit: 120 bytes";
+                    break;
+                }
+                projectRenameInput += text;
+                projectRenameStatus = "";
+            }
+            renderProjectRename();
+        }
+        return;
+    }
+
     if (currentScreen == Screen::ProjectList) {
         const std::vector<String> items = projectListItems();
         if (cancelPressed) {
@@ -344,10 +407,12 @@ void handleKeyboard()
                 return;
             }
             openChatList(Screen::ProjectList);
-        } else if (enterPressed && projectListIndex <= projects.size()) {
-            openProjectActions(projects[projectListIndex - 1]);
+        } else if (enterPressed && projectListIndex == 1) {
+            openProjectImportList();
+        } else if (enterPressed && projectListIndex <= projects.size() + 1) {
+            openProjectActions(projects[projectListIndex - 2]);
         } else if (enterPressed) {
-            std::size_t navigationIndex = projects.size() + 1;
+            std::size_t navigationIndex = projects.size() + 2;
             if (!projectPreviousPageOffsets.empty()) {
                 if (projectListIndex == navigationIndex) {
                     const std::uint32_t previous = projectPreviousPageOffsets.back();
@@ -472,8 +537,8 @@ void handleKeyboard()
                 render();
             }
         } else if (enterPressed && chatActionsIndex == 1) {
-            const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
-                activeProjectId, selectedChatId, 1, 1);
+            const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChatMetadata(
+                activeProjectId, selectedChatId);
             if (!loaded.success) {
                 menuStatus = loaded.error;
                 renderChatActions();
@@ -484,8 +549,8 @@ void handleKeyboard()
                 renderChatInstructions();
             }
         } else if (enterPressed && chatActionsIndex == 2) {
-            const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
-                activeProjectId, selectedChatId, 1, 1);
+            const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChatMetadata(
+                activeProjectId, selectedChatId);
             if (!loaded.success) {
                 menuStatus = loaded.error;
                 renderChatActions();
@@ -529,8 +594,8 @@ void handleKeyboard()
         } else if (enterPressed && chatActionsIndex == 5) {
             openLatestSearchSources();
         } else if (enterPressed && (chatActionsIndex == 6 || chatActionsIndex == 7)) {
-            const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
-                activeProjectId, selectedChatId, 1, 1);
+            const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChatMetadata(
+                activeProjectId, selectedChatId);
             if (!loaded.success) {
                 menuStatus = loaded.error;
                 renderChatActions();
@@ -597,8 +662,8 @@ void handleKeyboard()
         } else if (enterPressed && chatActionsIndex == 11) {
             const cardputer::ProjectDocumentResult project =
                 cardputer::loadProject(activeProjectId);
-            const cardputer::ChatDocumentResult chat = cardputer::loadProjectChat(
-                activeProjectId, selectedChatId, 96, 131072);
+            const cardputer::ChatDocumentResult chat = cardputer::loadProjectChatMetadata(
+                activeProjectId, selectedChatId);
             if (!project.success || !chat.success) {
                 menuStatus = project.success ? chat.error : project.error;
                 renderChatActions();
@@ -609,30 +674,66 @@ void handleKeyboard()
                 renderChatActions();
                 return;
             }
-            const std::size_t retainedCount = std::min<std::size_t>(8, chat.chat.messages.size());
-            const std::size_t summaryCount = chat.chat.messages.size() - retainedCount;
-            if (summaryCount == 0) {
-                menuStatus = "This chat is too short to compact";
+            if (chat.chat.summary.messageCount <= 8) {
+                menuStatus = "This chat is too short to regenerate its summary";
                 renderChatActions();
                 return;
             }
-            std::vector<cardputer::Message> source(
-                chat.chat.messages.begin(), chat.chat.messages.begin() + summaryCount);
             cardputer::showBusyScreen("COMPACTING", "ESC cancels");
-            const cardputer::OperationResult compacted = regenerateActiveContextSummary(
-                project.project, source,
-                chat.chat.summarizedMessageCount +
-                    static_cast<std::uint32_t>(source.size()));
+            cardputer::OperationResult compacted =
+                regenerateProjectChatContextSummary(
+                    activeProjectId, selectedChatId, project.project);
+            if (compacted.success) {
+                const cardputer::ChatDocumentResult refreshed = cardputer::loadProjectChat(
+                    activeProjectId, activeChatId, 64, 65536);
+                if (!refreshed.success) {
+                    compacted = {false, refreshed.error};
+                } else {
+                    history = cardputer::unsummarizedChatTail(refreshed.chat);
+                    selectedChatContextUsage = cardputer::resolveContextUsage(
+                        refreshed.chat, project.project.contextByteBudget);
+                    selectedChatContextUsageReady = true;
+                }
+            }
+            if (compacted.success) {
+                Serial.printf(
+                    "INFO event=context_summary source=manual result=ok summarized=%u total=%u\n",
+                    static_cast<unsigned int>(
+                        selectedChatContextUsage.summarizedMessages),
+                    static_cast<unsigned int>(selectedChatContextUsage.totalMessages));
+            } else {
+                Serial.println(
+                    "ERROR event=context_summary source=manual result=failed error=regeneration_failed");
+            }
             menuStatus = compacted.success ? String("Context summary regenerated")
                                            : compacted.error;
             renderChatActions();
         } else if (enterPressed && chatActionsIndex == 12) {
+            const std::uint32_t current = selectedChatId == requestOutputOverrideChatId
+                ? requestOutputOverrideTokens : 0;
+            requestOutputOverrideTokens = current == 0 ? 256 :
+                current < 512 ? 512 : current < 1024 ? 1024 :
+                current < 2048 ? 2048 : current < 4096 ? 4096 :
+                current < 8192 ? 8192 : current < 16384 ? 16384 : 0;
+            requestOutputOverrideChatId = requestOutputOverrideTokens == 0
+                ? String() : selectedChatId;
+            menuStatus = requestOutputOverrideTokens == 0
+                ? String("Using project output default")
+                : String("Next request output override saved");
+            renderChatActions();
+        } else if (enterPressed && chatActionsIndex == 13) {
+            requestInstructionsInput = selectedChatId == requestInstructionsOverrideChatId
+                ? requestInstructionsOverride : std::string();
+            requestInstructionsStatus = "";
+            currentScreen = Screen::RequestInstructions;
+            renderRequestInstructions();
+        } else if (enterPressed && chatActionsIndex == 14) {
             clearChatId = selectedChatId;
             clearChatTitle = selectedChatTitle;
             currentScreen = Screen::ClearChatConfirm;
             cardputer::showConfirmation("CLEAR MESSAGES", clearChatTitle,
                                         "ENTER clear  ESC cancel");
-        } else if (enterPressed && chatActionsIndex == 13) {
+        } else if (enterPressed && chatActionsIndex == 15) {
             deleteChatId = selectedChatId;
             deleteChatTitle = selectedChatTitle;
             deleteChatReturnScreen = Screen::ChatActions;
@@ -763,8 +864,8 @@ void handleKeyboard()
             instructionsStatus = "";
             renderChatInstructions();
         } else if (enterPressed) {
-            cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
-                activeProjectId, selectedChatId, 1, 1);
+            cardputer::ChatDocumentResult loaded = cardputer::loadProjectChatMetadata(
+                activeProjectId, selectedChatId);
             if (!loaded.success) {
                 instructionsStatus = loaded.error;
                 renderChatInstructions();
@@ -816,6 +917,65 @@ void handleKeyboard()
         return;
     }
 
+    if (currentScreen == Screen::RequestInstructions) {
+        if (cancelPressed) {
+            requestInstructionsInput.clear();
+            requestInstructionsStatus = "";
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (keys.fn && keys.f3) {
+            keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
+                ? cardputer::KeyboardLayout::Russian
+                : cardputer::KeyboardLayout::English;
+            requestInstructionsStatus = keyboardLayout == cardputer::KeyboardLayout::English
+                ? String("English layout")
+                : String("Russian layout");
+            renderRequestInstructions();
+        } else if (clearDraftPressed) {
+            requestInstructionsInput.clear();
+            requestInstructionsStatus = "Instructions cleared; ENTER to save";
+            renderRequestInstructions();
+        } else if (backspacePressed) {
+            if (!requestInstructionsInput.empty()) {
+                requestInstructionsInput = cardputer::removeLastUtf8CodePoint(
+                    requestInstructionsInput);
+            }
+            requestInstructionsStatus = "";
+            renderRequestInstructions();
+        } else if (enterPressed) {
+            const cardputer::OperationResult staged = setRequestInstructionsOverride(
+                selectedChatId, requestInstructionsInput);
+            if (!staged.success) {
+                requestInstructionsStatus = staged.error;
+                renderRequestInstructions();
+                return;
+            }
+            const bool enabled = !requestInstructionsInput.empty();
+            requestInstructionsInput.clear();
+            requestInstructionsStatus = "";
+            menuStatus = enabled
+                ? String("Next request instructions saved")
+                : String("Next request instructions cleared");
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
+            for (const char character : printableNewKeys(newPresses)) {
+                const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
+                    ? cardputer::mapKeyToRussian(character)
+                    : std::string(1, character);
+                if (requestInstructionsInput.size() + text.size() >
+                    cardputer::kMaximumRequestInstructionsBytes) {
+                    requestInstructionsStatus = "Instruction limit: 2048 bytes";
+                    break;
+                }
+                requestInstructionsInput += text;
+                requestInstructionsStatus = "";
+            }
+            renderRequestInstructions();
+        }
+        return;
+    }
+
     if (currentScreen == Screen::ClearChatConfirm) {
         if (cancelPressed) {
             clearChatId = "";
@@ -827,6 +987,11 @@ void handleKeyboard()
             cardputer::OperationResult result = cardputer::clearProjectChatHistory(
                 activeProjectId, clearChatId);
             if (result.success) {
+                if (clearingActive || clearChatId == requestOutputOverrideChatId ||
+                    clearChatId == requestInstructionsOverrideChatId ||
+                    clearChatId == retryChatId) {
+                    clearChatScopedEphemeralState();
+                }
                 result = refreshChatList();
             }
             if (result.success && clearingActive) {
@@ -866,6 +1031,11 @@ void handleKeyboard()
             cardputer::OperationResult result = cardputer::deleteProjectChat(
                 activeProjectId, deleteChatId);
             if (result.success) {
+                if (deletingActive || deleteChatId == requestOutputOverrideChatId ||
+                    deleteChatId == requestInstructionsOverrideChatId ||
+                    deleteChatId == retryChatId) {
+                    clearChatScopedEphemeralState();
+                }
                 result = refreshChatList();
             }
             if (result.success && deletingActive) {
@@ -1447,6 +1617,18 @@ void handleKeyboard()
                     : result.error;
                 renderDeviceMenu();
             } else if (deviceMenuIndex == 4) {
+                cardputer::Settings candidate = settings;
+                candidate.projectChatHistoryQuotaBytes =
+                    nextProjectChatHistoryQuotaBytes(
+                        candidate.projectChatHistoryQuotaBytes);
+                const cardputer::OperationResult result =
+                    saveAndApplyDeviceSettings(candidate);
+                menuStatus = result.success
+                    ? "Chat archive quota: " + projectChatHistoryQuotaLabel(
+                          settings.projectChatHistoryQuotaBytes)
+                    : result.error;
+                renderDeviceMenu();
+            } else if (deviceMenuIndex == 5) {
                 cardputer::OperationResult result = saveCurrentChat();
                 if (result.success) {
                     cardputer::showBusyScreen("BACKUP", "Copying chats and metadata...");
@@ -1456,22 +1638,22 @@ void handleKeyboard()
                 }
                 menuStatus = result.success ? String("Local backup updated") : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 5) {
+            } else if (deviceMenuIndex == 6) {
                 currentScreen = Screen::RestoreBackupConfirm;
                 render();
-            } else if (deviceMenuIndex == 6) {
+            } else if (deviceMenuIndex == 7) {
                 String summary;
                 const cardputer::OperationResult result = cardputer::localBackupSummary(summary);
                 menuStatus = result.success ? summary : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 7) {
+            } else if (deviceMenuIndex == 8) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
                 cardputer::markOperation("idle");
                 const cardputer::OperationResult result = applyDisplayAndCpuSettings(settings);
                 menuStatus = result.success ? String("Settings portal closed") : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 8) {
+            } else if (deviceMenuIndex == 9) {
                 ensureNetworkReady();
                 if (WiFi.status() != WL_CONNECTED || std::time(nullptr) < 1700000000) {
                     menuStatus = statusMessage;
@@ -1496,7 +1678,7 @@ void handleKeyboard()
                     currentScreen = Screen::FirmwareUpdateConfirm;
                     render();
                 }
-            } else if (deviceMenuIndex == 9) {
+            } else if (deviceMenuIndex == 10) {
                 diagnosticsReturnScreen = Screen::DeviceMenu;
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
@@ -1550,8 +1732,30 @@ void handleKeyboard()
             workspaceFileIndex = std::min(workspaceFileIndex + 1, itemCount - 1);
             renderWorkspaceFileList();
         } else if (enterPressed) {
+            if (workspaceFileIndex > workspaceFiles.size()) {
+                std::size_t navigationIndex = workspaceFiles.size() + 1;
+                if (workspacePageOffset > 0) {
+                    if (workspaceFileIndex == navigationIndex) {
+                        const std::uint32_t previous = workspacePageOffset >= 32
+                            ? workspacePageOffset - 32 : 0;
+                        const cardputer::OperationResult loaded =
+                            refreshWorkspaceListPage(previous);
+                        menuStatus = loaded.success ? String() : loaded.error;
+                        renderWorkspaceFileList();
+                        return;
+                    }
+                    ++navigationIndex;
+                }
+                if (!workspacePageEof && workspaceFileIndex == navigationIndex) {
+                    const cardputer::OperationResult loaded = refreshWorkspaceListPage(
+                        workspaceNextPageOffset);
+                    menuStatus = loaded.success ? String() : loaded.error;
+                    renderWorkspaceFileList();
+                }
+                return;
+            }
             if (workspaceListMode == WorkspaceListMode::ImportChat) {
-                if (workspaceFileIndex == 0 || workspaceFileIndex > workspaceFiles.size()) {
+                if (workspaceFileIndex == 0) {
                     menuStatus = "Select a .chat.jsonl bundle";
                     renderWorkspaceFileList();
                     return;
@@ -1578,6 +1782,32 @@ void handleKeyboard()
                 currentScreen = Screen::Chat;
                 setTransientStatus("Chat imported", 2000);
                 render();
+            } else if (workspaceListMode == WorkspaceListMode::ImportProject) {
+                if (workspaceFileIndex == 0) {
+                    menuStatus = "Select a project bundle";
+                    renderWorkspaceFileList();
+                    return;
+                }
+                const String filename = workspaceFiles[workspaceFileIndex - 1].name;
+                cardputer::markOperation("project_import");
+                const cardputer::ProjectDocumentResult imported =
+                    cardputer::importProjectBundle(filename);
+                cardputer::markOperation("idle");
+                if (!imported.success) {
+                    menuStatus = imported.error;
+                    renderWorkspaceFileList();
+                    return;
+                }
+                const cardputer::OperationResult activated = activateProject(
+                    imported.project.summary.id);
+                if (!activated.success) {
+                    menuStatus = activated.error;
+                    renderWorkspaceFileList();
+                    return;
+                }
+                openProjectActions(imported.project.summary);
+                menuStatus = "Project imported";
+                renderProjectActions();
             } else if (workspaceFileIndex == 0) {
                 beginFileNameEntry(FileNameAction::Create, "");
             } else if (workspaceFileIndex <= workspaceFiles.size()) {
@@ -1587,29 +1817,6 @@ void handleKeyboard()
                     return;
                 }
                 openSelectedWorkspaceFile();
-            } else {
-                std::size_t navigationIndex = workspaceFiles.size() + 1;
-                if (!workspacePreviousPageOffsets.empty()) {
-                    if (workspaceFileIndex == navigationIndex) {
-                        const std::uint32_t previous = workspacePreviousPageOffsets.back();
-                        workspacePreviousPageOffsets.pop_back();
-                        const cardputer::OperationResult loaded = refreshWorkspacePage(previous);
-                        menuStatus = loaded.success ? String() : loaded.error;
-                        renderWorkspaceFileList();
-                        return;
-                    }
-                    ++navigationIndex;
-                }
-                if (!workspacePageEof && workspaceFileIndex == navigationIndex) {
-                    workspacePreviousPageOffsets.push_back(workspacePageOffset);
-                    const cardputer::OperationResult loaded = refreshWorkspacePage(
-                        workspaceNextPageOffset);
-                    if (!loaded.success) {
-                        workspacePreviousPageOffsets.pop_back();
-                        menuStatus = loaded.error;
-                    }
-                    renderWorkspaceFileList();
-                }
             }
         }
         return;
@@ -1630,7 +1837,39 @@ void handleKeyboard()
             menuStatus = "";
             renderFileActions();
         } else if (enterPressed) {
-            if (fileActionsIndex == 0) {
+            const bool textActions = cardputer::isWorkspaceTextFile(
+                std::string(fileViewerName.c_str()));
+            if (!textActions && fileActionsIndex == 0) {
+                beginFileNameEntry(FileNameAction::Copy, fileViewerName);
+            } else if (!textActions && fileActionsIndex == 1) {
+                beginFileNameEntry(FileNameAction::Rename, fileViewerName);
+            } else if (!textActions && fileActionsIndex == 2) {
+                const cardputer::SharedFileLinkResult linked =
+                    cardputer::projectHasSharedFileLink(activeProjectId, fileViewerName);
+                if (!linked.success) {
+                    menuStatus = linked.error;
+                } else {
+                    const cardputer::OperationResult result = linked.linked
+                        ? cardputer::unlinkSharedFileFromProject(
+                              activeProjectId, fileViewerName)
+                        : cardputer::linkSharedFileToProject(
+                              activeProjectId, fileViewerName);
+                    menuStatus = result.success
+                        ? (linked.linked ? String("File unlinked from project")
+                                         : String("File linked to project"))
+                        : result.error;
+                }
+                renderFileActions();
+            } else if (!textActions && fileActionsIndex == 3) {
+                deleteFileName = fileViewerName;
+                currentScreen = Screen::DeleteFileConfirm;
+                cardputer::showConfirmation("DELETE FILE", deleteFileName,
+                                            "ENTER delete  ESC cancel");
+            } else if (!textActions) {
+                currentScreen = Screen::WorkspaceFileList;
+                menuStatus = "";
+                renderWorkspaceFileList();
+            } else if (fileActionsIndex == 0) {
                 currentScreen = Screen::FileViewer;
                 renderFileViewer();
             } else if (fileActionsIndex == 1) {
@@ -1940,15 +2179,25 @@ void handleKeyboard()
             }
             fileNameStatus = "";
             renderFileNameEntry();
+        } else if (keys.fn && keys.f3) {
+            keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English
+                ? cardputer::KeyboardLayout::Russian
+                : cardputer::KeyboardLayout::English;
+            fileNameStatus = keyboardLayout == cardputer::KeyboardLayout::English
+                ? String("English layout") : String("Russian layout");
+            renderFileNameEntry();
         } else if (enterPressed) {
             completeFileNameEntry();
         } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
             for (const char character : printableNewKeys(newPresses)) {
-                if (fileNameInput.size() >= 180) {
-                    fileNameStatus = "Path limit: 180 bytes";
+                const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
+                    ? cardputer::mapKeyToRussian(character)
+                    : std::string(1, character);
+                if (fileNameInput.size() + text.size() > 512) {
+                    fileNameStatus = "Path limit: 512 bytes";
                     break;
                 }
-                fileNameInput += character;
+                fileNameInput += text;
                 fileNameStatus = "";
             }
             renderFileNameEntry();

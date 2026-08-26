@@ -14,12 +14,23 @@ std::function<void()> handler(const WebConsoleRouteHandlers& handlers,
 {
     const WebConsoleHandler selected =
         handlers.items[static_cast<std::size_t>(route)];
-    return [selected]() {
+    const WebConsoleRouteGuard guard = handlers.guard;
+    return [selected, guard, route]() {
         const String endpoint = routeServer->uri();
         beginWebRequestMetrics(endpoint.c_str());
-        selected();
+        if (guard == nullptr || guard(route)) {
+            selected();
+        }
         finishWebRequestMetrics();
     };
+}
+
+std::function<void()> rawHandler(const WebConsoleRouteHandlers& handlers,
+                                 WebConsoleRouteHandler route)
+{
+    const WebConsoleHandler selected =
+        handlers.items[static_cast<std::size_t>(route)];
+    return [selected]() { selected(); };
 }
 
 }  // namespace
@@ -28,8 +39,18 @@ void configureWebConsoleRoutes(WebServer& server,
                                const WebConsoleRouteHandlers& handlers)
 {
     routeServer = &server;
-    const char* headers[] = {"Cookie", "X-CardMind-CSRF"};
-    server.collectHeaders(headers, 2);
+    const char* headers[] = {
+        "Cookie",
+        "X-CardMind-CSRF",
+        "Content-Type",
+        "Content-Length",
+        "Transfer-Encoding",
+        "X-CardMind-Model-Encoded",
+        "X-CardMind-Context-Bytes",
+        "X-CardMind-Output-Tokens",
+        "X-CardMind-Auto-Compact",
+    };
+    server.collectHeaders(headers, 9);
     server.on("/", HTTP_GET, handler(handlers, WebConsoleRouteHandler::Root));
     server.on("/login", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Login));
     server.on("/logout", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Logout));
@@ -38,13 +59,19 @@ void configureWebConsoleRoutes(WebServer& server,
               handler(handlers, WebConsoleRouteHandler::CloseConsole));
     server.on("/api/state", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/status", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/storage/confirm", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::StorageConfirm));
     server.on("/api/projects", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/project/select", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::SelectProject));
     server.on("/api/project/new", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::NewProject));
     server.on("/api/project/settings", HTTP_POST,
-              handler(handlers, WebConsoleRouteHandler::ProjectSettings));
+              handler(handlers, WebConsoleRouteHandler::ProjectSettings),
+              rawHandler(handlers, WebConsoleRouteHandler::ProjectSettingsRawData));
+    server.on("/api/project/settings/raw", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::ProjectSettingsRawComplete),
+              rawHandler(handlers, WebConsoleRouteHandler::ProjectSettingsRawData));
     server.on("/api/project/rename", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::RenameProject));
     server.on("/api/project/duplicate", HTTP_POST,
@@ -62,13 +89,26 @@ void configureWebConsoleRoutes(WebServer& server,
     server.on("/api/files", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/ssh/state", HTTP_GET,
               handler(handlers, WebConsoleRouteHandler::State));
-    server.on("/api/prompt", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Prompt));
+    server.on("/api/prompt", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::Prompt),
+              rawHandler(handlers, WebConsoleRouteHandler::PromptRawData));
+    server.on("/api/prompt/raw", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::PromptRawComplete),
+              rawHandler(handlers, WebConsoleRouteHandler::PromptRawData));
+    server.on("/api/prompt/retry", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::PromptRetry));
     server.on("/api/chat/select", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::SelectChat));
     server.on("/api/chat/new", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::NewChat));
     server.on("/api/chat/instructions", HTTP_POST,
-              handler(handlers, WebConsoleRouteHandler::Instructions));
+              handler(handlers, WebConsoleRouteHandler::Instructions),
+              rawHandler(handlers, WebConsoleRouteHandler::InstructionsRawData));
+    server.on("/api/chat/instructions/raw", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::InstructionsRawComplete),
+              rawHandler(handlers, WebConsoleRouteHandler::InstructionsRawData));
+    server.on("/api/chat/compact", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::ChatCompact));
     server.on("/api/chat/permissions", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::ChatPermissions));
     server.on("/api/chat/rename", HTTP_POST,

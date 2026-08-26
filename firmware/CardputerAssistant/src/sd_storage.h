@@ -3,15 +3,32 @@
 #include "app_types.h"
 
 #include <ArduinoJson.h>
+#include <FS.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace cardputer {
 
 constexpr std::size_t kMaximumStorageIndexLineBytes = 1024;
 constexpr std::uint64_t kStorageOperationalFloorBytes = 1048576;
+
+enum class SdStorageState {
+    Ready,
+    Missing,
+    Full,
+    Removed,
+    Replaced,
+};
+
+struct SdStorageStatus {
+    SdStorageState state;
+    std::uint64_t totalBytes;
+    std::uint64_t usedBytes;
+    String error;
+};
 
 struct StorageLinesPageResult {
     bool success;
@@ -28,6 +45,37 @@ struct StorageIndexLookupResult {
     String error;
 };
 
+struct JsonStringFieldResult {
+    bool success;
+    std::string value;
+    String error;
+};
+
+struct StorageIndexMutationPlanResult {
+    bool success;
+    std::uint64_t stagedBytes;
+    bool found;
+    String error;
+};
+
+struct StorageLineResult {
+    bool success;
+    bool eof;
+    String line;
+    String error;
+};
+
+OperationResult initializeSdStorageIdentity();
+OperationResult confirmSdStorageReplacement();
+SdStorageStatus inspectSdStorage();
+const char* sdStorageStateName(SdStorageState state);
+const char* sdStorageErrorCode(SdStorageState state);
+OperationResult requireSdReadAccess();
+OperationResult requireSdCleanupAccess();
+OperationResult requireSdWriteAccess(std::uint64_t requiredBytes,
+                                     std::uint64_t operationalFloorBytes);
+void setSdStorageFaultOverrideForDiagnostics(SdStorageState state);
+void clearSdStorageFaultOverrideForDiagnostics();
 OperationResult ensureSdDirectory(const String& path);
 OperationResult recoverAtomicSdFile(const String& target);
 OperationResult writeAtomicJsonSdFile(const String& target, JsonDocument& document);
@@ -38,18 +86,30 @@ OperationResult copySdFileAtomically(const String& source,
                                      std::uint64_t operationalFloorBytes);
 OperationResult checkSdOperationSpace(std::uint64_t requiredBytes,
                                       std::uint64_t operationalFloorBytes);
+StorageLineResult readBoundedSdLine(File& file,
+                                    std::size_t maximumBytes,
+                                    const String& label);
 OperationResult mutateJsonlSdIndex(const String& path,
                                    const String& keyField,
                                    const String& keyValue,
                                    const String& replacementLine,
                                    bool removeEntry,
                                    std::uint64_t operationalFloorBytes);
+StorageIndexMutationPlanResult planJsonlSdIndexMutation(
+    const String& path,
+    const String& keyField,
+    const String& keyValue,
+    const String& replacementLine,
+    bool removeEntry);
 StorageLinesPageResult readJsonlSdIndexPage(const String& path,
                                             std::uint32_t offset,
                                             std::size_t maximumEntries);
 StorageIndexLookupResult findJsonlSdIndexEntry(const String& path,
                                                const String& keyField,
                                                const String& keyValue);
+JsonStringFieldResult readJsonStringField(const String& path,
+                                          const String& field,
+                                          std::size_t maximumBytes);
 OperationResult removeSdDirectoryTree(const String& path);
 
 }  // namespace cardputer

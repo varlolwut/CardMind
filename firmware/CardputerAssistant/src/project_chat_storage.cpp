@@ -2,20 +2,83 @@
 
 #include "chat_storage.h"
 #include "file_workspace.h"
+#include "json_string_reader.h"
 #include "project_storage.h"
 #include "sd_storage.h"
+#include "storage.h"
 #include "text_utils.h"
 
 #include <ArduinoJson.h>
 #include <SD.h>
 #include <esp_random.h>
 
+#include <algorithm>
 #include <cstdint>
-#include <deque>
+#include <cstring>
+#include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cardputer {
+
+ProjectChatAppendPlanResult planProjectChatAppend(
+    std::uint64_t currentHistoryBytes,
+    std::uint64_t appendedHistoryBytes,
+    std::uint64_t historyQuotaBytes,
+    std::uint64_t markerBytes,
+    std::uint64_t stagedTailBytes,
+    std::uint64_t stagedMetadataBytes,
+    std::uint64_t freeBytes,
+    std::uint64_t operationalFloorBytes)
+{
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    if (historyQuotaBytes != 0 &&
+        historyQuotaBytes < kMinimumProjectChatHistoryQuotaBytes) {
+        return {false, 0, 0,
+                "Project chat history quota must be 0 or at least 2 MiB"};
+    }
+    if (currentHistoryBytes > maximum - appendedHistoryBytes) {
+        return {false, 0, 0, "Project chat raw history byte count overflows"};
+    }
+    const std::uint64_t newHistoryBytes =
+        currentHistoryBytes + appendedHistoryBytes;
+    if (newHistoryBytes > std::numeric_limits<std::uint32_t>::max()) {
+        return {false, newHistoryBytes, 0,
+                "Project chat raw history exceeds the 32-bit filesystem cursor range"};
+    }
+    if (historyQuotaBytes != 0 && newHistoryBytes > historyQuotaBytes) {
+        return {false, newHistoryBytes, 0,
+                "Project chat raw history quota would be exceeded"};
+    }
+    std::uint64_t requiredFreeBytes = markerBytes;
+    if (requiredFreeBytes > maximum - appendedHistoryBytes) {
+        return {false, newHistoryBytes, 0,
+                "Project chat append space calculation overflows at raw history"};
+    }
+    requiredFreeBytes += appendedHistoryBytes;
+    if (requiredFreeBytes > maximum - stagedTailBytes) {
+        return {false, newHistoryBytes, 0,
+                "Project chat append space calculation overflows at staged tail"};
+    }
+    requiredFreeBytes += stagedTailBytes;
+    if (requiredFreeBytes > maximum - stagedMetadataBytes) {
+        return {false, newHistoryBytes, 0,
+                "Project chat append space calculation overflows at staged metadata"};
+    }
+    requiredFreeBytes += stagedMetadataBytes;
+    if (requiredFreeBytes > maximum - operationalFloorBytes) {
+        return {false, newHistoryBytes, 0,
+                "Project chat append space calculation overflows at operational floor"};
+    }
+    requiredFreeBytes += operationalFloorBytes;
+    if (requiredFreeBytes > freeBytes) {
+        return {false, newHistoryBytes, requiredFreeBytes,
+                "microSD does not have enough free space for the project chat append transaction"};
+    }
+    return {true, newHistoryBytes, requiredFreeBytes, ""};
+}
+
 namespace {
 
 String projectChatMetadataPath(const String& projectId, const String& chatId)
@@ -38,12 +101,285 @@ String projectChatAppendMarkerPath(const String& projectId, const String& chatId
     return projectChatDirectoryPath(projectId, chatId) + "/append.pending.json";
 }
 
+std::size_t unsignedDecimalBytes(std::uint64_t value)
+{
+    std::size_t bytes = 1;
+    while (value >= 10) {
+        value /= 10;
+        ++bytes;
+    }
+    return bytes;
+}
+
+std::uint64_t measureUpdatedProjectChatMetadata(
+    const ChatDocument& chat,
+    std::uint32_t messageCount,
+    std::uint64_t updatedAt,
+    std::uint32_t revision)
+{
+    JsonDocument document;
+    document["version"] = kProjectChatFormatVersion;
+    document["project_id"] = chat.projectId;
+    document["id"] = chat.summary.id;
+    document["title"] = chat.summary.title;
+    document["updated_at"] = updatedAt;
+    document["message_count"] = messageCount;
+    document["pinned"] = chat.summary.pinned;
+    document["archived"] = chat.summary.archived;
+    document["revision"] = revision;
+    document["instructions"] = chat.instructions.c_str();
+    document["draft"] = chat.draft.c_str();
+    document["ssh_tools_enabled"] = chat.sshToolsEnabled;
+    document["context_summary"] = chat.contextSummary.c_str();
+    document["summarized_message_count"] = chat.summarizedMessageCount;
+    return measureJson(document);
+}
+
+String serializeUpdatedChatSummary(const ChatSummary& source,
+                                   std::uint32_t messageCount,
+                                   std::uint64_t updatedAt,
+                                   std::uint32_t revision)
+{
+    JsonDocument document;
+    document["id"] = source.id;
+    document["title"] = source.title;
+    document["updated_at"] = updatedAt;
+    document["message_count"] = messageCount;
+    document["archived_message_count"] = source.archivedMessageCount;
+    document["pinned"] = source.pinned;
+    document["archived"] = source.archived;
+    document["revision"] = revision;
+    String line;
+    serializeJson(document, line);
+    return line;
+}
+
+String serializeWorstCaseProjectSummary(const ProjectSummary& source,
+                                        std::uint32_t revision)
+{
+    JsonDocument document;
+    document["id"] = source.id;
+    document["title"] = source.title;
+    document["updated_at"] = std::numeric_limits<std::uint64_t>::max();
+    document["chat_count"] = source.chatCount;
+    document["pinned"] = source.pinned;
+    document["archived"] = source.archived;
+    document["revision"] = revision;
+    String line;
+    serializeJson(document, line);
+    return line;
+}
+
 constexpr std::size_t kStoredTailMessages = 96;
 constexpr std::size_t kStoredTailBytes = 131072;
+constexpr std::size_t kMaximumSerializedTailRecordBytes = 6 * kStoredTailBytes + 128;
 
-struct SequencedMessage {
-    std::uint32_t sequence;
-    Message message;
+class BufferedFileReader {
+public:
+    explicit BufferedFileReader(File& file)
+        : file_(file), bufferOffset_(0), bufferSize_(0), recordBytes_(0),
+          failed_(false), recordLimitExceeded_(false)
+    {
+    }
+
+    BufferedFileReader(const BufferedFileReader&) = delete;
+    BufferedFileReader& operator=(const BufferedFileReader&) = delete;
+
+    bool prepareRecord()
+    {
+        while (peekBuffered() == '\n') {
+            readBuffered();
+        }
+        recordBytes_ = 0;
+        recordLimitExceeded_ = false;
+        return peekBuffered() >= 0;
+    }
+
+    int read()
+    {
+        if (recordBytes_ >= kMaximumSerializedTailRecordBytes) {
+            recordLimitExceeded_ = true;
+            return -1;
+        }
+        if (peekBuffered() == '\n') {
+            return -1;
+        }
+        const int value = readBuffered();
+        if (value >= 0) {
+            ++recordBytes_;
+        }
+        return value;
+    }
+
+    int available()
+    {
+        return peek() >= 0 ? 1 : 0;
+    }
+
+    int peek()
+    {
+        if (recordBytes_ >= kMaximumSerializedTailRecordBytes) {
+            recordLimitExceeded_ = true;
+            return -1;
+        }
+        const int value = peekBuffered();
+        return value == '\n' ? -1 : value;
+    }
+
+    std::size_t position() const
+    {
+        const std::size_t physicalPosition = file_.position();
+        const std::size_t unreadBytes = bufferSize_ - bufferOffset_;
+        return physicalPosition >= unreadBytes ? physicalPosition - unreadBytes : 0;
+    }
+
+    bool seek(std::size_t position)
+    {
+        if (failed_ || !file_.seek(position)) {
+            return false;
+        }
+        bufferOffset_ = 0;
+        bufferSize_ = 0;
+        recordBytes_ = 0;
+        recordLimitExceeded_ = false;
+        return true;
+    }
+
+    std::size_t readBytes(char* output, std::size_t maximumBytes)
+    {
+        std::size_t copied = 0;
+        while (copied < maximumBytes) {
+            const int value = read();
+            if (value < 0) {
+                break;
+            }
+            output[copied++] = static_cast<char>(value);
+        }
+        return copied;
+    }
+
+    bool consumeRecordDelimiter()
+    {
+        for (;;) {
+            const int value = peekBuffered();
+            if (value < 0) {
+                return !failed_;
+            }
+            if (value == '\n') {
+                return readBuffered() >= 0;
+            }
+            if (value == ' ' || value == '\t' || value == '\r') {
+                if (readRecordByte() < 0) {
+                    return false;
+                }
+                continue;
+            }
+            return false;
+        }
+    }
+
+    bool failed() const
+    {
+        return failed_;
+    }
+
+    bool recordLimitExceeded() const
+    {
+        return recordLimitExceeded_;
+    }
+
+private:
+    bool refill()
+    {
+        if (bufferOffset_ < bufferSize_) {
+            return true;
+        }
+        bufferOffset_ = 0;
+        bufferSize_ = 0;
+        const std::size_t totalBytes = file_.size();
+        const std::size_t position = file_.position();
+        if (position >= totalBytes) {
+            return false;
+        }
+        const std::size_t requested = std::min<std::size_t>(
+            totalBytes - position, sizeof(buffer_));
+        const std::size_t received = file_.read(buffer_, requested);
+        if (received != requested) {
+            failed_ = true;
+            return false;
+        }
+        bufferSize_ = received;
+        return true;
+    }
+
+    int peekBuffered()
+    {
+        return refill() ? static_cast<int>(buffer_[bufferOffset_]) : -1;
+    }
+
+    int readBuffered()
+    {
+        if (!refill()) {
+            return -1;
+        }
+        return static_cast<int>(buffer_[bufferOffset_++]);
+    }
+
+    int readRecordByte()
+    {
+        if (recordBytes_ >= kMaximumSerializedTailRecordBytes) {
+            recordLimitExceeded_ = true;
+            return -1;
+        }
+        const int value = readBuffered();
+        if (value >= 0) {
+            ++recordBytes_;
+        }
+        return value;
+    }
+
+    File& file_;
+    std::uint8_t buffer_[512];
+    std::size_t bufferOffset_;
+    std::size_t bufferSize_;
+    std::size_t recordBytes_;
+    bool failed_;
+    bool recordLimitExceeded_;
+};
+
+enum class TailRecordSource : std::uint8_t {
+    ExistingTail,
+    RawHistory,
+};
+
+struct TailRecordSpan {
+    TailRecordSource source;
+    std::size_t offset;
+    std::size_t contentBytes;
+};
+
+struct TailRetentionWindow {
+    TailRecordSpan records[kStoredTailMessages];
+    std::size_t first;
+    std::size_t count;
+    std::size_t contentBytes;
+};
+
+struct TailSourceScanResult {
+    bool success;
+    TailRetentionWindow retained;
+    std::uint32_t firstSequence;
+    std::uint32_t lastSequence;
+    std::uint32_t recordCount;
+    std::size_t sourceBytes;
+    String error;
+};
+
+struct ProjectChatMetadataStateResult {
+    bool success;
+    std::uint32_t messageCount;
+    std::uint32_t revision;
+    String error;
 };
 
 OperationResult validateHistoryFile(const String& path, std::uint32_t expectedMessages);
@@ -99,23 +435,224 @@ OperationResult writeHistoryMessage(File& file,
     return {true, ""};
 }
 
-OperationResult writeTailFile(const String& path,
-                              const std::deque<SequencedMessage>& messages)
+void retainTailRecord(TailRetentionWindow& retained,
+                      const TailRecordSpan& record)
 {
-    OperationResult result = recoverAtomicSdFile(path);
+    if (retained.count == kStoredTailMessages) {
+        retained.contentBytes -= retained.records[retained.first].contentBytes;
+        retained.first = (retained.first + 1) % kStoredTailMessages;
+        --retained.count;
+    }
+    const std::size_t insertion =
+        (retained.first + retained.count) % kStoredTailMessages;
+    retained.records[insertion] = record;
+    retained.contentBytes += record.contentBytes;
+    ++retained.count;
+    while (retained.count > 0 && retained.contentBytes > kStoredTailBytes) {
+        retained.contentBytes -= retained.records[retained.first].contentBytes;
+        retained.first = (retained.first + 1) % kStoredTailMessages;
+        --retained.count;
+    }
+}
+
+TailSourceScanResult scanTailSource(const String& path,
+                                    std::size_t firstByte,
+                                    TailRecordSource source)
+{
+    TailRetentionWindow retained = {};
+    File file = SD.open(path, FILE_READ);
+    if (!file) {
+        return {false, {}, 0, 0, 0, 0, "Project chat tail source does not exist"};
+    }
+    const std::size_t sourceBytes = file.size();
+    if (firstByte > sourceBytes || !file.seek(firstByte)) {
+        file.close();
+        return {false, {}, 0, 0, 0, sourceBytes,
+                "Project chat tail source offset is outside the file"};
+    }
+    BufferedFileReader reader(file);
+    std::uint32_t firstSequence = 0;
+    std::uint32_t lastSequence = 0;
+    std::uint32_t recordCount = 0;
+    JsonDocument headerFilter;
+    headerFilter["sequence"] = true;
+    headerFilter["role"] = true;
+    while (reader.prepareRecord()) {
+        const std::size_t recordOffset = reader.position();
+        JsonDocument header;
+        const DeserializationError headerError = deserializeJson(
+            header, reader, DeserializationOption::Filter(headerFilter));
+        const std::uint32_t sequence = headerError
+            ? 0 : header["sequence"].as<std::uint32_t>();
+        const char* role = headerError ? nullptr : header["role"].as<const char*>();
+        if (reader.failed() || reader.recordLimitExceeded() || headerError ||
+            !header["sequence"].is<std::uint32_t>() || sequence == 0 ||
+            (lastSequence != 0 && sequence != lastSequence + 1) ||
+            role == nullptr ||
+            (std::strcmp(role, "user") != 0 && std::strcmp(role, "assistant") != 0) ||
+            !reader.seek(recordOffset)) {
+            file.close();
+            return {false, {}, 0, 0, 0, sourceBytes,
+                    "Project chat tail source contains an invalid record"};
+        }
+        const json_reader::JsonStringLengthResult content =
+            json_reader::measureObjectStringField(
+                reader, "content", 64, kStoredTailBytes);
+        if (!content.success) {
+            file.close();
+            return {false, {}, 0, 0, 0, sourceBytes,
+                    "Project chat tail source content is invalid: " + content.error};
+        }
+        if (content.bytes == 0 || !reader.consumeRecordDelimiter()) {
+            file.close();
+            return {false, {}, 0, 0, 0, sourceBytes,
+                    "Project chat tail source content or delimiter is invalid"};
+        }
+        if (recordCount == 0) {
+            firstSequence = sequence;
+        }
+        lastSequence = sequence;
+        ++recordCount;
+        retainTailRecord(retained, {source, recordOffset, content.bytes});
+    }
+    const bool validEnd = !reader.failed() && !reader.recordLimitExceeded();
+    file.close();
+    return validEnd
+        ? TailSourceScanResult{true, retained, firstSequence, lastSequence,
+                               recordCount, sourceBytes, ""}
+        : TailSourceScanResult{false, {}, 0, 0, 0, sourceBytes,
+                               "Failed to finish scanning the project chat tail source"};
+}
+
+OperationResult copyFileSuffix(File& output,
+                               const String& sourcePath,
+                               std::size_t firstByte)
+{
+    File source = SD.open(sourcePath, FILE_READ);
+    if (!source) {
+        return {false, "Project chat tail copy source does not exist"};
+    }
+    if (firstByte > source.size() || !source.seek(firstByte)) {
+        source.close();
+        return {false, "Project chat tail copy offset is outside the source"};
+    }
+    OperationResult result = {true, ""};
+    std::uint8_t buffer[512];
+    while (source.available()) {
+        const std::size_t received = source.read(buffer, sizeof(buffer));
+        if (received == 0 || output.write(buffer, received) != received) {
+            result = {false, "Failed to copy the complete project chat tail"};
+            break;
+        }
+    }
+    source.close();
+    return result;
+}
+
+OperationResult writeTailSuffix(const String& historyPath,
+                                const String& tailPath,
+                                std::size_t firstRetainedOffset)
+{
+    OperationResult result = recoverAtomicSdFile(tailPath);
     if (!result.success) {
         return result;
     }
-    const String stagedPath = path + ".tmp";
+    const String stagedPath = tailPath + ".tmp";
     File staged = SD.open(stagedPath, FILE_WRITE);
     if (!staged) {
         return {false, "Failed to create staged project chat tail"};
     }
-    for (const SequencedMessage& item : messages) {
-        result = writeHistoryMessage(staged, item.sequence, item.message);
-        if (!result.success) {
-            break;
+    result = copyFileSuffix(staged, historyPath, firstRetainedOffset);
+    staged.flush();
+    staged.close();
+    if (!result.success) {
+        SD.remove(stagedPath);
+        return result;
+    }
+    return commitStagedSdFile(tailPath, stagedPath);
+}
+
+OperationResult updateTailAfterAppend(const String& projectId,
+                                      const String& chatId,
+                                      std::uint32_t oldMessageCount,
+                                      std::uint32_t newMessageCount,
+                                      std::size_t oldHistoryBytes)
+{
+    const String tailPath = projectChatTailPath(projectId, chatId);
+    const String historyPath = projectChatHistoryPath(projectId, chatId);
+    OperationResult result = recoverAtomicSdFile(tailPath);
+    if (!result.success) {
+        return result;
+    }
+    TailSourceScanResult existing = scanTailSource(
+        tailPath, 0, TailRecordSource::ExistingTail);
+    if (!existing.success ||
+        (oldMessageCount == 0 && existing.recordCount != 0) ||
+        (oldMessageCount > 0 &&
+         (existing.recordCount == 0 || existing.lastSequence != oldMessageCount))) {
+        return {false, existing.success
+            ? String("Existing project chat tail does not match metadata")
+            : existing.error};
+    }
+    const TailSourceScanResult appended = scanTailSource(
+        historyPath, oldHistoryBytes, TailRecordSource::RawHistory);
+    if (!appended.success || appended.recordCount == 0 ||
+        appended.firstSequence != oldMessageCount + 1 ||
+        appended.lastSequence != newMessageCount ||
+        appended.recordCount != newMessageCount - oldMessageCount) {
+        return {false, appended.success
+            ? String("Appended project chat history does not match its marker")
+            : appended.error};
+    }
+    if (appended.retained.count < appended.recordCount) {
+        existing.retained = appended.retained;
+    } else {
+        for (std::size_t index = 0; index < appended.retained.count; ++index) {
+            const std::size_t slot =
+                (appended.retained.first + index) % kStoredTailMessages;
+            retainTailRecord(existing.retained, appended.retained.records[slot]);
         }
+    }
+    if (existing.retained.count == 0) {
+        return {false, "Project chat append produced an empty context tail"};
+    }
+    const TailRecordSpan& first =
+        existing.retained.records[existing.retained.first];
+    std::uint64_t stagedTailBytes = 0;
+    if (first.source == TailRecordSource::ExistingTail) {
+        const std::uint64_t retainedExistingBytes =
+            existing.sourceBytes - first.offset;
+        const std::uint64_t appendedBytes =
+            appended.sourceBytes - oldHistoryBytes;
+        if (retainedExistingBytes >
+            std::numeric_limits<std::uint64_t>::max() - appendedBytes) {
+            return {false, "Project chat staged tail size overflows"};
+        }
+        stagedTailBytes = retainedExistingBytes + appendedBytes;
+    } else {
+        stagedTailBytes = appended.sourceBytes - first.offset;
+    }
+    result = checkSdOperationSpace(
+        stagedTailBytes, kStorageOperationalFloorBytes);
+    if (!result.success) {
+        return result;
+    }
+    result = recoverAtomicSdFile(tailPath);
+    if (!result.success) {
+        return result;
+    }
+    const String stagedPath = tailPath + ".tmp";
+    File staged = SD.open(stagedPath, FILE_WRITE);
+    if (!staged) {
+        return {false, "Failed to create staged project chat tail"};
+    }
+    if (first.source == TailRecordSource::ExistingTail) {
+        result = copyFileSuffix(staged, tailPath, first.offset);
+        if (result.success) {
+            result = copyFileSuffix(staged, historyPath, oldHistoryBytes);
+        }
+    } else {
+        result = copyFileSuffix(staged, historyPath, first.offset);
     }
     staged.flush();
     staged.close();
@@ -123,48 +660,29 @@ OperationResult writeTailFile(const String& path,
         SD.remove(stagedPath);
         return result;
     }
-    return commitStagedSdFile(path, stagedPath);
+    return commitStagedSdFile(tailPath, stagedPath);
 }
 
 OperationResult rebuildTailFile(const String& projectId,
                                 const String& chatId,
                                 std::uint32_t expectedMessages)
 {
-    File history = SD.open(projectChatHistoryPath(projectId, chatId), FILE_READ);
-    if (!history) {
-        return {false, "Project chat raw history does not exist"};
+    const String historyPath = projectChatHistoryPath(projectId, chatId);
+    const TailSourceScanResult scanned = scanTailSource(
+        historyPath, 0, TailRecordSource::RawHistory);
+    if (!scanned.success) {
+        return {false, scanned.error};
     }
-    std::deque<SequencedMessage> tail;
-    std::size_t tailBytes = 0;
-    std::uint32_t expectedSequence = 1;
-    while (history.available()) {
-        const String line = history.readStringUntil('\n');
-        if (line.isEmpty()) {
-            continue;
-        }
-        JsonDocument record;
-        const DeserializationError error = deserializeJson(record, line);
-        if (error || !record["sequence"].is<std::uint32_t>() ||
-            record["sequence"].as<std::uint32_t>() != expectedSequence ||
-            !record["role"].is<const char*>() || !record["content"].is<const char*>()) {
-            history.close();
-            return {false, "Project chat raw history is invalid while rebuilding its tail"};
-        }
-        Message message = {record["role"].as<const char*>(),
-                           record["content"].as<const char*>()};
-        tailBytes += message.content.size();
-        tail.push_back({expectedSequence, std::move(message)});
-        while (tail.size() > kStoredTailMessages || tailBytes > kStoredTailBytes) {
-            tailBytes -= tail.front().message.content.size();
-            tail.pop_front();
-        }
-        ++expectedSequence;
-    }
-    history.close();
-    if (expectedSequence - 1 != expectedMessages) {
+    if (scanned.recordCount != expectedMessages ||
+        (expectedMessages > 0 &&
+         (scanned.firstSequence != 1 || scanned.lastSequence != expectedMessages))) {
         return {false, "Project chat raw history count changed while rebuilding its tail"};
     }
-    return writeTailFile(projectChatTailPath(projectId, chatId), tail);
+    const std::size_t firstRetainedOffset = scanned.retained.count == 0
+        ? scanned.sourceBytes
+        : scanned.retained.records[scanned.retained.first].offset;
+    return writeTailSuffix(
+        historyPath, projectChatTailPath(projectId, chatId), firstRetainedOffset);
 }
 
 struct LegacyHistoryMeasurement {
@@ -210,10 +728,24 @@ LegacyHistoryMeasurement measureLegacyHistory(const ChatDocument& legacyChat)
 
 ChatDocumentResult parseProjectChatMetadata(File& file,
                                             const String& projectId,
-                                            const String& chatId)
+                                            const String& chatId,
+                                            const String& path)
 {
+    JsonDocument filter;
+    filter["version"] = true;
+    filter["project_id"] = true;
+    filter["id"] = true;
+    filter["title"] = true;
+    filter["updated_at"] = true;
+    filter["message_count"] = true;
+    filter["pinned"] = true;
+    filter["archived"] = true;
+    filter["revision"] = true;
+    filter["ssh_tools_enabled"] = true;
+    filter["summarized_message_count"] = true;
     JsonDocument document;
-    const DeserializationError error = deserializeJson(document, file);
+    const DeserializationError error = deserializeJson(
+        document, file, DeserializationOption::Filter(filter));
     if (error || !document["version"].is<std::uint32_t>() ||
         document["version"].as<std::uint32_t>() != kProjectChatFormatVersion ||
         !document["project_id"].is<const char*>() || !document["id"].is<const char*>() ||
@@ -222,10 +754,7 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
         !document["message_count"].is<std::uint32_t>() ||
         !document["pinned"].is<bool>() || !document["archived"].is<bool>() ||
         !document["revision"].is<std::uint32_t>() ||
-        !document["instructions"].is<const char*>() ||
-        !document["draft"].is<const char*>() ||
         !document["ssh_tools_enabled"].is<bool>() ||
-        !document["context_summary"].is<const char*>() ||
         !document["summarized_message_count"].is<std::uint32_t>()) {
         return {false, {}, "Project chat metadata is missing required typed fields"};
     }
@@ -238,11 +767,20 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
     chat.summary.pinned = document["pinned"].as<bool>();
     chat.summary.archived = document["archived"].as<bool>();
     chat.summary.revision = document["revision"].as<std::uint32_t>();
-    chat.instructions = document["instructions"].as<const char*>();
-    chat.draft = document["draft"].as<const char*>();
     chat.sshToolsEnabled = document["ssh_tools_enabled"].as<bool>();
-    chat.contextSummary = document["context_summary"].as<const char*>();
     chat.summarizedMessageCount = document["summarized_message_count"].as<std::uint32_t>();
+    JsonStringFieldResult instructions = readJsonStringField(
+        path, "instructions", kMaximumProjectChatInstructionsBytes);
+    if (!instructions.success) return {false, {}, instructions.error};
+    chat.instructions = std::move(instructions.value);
+    JsonStringFieldResult draft = readJsonStringField(
+        path, "draft", kMaximumProjectChatDraftBytes);
+    if (!draft.success) return {false, {}, draft.error};
+    chat.draft = std::move(draft.value);
+    JsonStringFieldResult contextSummary = readJsonStringField(
+        path, "context_summary", kMaximumProjectChatSummaryBytes);
+    if (!contextSummary.success) return {false, {}, contextSummary.error};
+    chat.contextSummary = std::move(contextSummary.value);
     if (chat.projectId != projectId || chat.summary.id != chatId ||
         !isValidChatId(chat.projectId.c_str()) || !isValidChatId(chat.summary.id.c_str()) ||
         chat.summary.title.isEmpty() || !isValidUtf8(chat.summary.title.c_str()) ||
@@ -251,10 +789,50 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
         chat.summarizedMessageCount > chat.summary.messageCount) {
         return {false, {}, "Project chat metadata contains invalid values"};
     }
-    return {true, chat, ""};
+    return {true, std::move(chat), ""};
 }
 
-OperationResult writeProjectChatMetadata(const ChatDocument& chat)
+ProjectChatMetadataStateResult readProjectChatMetadataState(
+    const String& projectId, const String& chatId)
+{
+    File metadata = SD.open(projectChatMetadataPath(projectId, chatId), FILE_READ);
+    if (!metadata) {
+        return {false, 0, 0, "Project chat metadata does not exist"};
+    }
+    JsonDocument filter;
+    filter["version"] = true;
+    filter["project_id"] = true;
+    filter["id"] = true;
+    filter["message_count"] = true;
+    filter["revision"] = true;
+    JsonDocument document;
+    const DeserializationError error = deserializeJson(
+        document, metadata, DeserializationOption::Filter(filter));
+    metadata.close();
+    if (error) {
+        return {false, 0, 0,
+                "Project chat metadata state parse failed: " + String(error.c_str())};
+    }
+    if (!document["version"].is<std::uint32_t>() ||
+        document["version"].as<std::uint32_t>() != kProjectChatFormatVersion ||
+        !document["project_id"].is<const char*>() ||
+        !document["id"].is<const char*>() ||
+        !document["message_count"].is<std::uint32_t>() ||
+        !document["revision"].is<std::uint32_t>() ||
+        document["project_id"].as<String>() != projectId ||
+        document["id"].as<String>() != chatId) {
+        return {false, 0, 0, "Project chat metadata state is invalid"};
+    }
+    return {
+        true,
+        document["message_count"].as<std::uint32_t>(),
+        document["revision"].as<std::uint32_t>(),
+        "",
+    };
+}
+
+OperationResult writeProjectChatMetadataWithRevision(
+    const ChatDocument& chat, std::uint32_t revision)
 {
     const OperationResult validation = validateProjectChatMetadataValues(chat);
     if (!validation.success) {
@@ -269,47 +847,32 @@ OperationResult writeProjectChatMetadata(const ChatDocument& chat)
     document["message_count"] = chat.summary.messageCount;
     document["pinned"] = chat.summary.pinned;
     document["archived"] = chat.summary.archived;
-    document["revision"] = chat.summary.revision;
-    document["instructions"] = chat.instructions;
-    document["draft"] = chat.draft;
+    document["revision"] = revision;
+    document["instructions"] = chat.instructions.c_str();
+    document["draft"] = chat.draft.c_str();
     document["ssh_tools_enabled"] = chat.sshToolsEnabled;
-    document["context_summary"] = chat.contextSummary;
+    document["context_summary"] = chat.contextSummary.c_str();
     document["summarized_message_count"] = chat.summarizedMessageCount;
     return writeAtomicJsonSdFile(
         projectChatMetadataPath(chat.projectId, chat.summary.id), document);
 }
 
+OperationResult writeProjectChatMetadata(const ChatDocument& chat)
+{
+    return writeProjectChatMetadataWithRevision(chat, chat.summary.revision);
+}
+
 OperationResult validateHistoryFile(const String& path, std::uint32_t expectedMessages)
 {
-    File history = SD.open(path, FILE_READ);
-    if (!history) {
-        return {false, "Project chat raw history file does not exist"};
+    const TailSourceScanResult scanned = scanTailSource(
+        path, 0, TailRecordSource::RawHistory);
+    if (!scanned.success) {
+        return {false, scanned.error};
     }
-    std::uint32_t expectedSequence = 1;
-    while (history.available()) {
-        const String line = history.readStringUntil('\n');
-        if (line.isEmpty()) {
-            continue;
-        }
-        JsonDocument item;
-        const DeserializationError error = deserializeJson(item, line);
-        if (error || !item["sequence"].is<std::uint32_t>() ||
-            !item["role"].is<const char*>() || !item["content"].is<const char*>()) {
-            history.close();
-            return {false, "Project chat raw history contains an invalid typed record"};
-        }
-        const String role = item["role"].as<const char*>();
-        const std::string content = item["content"].as<const char*>();
-        if (item["sequence"].as<std::uint32_t>() != expectedSequence ||
-            (role != "user" && role != "assistant") || content.empty() ||
-            !isValidUtf8(content)) {
-            history.close();
-            return {false, "Project chat raw history sequence or message is invalid"};
-        }
-        ++expectedSequence;
-    }
-    history.close();
-    return expectedSequence - 1 == expectedMessages
+    const bool exactState = scanned.recordCount == expectedMessages &&
+        (expectedMessages == 0 ||
+         (scanned.firstSequence == 1 && scanned.lastSequence == expectedMessages));
+    return exactState
         ? OperationResult{true, ""}
         : OperationResult{false, "Project chat raw history count does not match metadata"};
 }
@@ -351,23 +914,36 @@ OperationResult recoverPendingAppend(const String& projectId, const String& chat
         return {false, "Pending chat append cannot recover because metadata is missing"};
     }
     ChatDocumentResult metadata = parseProjectChatMetadata(
-        metadataFile, projectId, chatId);
+        metadataFile, projectId, chatId, projectChatMetadataPath(projectId, chatId));
     metadataFile.close();
     if (!metadata.success) {
         return {false, "Pending chat append metadata is invalid: " + metadata.error};
     }
     const String historyPath = projectChatHistoryPath(projectId, chatId);
-    if (validateHistoryFile(historyPath, oldCount).success) {
+    const TailSourceScanResult history = scanTailSource(
+        historyPath, 0, TailRecordSource::RawHistory);
+    if (!history.success) {
+        return {false, "Pending chat append raw history is invalid: " + history.error};
+    }
+    const bool isOldState = history.recordCount == oldCount &&
+        (oldCount == 0 ||
+         (history.firstSequence == 1 && history.lastSequence == oldCount));
+    if (isOldState) {
         return SD.remove(markerPath)
             ? OperationResult{true, ""}
             : OperationResult{false, "Failed to clear an uncommitted chat append marker"};
     }
-    const OperationResult completeHistory = validateHistoryFile(historyPath, newCount);
-    if (!completeHistory.success) {
+    const bool isNewState = history.recordCount == newCount &&
+        history.firstSequence == 1 && history.lastSequence == newCount;
+    if (!isNewState) {
         return {false,
                 "Pending chat append raw history is neither the old nor new complete state"};
     }
-    OperationResult result = rebuildTailFile(projectId, chatId, newCount);
+    const std::size_t firstRetainedOffset = history.retained.count == 0
+        ? history.sourceBytes
+        : history.retained.records[history.retained.first].offset;
+    OperationResult result = writeTailSuffix(
+        historyPath, projectChatTailPath(projectId, chatId), firstRetainedOffset);
     if (!result.success) {
         return result;
     }
@@ -430,25 +1006,34 @@ ChatDocumentResult createProjectChat(const String& projectId, const String& titl
     if (!result.success) {
         return {false, {}, cleanupFailedChatImport(chatDirectory, result.error).error};
     }
-    return {true, chat, ""};
+    return {true, std::move(chat), ""};
 }
 
 OperationResult saveProjectChatMetadata(const ChatDocument& chat)
 {
-    const ChatDocumentResult current = loadProjectChat(
-        chat.projectId, chat.summary.id, 1, 1);
+    const OperationResult validation = validateProjectChatMetadataValues(chat);
+    if (!validation.success) {
+        return validation;
+    }
+    const OperationResult recovered = recoverPendingAppend(
+        chat.projectId, chat.summary.id);
+    if (!recovered.success) {
+        return recovered;
+    }
+    const ProjectChatMetadataStateResult current = readProjectChatMetadataState(
+        chat.projectId, chat.summary.id);
     if (!current.success) {
         return {false, current.error};
     }
-    if (chat.summary.messageCount != current.chat.summary.messageCount) {
+    if (chat.summary.messageCount != current.messageCount) {
         return {false, "Project chat message count can only change through history operations"};
     }
-    ChatDocument updated = chat;
-    updated.messages.clear();
-    updated.summary.revision = current.chat.summary.revision + 1;
-    OperationResult result = writeProjectChatMetadata(updated);
+    ChatSummary updatedSummary = chat.summary;
+    updatedSummary.revision = current.revision + 1;
+    OperationResult result = writeProjectChatMetadataWithRevision(
+        chat, updatedSummary.revision);
     if (result.success) {
-        result = upsertProjectChatSummary(updated.projectId, updated.summary);
+        result = upsertProjectChatSummary(chat.projectId, updatedSummary);
     }
     return result;
 }
@@ -456,48 +1041,175 @@ OperationResult saveProjectChatMetadata(const ChatDocument& chat)
 OperationResult appendProjectChatMessages(const String& projectId,
                                           const String& chatId,
                                           const std::vector<Message>& messages,
-                                          std::uint64_t updatedAt)
+                                          std::uint64_t updatedAt,
+                                          std::uint32_t historyQuotaBytes)
 {
     if (messages.empty()) {
         return {false, "Project chat append requires at least one message"};
     }
-    const ChatDocumentResult current = loadProjectChat(
-        projectId, chatId, kStoredTailMessages, kStoredTailBytes);
+    if (!isValidProjectChatHistoryQuota(historyQuotaBytes)) {
+        return {false, "Project chat history quota must be 0 or at least 2 MiB"};
+    }
+    ChatDocumentResult current = loadProjectChatMetadata(projectId, chatId);
     if (!current.success) {
         return {false, current.error};
     }
+    if (messages.size() > std::numeric_limits<std::uint32_t>::max() ||
+        static_cast<std::uint32_t>(messages.size()) >
+            std::numeric_limits<std::uint32_t>::max() -
+                current.chat.summary.messageCount ||
+        current.chat.summary.revision == std::numeric_limits<std::uint32_t>::max()) {
+        return {false, "Project chat message count would overflow"};
+    }
+    const std::uint32_t appendedMessages =
+        static_cast<std::uint32_t>(messages.size());
     std::uint64_t appendedBytes = 0;
     for (std::size_t index = 0; index < messages.size(); ++index) {
         const Message& message = messages[index];
         if ((message.role != "user" && message.role != "assistant") ||
-            message.content.empty() || !isValidUtf8(message.content)) {
+            message.content.empty() || message.content.size() > kStoredTailBytes ||
+            !isValidUtf8(message.content)) {
             return {false, "Cannot append an invalid project chat message"};
         }
         JsonDocument record;
         record["sequence"] = current.chat.summary.messageCount + index + 1;
-        record["role"] = message.role;
-        record["content"] = message.content;
-        appendedBytes += measureJson(record) + 1;
-    }
-    OperationResult result = checkSdOperationSpace(
-        appendedBytes + kStoredTailBytes, kStorageOperationalFloorBytes);
-    if (!result.success) {
-        return result;
+        record["role"] = message.role.c_str();
+        record["content"] = message.content.c_str();
+        const std::size_t measuredRecordBytes = measureJson(record);
+        if (measuredRecordBytes == std::numeric_limits<std::size_t>::max()) {
+            return {false, "Project chat record serialized size would overflow"};
+        }
+        const std::uint64_t recordBytes =
+            static_cast<std::uint64_t>(measuredRecordBytes) + 1U;
+        if (appendedBytes >
+            std::numeric_limits<std::uint64_t>::max() - recordBytes) {
+            return {false, "Project chat append serialized size would overflow"};
+        }
+        appendedBytes += recordBytes;
     }
     JsonDocument transaction;
     transaction["old_count"] = current.chat.summary.messageCount;
-    transaction["new_count"] = current.chat.summary.messageCount +
-        static_cast<std::uint32_t>(messages.size());
+    transaction["new_count"] =
+        current.chat.summary.messageCount + appendedMessages;
     transaction["updated_at"] = updatedAt;
+    const std::uint64_t markerBytes = measureJson(transaction);
+    const String historyPath = projectChatHistoryPath(projectId, chatId);
+    const String tailPath = projectChatTailPath(projectId, chatId);
+    const String chatIndexPath = projectChatsDirectoryPath(projectId) + "/index.jsonl";
+    const String projectMetadataPath = projectDirectoryPath(projectId) + "/project.json";
+    const String projectIndexPath = projectStorageRoot() + "/projects/index.jsonl";
+    File historyState = SD.open(historyPath, FILE_READ);
+    File tailState = SD.open(tailPath, FILE_READ);
+    File projectMetadataState = SD.open(projectMetadataPath, FILE_READ);
+    if (!historyState || !tailState || !projectMetadataState) {
+        if (historyState) historyState.close();
+        if (tailState) tailState.close();
+        if (projectMetadataState) projectMetadataState.close();
+        return {false, "Project chat append transaction files are unavailable for preflight"};
+    }
+    const std::uint64_t currentHistoryBytes = historyState.size();
+    const std::uint64_t existingTailBytes = tailState.size();
+    const std::uint64_t existingProjectMetadataBytes = projectMetadataState.size();
+    historyState.close();
+    tailState.close();
+    projectMetadataState.close();
+    if (existingTailBytes >
+        std::numeric_limits<std::uint64_t>::max() - appendedBytes) {
+        return {false, "Project chat staged tail upper bound would overflow"};
+    }
+    const std::uint64_t stagedTailBytes = existingTailBytes + appendedBytes;
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    const std::uint32_t newMessageCount =
+        current.chat.summary.messageCount + appendedMessages;
+    const std::uint32_t newChatRevision = current.chat.summary.revision + 1U;
+    const std::uint64_t stagedChatMetadataBytes = measureUpdatedProjectChatMetadata(
+        current.chat, newMessageCount, updatedAt, newChatRevision);
+    const String chatSummaryLine = serializeUpdatedChatSummary(
+        current.chat.summary, newMessageCount, updatedAt, newChatRevision);
+    const StorageIndexMutationPlanResult chatIndexPlan = planJsonlSdIndexMutation(
+        chatIndexPath, "id", chatId, chatSummaryLine, false);
+    if (!chatIndexPlan.success || !chatIndexPlan.found) {
+        return {false, chatIndexPlan.success
+            ? String("Project chat index entry is missing during append preflight")
+            : chatIndexPlan.error};
+    }
+    const ProjectDocumentResult project = loadProject(projectId);
+    if (!project.success) {
+        return {false, project.error};
+    }
+    if (project.project.summary.revision == std::numeric_limits<std::uint32_t>::max() ||
+        project.project.chatIndexRevision == std::numeric_limits<std::uint32_t>::max()) {
+        return {false, "Project counters would overflow during chat append"};
+    }
+    const std::uint32_t newProjectRevision = project.project.summary.revision + 1U;
+    const String projectSummaryLine = serializeWorstCaseProjectSummary(
+        project.project.summary, newProjectRevision);
+    const StorageIndexMutationPlanResult projectIndexPlan = planJsonlSdIndexMutation(
+        projectIndexPath, "id", projectId, projectSummaryLine, false);
+    if (!projectIndexPlan.success || !projectIndexPlan.found) {
+        return {false, projectIndexPlan.success
+            ? String("Project index entry is missing during chat append preflight")
+            : projectIndexPlan.error};
+    }
+    const std::uint64_t oldProjectCounterBytes =
+        unsignedDecimalBytes(project.project.summary.updatedAt) +
+        unsignedDecimalBytes(project.project.summary.chatCount) +
+        unsignedDecimalBytes(project.project.summary.revision) +
+        unsignedDecimalBytes(project.project.chatIndexRevision);
+    const std::uint64_t newProjectCounterBytes =
+        unsignedDecimalBytes(std::numeric_limits<std::uint64_t>::max()) +
+        unsignedDecimalBytes(project.project.summary.chatCount) +
+        unsignedDecimalBytes(newProjectRevision) +
+        unsignedDecimalBytes(project.project.chatIndexRevision + 1U);
+    if (existingProjectMetadataBytes < oldProjectCounterBytes ||
+        existingProjectMetadataBytes - oldProjectCounterBytes >
+            maximum - newProjectCounterBytes) {
+        return {false, "Project metadata staged size would overflow"};
+    }
+    const std::uint64_t stagedProjectMetadataBytes =
+        existingProjectMetadataBytes - oldProjectCounterBytes + newProjectCounterBytes;
+    if (stagedChatMetadataBytes > maximum - stagedProjectMetadataBytes ||
+        stagedChatMetadataBytes + stagedProjectMetadataBytes >
+            maximum - chatIndexPlan.stagedBytes ||
+        stagedChatMetadataBytes + stagedProjectMetadataBytes +
+                chatIndexPlan.stagedBytes >
+            maximum - projectIndexPlan.stagedBytes) {
+        return {false, "Project chat staged metadata transaction size would overflow"};
+    }
+    const std::uint64_t stagedMetadataBytes = stagedChatMetadataBytes +
+        stagedProjectMetadataBytes + chatIndexPlan.stagedBytes +
+        projectIndexPlan.stagedBytes;
+    const SdStorageStatus storage = inspectSdStorage();
+    if (storage.state != SdStorageState::Ready) {
+        return {false, storage.error};
+    }
+    const ProjectChatAppendPlanResult plan = planProjectChatAppend(
+        currentHistoryBytes, appendedBytes, historyQuotaBytes, markerBytes,
+        stagedTailBytes, stagedMetadataBytes,
+        storage.totalBytes - storage.usedBytes,
+        kStorageOperationalFloorBytes);
+    if (!plan.success) {
+        return {false, plan.error};
+    }
+    OperationResult result = checkSdOperationSpace(
+        plan.requiredFreeBytes - kStorageOperationalFloorBytes,
+        kStorageOperationalFloorBytes);
+    if (!result.success) {
+        return result;
+    }
     result = writeAtomicJsonSdFile(
         projectChatAppendMarkerPath(projectId, chatId), transaction);
     if (!result.success) {
         return {false, "Failed to stage project chat append: " + result.error};
     }
-    const String historyPath = projectChatHistoryPath(projectId, chatId);
     File historyFile = SD.open(historyPath, FILE_APPEND);
     if (!historyFile) {
         return {false, "Failed to open project chat raw history for append"};
+    }
+    const std::size_t oldHistoryBytes = historyFile.size();
+    if (oldHistoryBytes != currentHistoryBytes) {
+        historyFile.close();
+        return {false, "Project chat raw history changed after append preflight"};
     }
     for (std::size_t index = 0; index < messages.size() && result.success; ++index) {
         result = writeHistoryMessage(
@@ -509,32 +1221,16 @@ OperationResult appendProjectChatMessages(const String& projectId,
         return {false, result.error +
                        "; pending append recovery will validate the raw history"};
     }
-    std::deque<SequencedMessage> tail;
-    std::size_t tailBytes = 0;
-    const std::uint32_t firstSequence = current.chat.summary.messageCount -
-        static_cast<std::uint32_t>(current.chat.messages.size()) + 1;
-    for (std::size_t index = 0; index < current.chat.messages.size(); ++index) {
-        tailBytes += current.chat.messages[index].content.size();
-        tail.push_back({firstSequence + static_cast<std::uint32_t>(index),
-                        current.chat.messages[index]});
-    }
-    for (std::size_t index = 0; index < messages.size(); ++index) {
-        tailBytes += messages[index].content.size();
-        tail.push_back({current.chat.summary.messageCount +
-                            static_cast<std::uint32_t>(index) + 1,
-                        messages[index]});
-        while (tail.size() > kStoredTailMessages || tailBytes > kStoredTailBytes) {
-            tailBytes -= tail.front().message.content.size();
-            tail.pop_front();
-        }
-    }
-    result = writeTailFile(projectChatTailPath(projectId, chatId), tail);
+    result = updateTailAfterAppend(
+        projectId, chatId, current.chat.summary.messageCount,
+        current.chat.summary.messageCount + appendedMessages,
+        oldHistoryBytes);
     if (!result.success) {
         return result;
     }
-    ChatDocument updated = current.chat;
+    ChatDocument updated = std::move(current.chat);
     updated.messages.clear();
-    updated.summary.messageCount += static_cast<std::uint32_t>(messages.size());
+    updated.summary.messageCount += appendedMessages;
     updated.summary.updatedAt = updatedAt;
     ++updated.summary.revision;
     result = writeProjectChatMetadata(updated);
@@ -551,7 +1247,7 @@ OperationResult appendProjectChatMessages(const String& projectId,
 
 OperationResult clearProjectChatHistory(const String& projectId, const String& chatId)
 {
-    const ChatDocumentResult current = loadProjectChat(projectId, chatId, 1, 1);
+    const ChatDocumentResult current = loadProjectChatMetadata(projectId, chatId);
     if (!current.success) {
         return {false, current.error};
     }
@@ -577,7 +1273,7 @@ OperationResult clearProjectChatHistory(const String& projectId, const String& c
 
 OperationResult deleteProjectChat(const String& projectId, const String& chatId)
 {
-    const ChatDocumentResult current = loadProjectChat(projectId, chatId, 1, 1);
+    const ChatDocumentResult current = loadProjectChatMetadata(projectId, chatId);
     if (!current.success) {
         return {false, current.error};
     }
@@ -598,7 +1294,7 @@ OperationResult deleteProjectChat(const String& projectId, const String& chatId)
 
 ChatDocumentResult duplicateProjectChat(const String& projectId, const String& chatId)
 {
-    const ChatDocumentResult source = loadProjectChat(projectId, chatId, 1, 1);
+    const ChatDocumentResult source = loadProjectChatMetadata(projectId, chatId);
     if (!source.success) {
         return source;
     }
@@ -654,43 +1350,211 @@ ArchivedMessagesPageResult readProjectChatMessages(const String& projectId,
         maximumMessages == 0 || maximumBytes == 0) {
         return {false, {}, offset, true, "Project chat page arguments are invalid"};
     }
+    const OperationResult recovered = recoverPendingAppend(projectId, chatId);
+    if (!recovered.success) {
+        return {false, {}, offset, true, recovered.error};
+    }
     File history = SD.open(projectChatHistoryPath(projectId, chatId), FILE_READ);
     if (!history) {
         return {false, {}, offset, true, "Project chat raw history does not exist"};
     }
-    if (offset > history.size() || !history.seek(offset)) {
+    const std::size_t sourceBytes = history.size();
+    if (sourceBytes > UINT32_MAX || offset > sourceBytes || !history.seek(offset)) {
         history.close();
         return {false, {}, offset, true, "Project chat page offset is outside raw history"};
     }
+    BufferedFileReader reader(history);
     std::vector<Message> messages;
-    messages.reserve(maximumMessages);
+    try {
+        messages.reserve(maximumMessages);
+    } catch (const std::bad_alloc&) {
+        history.close();
+        return {false, {}, offset, true,
+                "Failed to allocate the project chat page"};
+    }
+    JsonDocument headerFilter;
+    headerFilter["sequence"] = true;
+    headerFilter["role"] = true;
     std::size_t bytes = 0;
-    while (history.available() && messages.size() < maximumMessages) {
-        const std::uint32_t lineOffset = history.position();
-        const String line = history.readStringUntil('\n');
-        if (line.isEmpty()) {
-            continue;
-        }
-        JsonDocument record;
-        const DeserializationError error = deserializeJson(record, line);
-        if (error || !record["role"].is<const char*>() ||
-            !record["content"].is<const char*>()) {
+    std::uint32_t previousSequence = 0;
+    while (messages.size() < maximumMessages && reader.prepareRecord()) {
+        const std::size_t recordPosition = reader.position();
+        JsonDocument header;
+        const DeserializationError headerError = deserializeJson(
+            header, reader, DeserializationOption::Filter(headerFilter));
+        const bool validHeaderTypes = !headerError &&
+            header["sequence"].is<std::uint32_t>() &&
+            header["role"].is<const char*>();
+        const std::uint32_t sequence = validHeaderTypes
+            ? header["sequence"].as<std::uint32_t>() : 0;
+        const char* roleValue = validHeaderTypes
+            ? header["role"].as<const char*>() : nullptr;
+        const String role = roleValue == nullptr ? String() : String(roleValue);
+        const bool validSequence = sequence != 0 &&
+            (previousSequence == 0
+                ? (offset != 0 || sequence == 1)
+                : (previousSequence != UINT32_MAX &&
+                   sequence == previousSequence + 1));
+        if (reader.failed() || reader.recordLimitExceeded() ||
+            !validHeaderTypes || !validSequence ||
+            (role != "user" && role != "assistant")) {
             history.close();
             return {false, {}, offset, true, "Project chat page contains an invalid record"};
         }
-        Message message = {record["role"].as<const char*>(),
-                           record["content"].as<const char*>()};
-        if (bytes + message.content.size() > maximumBytes && !messages.empty()) {
-            history.seek(lineOffset);
-            break;
+        if (!reader.seek(recordPosition)) {
+            history.close();
+            return {false, {}, offset, true,
+                    "Failed to rewind the project chat page record"};
         }
-        bytes += message.content.size();
-        messages.push_back(std::move(message));
+        json_reader::JsonStringValueResult content =
+            json_reader::readObjectStringField(
+                reader, "content", 64, kStoredTailBytes);
+        if (!content.success || reader.failed() ||
+            reader.recordLimitExceeded() || !reader.consumeRecordDelimiter() ||
+            content.value.empty() || !isValidUtf8(content.value)) {
+            history.close();
+            return {false, {}, offset, true,
+                    "Project chat page content or delimiter is invalid"};
+        }
+        if (!messages.empty() &&
+            (bytes > maximumBytes ||
+             content.value.size() > maximumBytes - bytes)) {
+            if (!reader.seek(recordPosition)) {
+                history.close();
+                return {false, {}, offset, true,
+                        "Failed to restore the project chat page cursor"};
+            }
+            const std::uint32_t nextOffset =
+                static_cast<std::uint32_t>(recordPosition);
+            history.close();
+            return {true, std::move(messages), nextOffset, false, ""};
+        }
+        bytes += content.value.size();
+        messages.push_back({role, std::move(content.value)});
+        previousSequence = sequence;
     }
-    const std::uint32_t nextOffset = history.position();
-    const bool eof = !history.available();
+    if (reader.failed() || reader.recordLimitExceeded()) {
+        history.close();
+        return {false, {}, offset, true, "Failed to read the project chat page"};
+    }
+    const std::size_t logicalPosition = reader.position();
+    if (logicalPosition > UINT32_MAX) {
+        history.close();
+        return {false, {}, offset, true,
+                "Project chat page cursor exceeds the supported range"};
+    }
+    const std::uint32_t nextOffset = static_cast<std::uint32_t>(logicalPosition);
+    const bool eof = logicalPosition >= sourceBytes;
     history.close();
     return {true, std::move(messages), nextOffset, eof, ""};
+}
+
+IndexedMessagesPageResult readProjectChatMessagesByIndex(
+    const String& projectId,
+    const String& chatId,
+    std::uint32_t firstMessageIndex,
+    std::size_t maximumMessages,
+    std::size_t maximumBytes)
+{
+    if (!isValidChatId(projectId.c_str()) || !isValidChatId(chatId.c_str()) ||
+        maximumMessages == 0 || maximumBytes == 0) {
+        return {false, {}, firstMessageIndex, true,
+                "Project chat indexed page arguments are invalid"};
+    }
+    const OperationResult recovered = recoverPendingAppend(projectId, chatId);
+    if (!recovered.success) {
+        return {false, {}, firstMessageIndex, true, recovered.error};
+    }
+    const ProjectChatMetadataStateResult metadata = readProjectChatMetadataState(
+        projectId, chatId);
+    if (!metadata.success) {
+        return {false, {}, firstMessageIndex, true, metadata.error};
+    }
+    if (firstMessageIndex > metadata.messageCount) {
+        return {false, {}, firstMessageIndex, true,
+                "Project chat message index is outside raw history"};
+    }
+    if (firstMessageIndex == metadata.messageCount) {
+        return {true, {}, firstMessageIndex, true, ""};
+    }
+    File history = SD.open(projectChatHistoryPath(projectId, chatId), FILE_READ);
+    if (!history) {
+        return {false, {}, firstMessageIndex, true,
+                "Project chat raw history does not exist"};
+    }
+    BufferedFileReader reader(history);
+    std::vector<Message> messages;
+    try {
+        messages.reserve(maximumMessages);
+    } catch (const std::bad_alloc&) {
+        history.close();
+        return {false, {}, firstMessageIndex, true,
+                "Failed to allocate the project chat indexed page"};
+    }
+    JsonDocument headerFilter;
+    headerFilter["sequence"] = true;
+    headerFilter["role"] = true;
+    std::uint32_t messageIndex = 0;
+    std::size_t contentBytes = 0;
+    while (reader.prepareRecord()) {
+        if (messageIndex >= firstMessageIndex && messages.size() >= maximumMessages) {
+            history.close();
+            return {true, std::move(messages), messageIndex, false, ""};
+        }
+        const std::size_t recordPosition = reader.position();
+        JsonDocument header;
+        const DeserializationError headerError = deserializeJson(
+            header, reader, DeserializationOption::Filter(headerFilter));
+        const std::uint32_t sequence = headerError
+            ? 0 : header["sequence"].as<std::uint32_t>();
+        const char* roleValue = headerError
+            ? nullptr : header["role"].as<const char*>();
+        const String role = roleValue == nullptr ? String() : String(roleValue);
+        if (reader.failed() || reader.recordLimitExceeded() || headerError ||
+            sequence != messageIndex + 1 ||
+            (role != "user" && role != "assistant")) {
+            history.close();
+            return {false, {}, firstMessageIndex, true,
+                    "Project chat indexed page contains an invalid record"};
+        }
+        if (messageIndex < firstMessageIndex) {
+            if (!reader.consumeRecordDelimiter()) {
+                history.close();
+                return {false, {}, firstMessageIndex, true,
+                        "Project chat indexed page prefix has an invalid delimiter"};
+            }
+            ++messageIndex;
+            continue;
+        }
+        if (!reader.seek(recordPosition)) {
+            history.close();
+            return {false, {}, firstMessageIndex, true,
+                    "Failed to rewind the project chat indexed record"};
+        }
+        json_reader::JsonStringValueResult content =
+            json_reader::readObjectStringField(
+                reader, "content", 64, kStoredTailBytes);
+        if (!content.success || !reader.consumeRecordDelimiter()) {
+            history.close();
+            return {false, {}, firstMessageIndex, true,
+                    "Project chat indexed page content is invalid"};
+        }
+        if (contentBytes + content.value.size() > maximumBytes && !messages.empty()) {
+            history.close();
+            return {true, std::move(messages), messageIndex, false, ""};
+        }
+        contentBytes += content.value.size();
+        messages.push_back({role, std::move(content.value)});
+        ++messageIndex;
+    }
+    const bool validEnd = !reader.failed() &&
+        messageIndex == metadata.messageCount;
+    history.close();
+    if (!validEnd) {
+        return {false, {}, firstMessageIndex, true,
+                "Project chat indexed page ended before metadata count"};
+    }
+    return {true, std::move(messages), messageIndex, true, ""};
 }
 
 OperationResult exportProjectChatMarkdown(const String& projectId,
@@ -700,7 +1564,7 @@ OperationResult exportProjectChatMarkdown(const String& projectId,
     if (!isValidWorkspaceFilename(filename.c_str())) {
         return {false, "Project chat export filename is invalid"};
     }
-    const ChatDocumentResult chat = loadProjectChat(projectId, chatId, 1, 1);
+    const ChatDocumentResult chat = loadProjectChatMetadata(projectId, chatId);
     if (!chat.success) {
         return {false, chat.error};
     }
@@ -722,9 +1586,11 @@ OperationResult exportProjectChatMarkdown(const String& projectId,
         }
     }
     if (result.success) {
-        output.print("# ");
-        output.println(chat.chat.summary.title);
-        output.println();
+        const String titleLine = "# " + chat.chat.summary.title;
+        if (output.print(titleLine) != titleLine.length() || output.write('\n') != 1 ||
+            output.write('\n') != 1) {
+            result = {false, "Failed to write complete staged Markdown chat export"};
+        }
     }
     while (history.available() && result.success) {
         const String line = history.readStringUntil('\n');
@@ -738,11 +1604,17 @@ OperationResult exportProjectChatMarkdown(const String& projectId,
             result = {false, "Project chat history is invalid during Markdown export"};
             break;
         }
-        output.print("## ");
-        output.println(String(record["role"].as<const char*>()) == "user" ? "You" : "AI");
-        output.println();
-        output.println(record["content"].as<const char*>());
-        output.println();
+        const String roleLine = String("## ") +
+            (String(record["role"].as<const char*>()) == "user" ? "You" : "AI");
+        const char* content = record["content"].as<const char*>();
+        const std::size_t contentBytes = std::strlen(content);
+        if (output.print(roleLine) != roleLine.length() || output.write('\n') != 1 ||
+            output.write('\n') != 1 ||
+            output.write(reinterpret_cast<const std::uint8_t*>(content), contentBytes) !=
+                contentBytes ||
+            output.write('\n') != 1 || output.write('\n') != 1) {
+            result = {false, "Failed to write complete staged Markdown chat export"};
+        }
     }
     history.close();
     if (output) {
@@ -750,7 +1622,9 @@ OperationResult exportProjectChatMarkdown(const String& projectId,
         output.close();
     }
     if (!result.success) {
-        SD.remove(stagedPath);
+        if (SD.exists(stagedPath) && !SD.remove(stagedPath)) {
+            result.error += "; failed to remove staged Markdown chat export";
+        }
         return result;
     }
     return commitStagedSdFile(target, stagedPath);
@@ -855,16 +1729,13 @@ OperationResult importLegacyChatToProject(const String& projectId,
     return {true, ""};
 }
 
-ChatDocumentResult loadProjectChat(const String& projectId,
-                                   const String& chatId,
-                                   std::size_t maximumTailMessages,
-                                   std::size_t maximumTailBytes)
+namespace {
+
+ChatDocumentResult loadProjectChatMetadataDocument(const String& projectId,
+                                                   const String& chatId)
 {
     if (!isValidChatId(projectId.c_str()) || !isValidChatId(chatId.c_str())) {
         return {false, {}, "Cannot load project chat with an invalid id"};
-    }
-    if (maximumTailMessages == 0 || maximumTailBytes == 0) {
-        return {false, {}, "Project chat tail limits must be greater than zero"};
     }
     const OperationResult recovered = recoverPendingAppend(projectId, chatId);
     if (!recovered.success) {
@@ -874,7 +1745,8 @@ ChatDocumentResult loadProjectChat(const String& projectId,
     if (!metadata) {
         return {false, {}, "Project chat metadata does not exist"};
     }
-    ChatDocumentResult result = parseProjectChatMetadata(metadata, projectId, chatId);
+    ChatDocumentResult result = parseProjectChatMetadata(
+        metadata, projectId, chatId, projectChatMetadataPath(projectId, chatId));
     metadata.close();
     if (!result.success) {
         return result;
@@ -886,54 +1758,210 @@ ChatDocumentResult loadProjectChat(const String& projectId,
             return {false, {}, rebuilt.error};
         }
     }
-    File history = SD.open(projectChatTailPath(projectId, chatId), FILE_READ);
-    if (!history) {
-        return {false, {}, "Project chat context tail does not exist"};
-    }
-    std::deque<Message> tail;
-    std::size_t tailBytes = 0;
-    std::uint32_t lastSequence = 0;
-    while (history.available()) {
-        const String line = history.readStringUntil('\n');
-        if (line.isEmpty()) {
-            continue;
+    result.chat.messages.clear();
+    return result;
+}
+
+TailSourceScanResult scanProjectChatTail(const String& projectId,
+                                         const String& chatId,
+                                         std::uint32_t messageCount)
+{
+    TailSourceScanResult scanned = scanTailSource(
+        projectChatTailPath(projectId, chatId), 0, TailRecordSource::ExistingTail);
+    const bool exactMetadata = scanned.success && scanned.recordCount <= messageCount &&
+        ((messageCount == 0 && scanned.recordCount == 0) ||
+         (messageCount > 0 && scanned.recordCount > 0 &&
+          scanned.lastSequence == messageCount &&
+          scanned.firstSequence == messageCount - scanned.recordCount + 1));
+    if (!exactMetadata) {
+        scanned.success = false;
+        if (scanned.error.isEmpty()) {
+            scanned.error = "Project chat context tail does not match metadata";
         }
-        JsonDocument item;
-        const DeserializationError error = deserializeJson(item, line);
-        if (error || !item["sequence"].is<std::uint32_t>() ||
-            !item["role"].is<const char*>() || !item["content"].is<const char*>()) {
+    }
+    return scanned;
+}
+
+}  // namespace
+
+ChatDocumentResult loadProjectChatMetadata(const String& projectId,
+                                           const String& chatId)
+{
+    ChatDocumentResult result = loadProjectChatMetadataDocument(projectId, chatId);
+    if (!result.success) {
+        return result;
+    }
+    const TailSourceScanResult scanned = scanProjectChatTail(
+        projectId, chatId, result.chat.summary.messageCount);
+    if (!scanned.success) {
+        return {false, {}, "Project chat context tail is invalid: " + scanned.error};
+    }
+    return result;
+}
+
+ChatDocumentResult loadProjectChat(const String& projectId,
+                                   const String& chatId,
+                                   std::size_t maximumTailMessages,
+                                   std::size_t maximumTailBytes)
+{
+    if (!isValidChatId(projectId.c_str()) || !isValidChatId(chatId.c_str())) {
+        return {false, {}, "Cannot load project chat with an invalid id"};
+    }
+    if (maximumTailMessages == 0 || maximumTailBytes == 0) {
+        return {false, {}, "Project chat tail limits must be greater than zero"};
+    }
+    ChatDocumentResult result = loadProjectChatMetadataDocument(projectId, chatId);
+    if (!result.success) {
+        return result;
+    }
+    const String tailPath = projectChatTailPath(projectId, chatId);
+    const TailSourceScanResult scanned = scanProjectChatTail(
+        projectId, chatId, result.chat.summary.messageCount);
+    if (!scanned.success) {
+        return {false, {}, "Project chat context tail is invalid: " + scanned.error};
+    }
+    const std::size_t retainedMessageCapacity =
+        maximumTailMessages < kStoredTailMessages
+            ? maximumTailMessages
+            : kStoredTailMessages;
+    std::size_t selectedCount = 0;
+    std::size_t selectedBytes = 0;
+    std::size_t selectedFirst = scanned.retained.first;
+    while (selectedCount < scanned.retained.count &&
+           selectedCount < retainedMessageCapacity) {
+        const std::size_t slot =
+            (scanned.retained.first + scanned.retained.count - selectedCount - 1) %
+            kStoredTailMessages;
+        const TailRecordSpan& candidate = scanned.retained.records[slot];
+        if (selectedCount > 0 &&
+            (selectedBytes > maximumTailBytes ||
+             candidate.contentBytes > maximumTailBytes - selectedBytes)) {
+            break;
+        }
+        selectedBytes += candidate.contentBytes;
+        selectedFirst = slot;
+        ++selectedCount;
+    }
+    if (selectedCount == 0) {
+        result.chat.messages.clear();
+        return result;
+    }
+    File history = SD.open(tailPath, FILE_READ);
+    if (!history || history.size() != scanned.sourceBytes ||
+        !history.seek(scanned.retained.records[selectedFirst].offset)) {
+        if (history) history.close();
+        return {false, {}, "Failed to open the selected project chat context tail"};
+    }
+    BufferedFileReader reader(history);
+    std::vector<Message> tail;
+    try {
+        tail.reserve(selectedCount);
+    } catch (const std::bad_alloc&) {
+        history.close();
+        return {false, {}, "Failed to allocate the project chat tail message list"};
+    }
+    JsonDocument headerFilter;
+    headerFilter["sequence"] = true;
+    headerFilter["role"] = true;
+    for (std::size_t selectedIndex = 0;
+         selectedIndex < selectedCount; ++selectedIndex) {
+        if (!reader.prepareRecord()) {
+            history.close();
+            return {false, {}, "Project chat context tail ended before its selected suffix"};
+        }
+        const std::size_t recordPosition = reader.position();
+        const std::size_t selectedSlot =
+            (selectedFirst + selectedIndex) % kStoredTailMessages;
+        const TailRecordSpan& expectedSpan = scanned.retained.records[selectedSlot];
+        std::uint32_t sequence = 0;
+        String role;
+        DeserializationError error;
+        {
+            JsonDocument header;
+            error = deserializeJson(
+                header, reader, DeserializationOption::Filter(headerFilter));
+            if (!error && header["sequence"].is<std::uint32_t>() &&
+                header["role"].is<const char*>()) {
+                sequence = header["sequence"].as<std::uint32_t>();
+                role = header["role"].as<const char*>();
+            }
+        }
+        if (reader.failed()) {
+            history.close();
+            return {false, {}, "Failed to read the project chat context tail"};
+        }
+        if (reader.recordLimitExceeded()) {
+            history.close();
+            return {false, {}, "Project chat context tail record exceeds its serialized limit"};
+        }
+        if (error) {
+            history.close();
+            return {false, {},
+                    "Project chat context tail header parse failed: " +
+                        String(error.c_str())};
+        }
+        if (sequence == 0 || role.isEmpty()) {
             history.close();
             return {false, {}, "Project chat raw history contains an invalid typed record"};
         }
-        Message message = {item["role"].as<const char*>(), item["content"].as<const char*>()};
-        const std::uint32_t sequence = item["sequence"].as<std::uint32_t>();
-        if ((lastSequence != 0 && sequence != lastSequence + 1) ||
-            sequence == 0 || sequence > result.chat.summary.messageCount ||
-            (message.role != "user" && message.role != "assistant") ||
+        const std::uint32_t expectedSequence =
+            scanned.lastSequence - static_cast<std::uint32_t>(selectedCount) + 1 +
+            static_cast<std::uint32_t>(selectedIndex);
+        if (recordPosition != expectedSpan.offset || sequence != expectedSequence ||
+            (role != "user" && role != "assistant")) {
+            history.close();
+            return {false, {}, "Project chat raw history sequence or message is invalid"};
+        }
+        if (!reader.seek(recordPosition)) {
+            history.close();
+            return {false, {}, "Failed to rewind the project chat context tail record"};
+        }
+        json_reader::JsonStringValueResult content =
+            json_reader::readObjectStringField(
+                reader, "content", 64, kStoredTailBytes);
+        if (!content.success) {
+            history.close();
+            if (reader.failed()) {
+                return {false, {}, "Failed to read the project chat context tail content"};
+            }
+            if (reader.recordLimitExceeded()) {
+                return {false, {},
+                        "Project chat context tail record exceeds its serialized limit"};
+            }
+            return {false, {}, "Project chat context tail content is invalid: " +
+                                       content.error};
+        }
+        if (!reader.consumeRecordDelimiter()) {
+            history.close();
+            if (reader.failed()) {
+                return {false, {}, "Failed to read the project chat context tail delimiter"};
+            }
+            if (reader.recordLimitExceeded()) {
+                return {false, {},
+                        "Project chat context tail record exceeds its serialized limit"};
+            }
+            return {false, {}, "Project chat context tail record has an invalid delimiter"};
+        }
+        Message message = {role, std::move(content.value)};
+        if (message.content.size() != expectedSpan.contentBytes ||
             message.content.empty() || !isValidUtf8(message.content)) {
             history.close();
             return {false, {}, "Project chat raw history sequence or message is invalid"};
         }
-        lastSequence = sequence;
-        tailBytes += message.content.size();
         tail.push_back(std::move(message));
-        while (tail.size() > maximumTailMessages || tailBytes > maximumTailBytes) {
-            tailBytes -= tail.front().content.size();
-            tail.pop_front();
-        }
+    }
+    if (reader.failed() || reader.position() != scanned.sourceBytes) {
+        history.close();
+        return {false, {}, "Failed to finish reading the project chat context tail"};
     }
     history.close();
-    if (result.chat.summary.messageCount > 0 &&
-        lastSequence != result.chat.summary.messageCount) {
-        return {false, {}, "Project chat context tail does not end at metadata count"};
-    }
-    result.chat.messages.assign(tail.begin(), tail.end());
+    result.chat.messages = std::move(tail);
     return result;
 }
 
 OperationResult validateProjectChat(const String& projectId, const String& chatId)
 {
-    const ChatDocumentResult loaded = loadProjectChat(projectId, chatId, 1, 1);
+    const ChatDocumentResult loaded = loadProjectChatMetadata(projectId, chatId);
     if (!loaded.success) {
         return {false, loaded.error};
     }
@@ -950,8 +1978,8 @@ OperationResult cloneProjectChat(const String& sourceProjectId,
         sourceProjectId == destinationProjectId) {
         return {false, "Cannot clone chat with invalid or identical project ids"};
     }
-    const ChatDocumentResult source = loadProjectChat(
-        sourceProjectId, chatId, 1, 1);
+    const ChatDocumentResult source = loadProjectChatMetadata(
+        sourceProjectId, chatId);
     if (!source.success) {
         return {false, source.error};
     }
@@ -994,7 +2022,7 @@ OperationResult writeProjectChatBundleRecords(File& output,
     if (!output) {
         return {false, "Project bundle output is not open"};
     }
-    const ChatDocumentResult loaded = loadProjectChat(projectId, chatId, 1, 1);
+    const ChatDocumentResult loaded = loadProjectChatMetadata(projectId, chatId);
     if (!loaded.success) {
         return {false, loaded.error};
     }
@@ -1054,7 +2082,7 @@ OperationResult writeProjectChatBundleRecords(File& output,
 StorageSizeResult measureProjectChatBundleRecords(const String& projectId,
                                                   const String& chatId)
 {
-    const ChatDocumentResult loaded = loadProjectChat(projectId, chatId, 1, 1);
+    const ChatDocumentResult loaded = loadProjectChatMetadata(projectId, chatId);
     if (!loaded.success) {
         return {false, 0, loaded.error};
     }
@@ -1139,28 +2167,83 @@ OperationResult importProjectChatBundleRecords(File& input,
         return cleanupFailedChatImport(chatDirectory,
                                        "Failed to stage imported project chat history");
     }
+    BufferedFileReader reader(input);
+    JsonDocument headerFilter;
+    headerFilter["record"] = true;
+    headerFilter["chat_id"] = true;
+    headerFilter["sequence"] = true;
+    headerFilter["role"] = true;
     for (std::uint32_t expectedSequence = 1;
          expectedSequence <= messageCount && result.success; ++expectedSequence) {
-        if (!input.available()) {
+        if (!reader.prepareRecord()) {
             result = {false, "Project bundle ended before all chat messages were read"};
             break;
         }
-        const String line = input.readStringUntil('\n');
-        JsonDocument record;
-        const DeserializationError error = deserializeJson(record, line);
-        if (error || !record["record"].is<const char*>() ||
-            String(record["record"].as<const char*>()) != "message" ||
-            !record["chat_id"].is<const char*>() ||
-            String(record["chat_id"].as<const char*>()) != metadata.summary.id ||
-            !record["sequence"].is<std::uint32_t>() ||
-            record["sequence"].as<std::uint32_t>() != expectedSequence ||
-            !record["role"].is<const char*>() || !record["content"].is<const char*>()) {
-            result = {false, "Project bundle contains an invalid chat message record"};
+        const std::size_t recordPosition = reader.position();
+        String role;
+        {
+            JsonDocument header;
+            const DeserializationError error = deserializeJson(
+                header, reader, DeserializationOption::Filter(headerFilter));
+            if (reader.recordLimitExceeded()) {
+                result = {false,
+                          "Project bundle chat message exceeds the 786560-byte record limit"};
+                break;
+            }
+            if (reader.failed()) {
+                result = {false, "Failed to read the project bundle chat message header"};
+                break;
+            }
+            const char* recordType = error ? nullptr : header["record"].as<const char*>();
+            const char* sourceChatId = error ? nullptr : header["chat_id"].as<const char*>();
+            const char* roleValue = error ? nullptr : header["role"].as<const char*>();
+            if (error || recordType == nullptr ||
+                std::strcmp(recordType, "message") != 0 || sourceChatId == nullptr ||
+                metadata.summary.id != sourceChatId ||
+                !header["sequence"].is<std::uint32_t>() ||
+                header["sequence"].as<std::uint32_t>() != expectedSequence ||
+                roleValue == nullptr ||
+                (std::strcmp(roleValue, "user") != 0 &&
+                 std::strcmp(roleValue, "assistant") != 0)) {
+                result = {false, "Project bundle contains an invalid chat message record"};
+                break;
+            }
+            role = roleValue;
+        }
+        if (!reader.seek(recordPosition)) {
+            result = {false, "Failed to rewind the project bundle chat message"};
+            break;
+        }
+        json_reader::JsonStringValueResult content =
+            json_reader::readObjectStringField(
+                reader, "content", 64, kStoredTailBytes);
+        if (!content.success) {
+            if (reader.failed()) {
+                result = {false, "Failed to read the project bundle chat message content"};
+            } else if (reader.recordLimitExceeded()) {
+                result = {false,
+                          "Project bundle chat message exceeds the 786560-byte record limit"};
+            } else {
+                result = {false, "Project bundle chat message content is invalid: " +
+                                     content.error};
+            }
+            break;
+        }
+        if (content.value.empty() || !isValidUtf8(content.value)) {
+            result = {false, "Project bundle chat message content is invalid"};
+            break;
+        }
+        if (!reader.consumeRecordDelimiter()) {
+            result = {false, reader.failed()
+                ? String("Failed to read the project bundle chat message delimiter")
+                : String("Project bundle chat message has an invalid delimiter")};
             break;
         }
         result = writeHistoryMessage(
-            staged, expectedSequence,
-            {record["role"].as<const char*>(), record["content"].as<const char*>()});
+            staged, expectedSequence, {role, std::move(content.value)});
+    }
+    if (result.success && !reader.seek(reader.position())) {
+        result = {false, "Failed to align the project bundle after chat import"};
     }
     staged.flush();
     staged.close();

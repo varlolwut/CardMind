@@ -15,8 +15,8 @@ the device; it does not run alongside Bruce or another firmware.
 - Voice input through a configurable OpenAI-compatible transcription endpoint and
   optional spoken replies through a configurable TTS service.
 - Model-assisted web search and page extraction through an optional search service.
-- A Shared microSD workspace with nested UTF-8 paths, explicit project links, and files
-  up to 256 MiB using bounded viewing, editing, upload, download, and SFTP transfers.
+- A Shared microSD workspace with nested UTF-8 paths, explicit project links, paginated
+  file lists, and bounded viewing, editing, upload, download, and SFTP transfers.
 - Standalone SSH terminal and SFTP browser on the Cardputer and in the protected Web
   console.
 - A MicroPython mode for small scripts stored in the same microSD workspace that
@@ -52,8 +52,10 @@ described in [Getting started](docs/getting-started.md).
 - Raw chat history is retained on microSD. Each project has a configurable 8–256 KiB
   request-context budget and optional model-generated compaction; compaction never
   deletes the original turns.
-- A workspace file is limited to 256 MiB. Text editors expose one bounded window at a
-  time; uploads, downloads, search, copying, and SFTP are streamed.
+- Workspace file count and size have no CardMind-specific ceiling. Available microSD
+  capacity, filesystem limits, 32-bit file offsets, and the safe free-space reserve are
+  the effective limits. Text editors expose one bounded window at a time; uploads,
+  downloads, search, copying, and SFTP are streamed.
 - Cardputer ADV has no PSRAM. Memory-heavy network operations are deliberately
   serialized.
 

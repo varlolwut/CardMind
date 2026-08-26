@@ -2,15 +2,17 @@
 
 #include "app_types.h"
 
+#include <limits>
+
 namespace cardputer {
 
-constexpr std::uint32_t kMaximumWorkspaceFileBytes = 268435456;
+constexpr std::uint32_t kMaximumWorkspaceFileBytes =
+    std::numeric_limits<std::uint32_t>::max();
 constexpr std::size_t kMaximumWorkspaceToolChunkBytes = 12288;
 constexpr std::size_t kMaximumWorkspaceFiles = 4096;
 
 OperationResult initializeFileWorkspace();
 OperationResult ensureWorkspaceFileParent(const String& name);
-WorkspaceFilesResult listWorkspaceFiles();
 WorkspaceFilesPageResult listWorkspaceFilesPage(std::uint32_t offset,
                                                 std::size_t maximumEntries);
 WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
