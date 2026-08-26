@@ -7,7 +7,7 @@ param(
     [int]$BaudRate,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("status", "sd-mount", "audio", "offline", "online", "p1", "p2-storage", "p2-migration", "p2-migration-exact", "p2-projects", "p2-chats", "p2-context", "p2-summary", "p2-limits", "p2-archive", "p2-file", "p2-binary", "web-console-start", "web-console-cycle", "full")]
+    [ValidateSet("status", "sd-mount", "audio", "offline", "online", "p1", "p2-storage", "p2-migration", "p2-migration-exact", "p2-projects", "p2-chats", "p2-context", "p2-summary", "p2-limits", "p2-archive", "p2-file", "p2-binary", "hotfix-message", "hotfix-latency", "hotfix-device-ui", "web-console-start", "web-console-cycle", "full")]
     [string]$Suite,
 
     [Parameter(Mandatory = $true)]
@@ -301,6 +301,15 @@ $p2BinaryCases = @(
     (New-RegressionCase -Name "binary transfer and text-tool boundary" -Command "P2BINARYTEST$p2DiagnosticNonce" -CompletionPattern "^P2BINARYTEST result=(?:pass|failed) nonce=$p2DiagnosticNonce " -PassPattern "^P2BINARYTEST result=pass nonce=$p2DiagnosticNonce matrix=pass ui=pass read=pass write=pass append=pass nonmutation=pass cleanup=pass error=none$" -TimeoutSeconds 90)
 )
 
+$hotfixLatencyCases = @(
+    (New-RegressionCase -Name "project and chat navigation latency" -Command "HOTFIXNAVTEST" -CompletionPattern "^HOTFIXNAVTEST result=" -PassPattern "^HOTFIXNAVTEST result=pass iterations=8 projects_ms=[0-9]+ chats_ms=[0-9]+ average_ms=[0-9]+ error=none$" -TimeoutSeconds 30)
+)
+$hotfixDeviceUiCases = @(
+    (New-RegressionCase -Name "device chat input latency" -Command "HOTFIXINPUTTEST" -CompletionPattern "^HOTFIXINPUTTEST result=" -PassPattern "^HOTFIXINPUTTEST result=pass full_average_us=[0-9]+ input_average_us=[0-9]+ error=none$" -TimeoutSeconds 30),
+    (New-RegressionCase -Name "project and chat navigation latency" -Command "HOTFIXNAVTEST" -CompletionPattern "^HOTFIXNAVTEST result=" -PassPattern "^HOTFIXNAVTEST result=pass iterations=8 projects_ms=[0-9]+ chats_ms=[0-9]+ average_ms=[0-9]+ error=none$" -TimeoutSeconds 30),
+    (New-RegressionCase -Name "microSD read and recovery guards" -Command "HOTFIXSDTEST" -CompletionPattern "^HOTFIXSDTEST result=" -PassPattern "^HOTFIXSDTEST result=pass removed=pass replaced=pass nonmutation=pass error=none$" -TimeoutSeconds 20)
+)
+
 $sdMountCases = @(
     (New-RegressionCase -Name "SD remount" -Command "SDMOUNTTEST" -CompletionPattern "^SDMOUNTTEST result=" -PassPattern "^SDMOUNTTEST result=pass card_type=[1-9][0-9]* total_bytes=[1-9][0-9]* used_bytes=[0-9]+ error=none$" -TimeoutSeconds 20)
 )
@@ -349,6 +358,15 @@ try {
     }
     if ($Suite -eq "online" -or $Suite -eq "full") {
         $cases.AddRange([object[]]$onlineCases)
+    }
+    if ($Suite -eq "hotfix-message") {
+        $cases.Add($onlineCases[6])
+    }
+    if ($Suite -eq "hotfix-latency") {
+        $cases.AddRange([object[]]$hotfixLatencyCases)
+    }
+    if ($Suite -eq "hotfix-device-ui") {
+        $cases.AddRange([object[]]$hotfixDeviceUiCases)
     }
     if ($Suite -eq "p1") {
         $cases.AddRange([object[]]$p1Cases)

@@ -2385,6 +2385,8 @@ void handleKeyboard()
         return;
     }
 
+    const std::string previousChatInput = inputBuffer;
+    const String previousChatStatus = statusMessage;
     if (keys.fn && keys.f1) {
         menuStatus = "";
         openChatList(Screen::Chat);
@@ -2432,7 +2434,18 @@ void handleKeyboard()
     } else if (!keys.fn && !keys.ctrl && !keys.alt && !keys.opt) {
         appendKeyboardWord(printableNewKeys(newPresses));
     }
-    render();
+    if (inputBuffer != previousChatInput && statusMessage == previousChatStatus) {
+        const std::uint32_t now = millis();
+        lastDraftEditAt = now;
+        if (inputBuffer == persistedDraft) {
+            draftDirtySinceAt = 0;
+        } else if (draftDirtySinceAt == 0) {
+            draftDirtySinceAt = now;
+        }
+        cardputer::updateChatInput(inputBuffer);
+    } else {
+        render();
+    }
 }
 
 }  // namespace
