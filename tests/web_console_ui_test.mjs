@@ -22,10 +22,10 @@ const consoleSourcePath = new URL(
     import.meta.url,
 );
 const page = readFileSync(pagePath, "utf8").replace(/\r\n/g, "\n");
-const header = readFileSync(headerPath, "utf8");
-const routes = readFileSync(routesPath, "utf8");
-const stateBuilder = readFileSync(statePath, "utf8");
-const consoleSource = readFileSync(consoleSourcePath, "utf8");
+const header = readFileSync(headerPath, "utf8").replace(/\r\n/g, "\n");
+const routes = readFileSync(routesPath, "utf8").replace(/\r\n/g, "\n");
+const stateBuilder = readFileSync(statePath, "utf8").replace(/\r\n/g, "\n");
+const consoleSource = readFileSync(consoleSourcePath, "utf8").replace(/\r\n/g, "\n");
 const compressed = Buffer.from(
     [...header.matchAll(/0x([0-9a-f]{2})/g)]
         .map((match) => Number.parseInt(match[1], 16)),
