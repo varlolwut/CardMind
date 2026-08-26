@@ -974,6 +974,7 @@ ChatResult streamChatCompletionWithToolsAndBudget(
         return {false, "", "Output token budget must be between 128 and 16384"};
     }
     std::vector<ToolRound> rounds;
+    rounds.reserve(kMaximumToolRounds);
     std::string completeResponse;
     std::size_t toolOutputBytes = 0;
     std::size_t roundIndex = 0;

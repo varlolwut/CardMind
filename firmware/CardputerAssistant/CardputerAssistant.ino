@@ -57,7 +57,8 @@ constexpr std::size_t kMaximumInputBytes = 16384;
 constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
 constexpr std::uint32_t kBatteryRefreshIntervalMs = 30000;
-constexpr std::uint32_t kDraftAutosaveIntervalMs = 2000;
+constexpr std::uint32_t kDraftAutosaveIdleMs = 1500;
+constexpr std::uint32_t kDraftAutosaveMaximumDirtyMs = 30000;
 constexpr std::uint32_t kSdStateRefreshIntervalMs = 1000;
 constexpr std::size_t kFileViewerChunkBytes = 2048;
 constexpr std::size_t kFileViewerPageLines = 8;
@@ -128,6 +129,8 @@ std::vector<String> availableModels;
 std::string inputBuffer;
 std::string persistedDraft;
 std::uint32_t lastDraftAutosaveAt = 0;
+std::uint32_t lastDraftEditAt = 0;
+std::uint32_t draftDirtySinceAt = 0;
 std::string activeResponse;
 std::string retryPrompt;
 String retryChatId;
@@ -474,6 +477,7 @@ cardputer::OperationResult saveCurrentChat()
     const cardputer::OperationResult result = cardputer::saveProjectChatMetadata(loaded.chat);
     if (result.success) {
         persistedDraft = inputBuffer;
+        draftDirtySinceAt = 0;
     }
     return result;
 }
@@ -559,6 +563,8 @@ cardputer::OperationResult activateChat(const String& id)
     inputBuffer = loaded.chat.draft;
     persistedDraft = inputBuffer;
     lastDraftAutosaveAt = millis();
+    lastDraftEditAt = lastDraftAutosaveAt;
+    draftDirtySinceAt = 0;
     scrollOffset = 0;
     return {true, ""};
 }
@@ -586,6 +592,8 @@ cardputer::OperationResult createAndActivateChat()
     inputBuffer.clear();
     persistedDraft.clear();
     lastDraftAutosaveAt = millis();
+    lastDraftEditAt = lastDraftAutosaveAt;
+    draftDirtySinceAt = 0;
     scrollOffset = 0;
     cardputer::ProjectDocumentResult project = cardputer::loadProject(activeProjectId);
     if (!project.success) {
@@ -645,7 +653,7 @@ cardputer::OperationResult refreshProjectPage(std::uint32_t offset)
 
 cardputer::OperationResult activateProject(const String& projectId)
 {
-    if (!activeChatId.isEmpty()) {
+    if (!activeChatId.isEmpty() && inputBuffer != persistedDraft) {
         const cardputer::SdStorageStatus storage = cardputer::inspectSdStorage();
         if (storage.state == cardputer::SdStorageState::Ready) {
             const cardputer::OperationResult saved = saveCurrentChat();
@@ -1017,7 +1025,7 @@ void renderChatInstructions()
 
 void openChatList(Screen returnScreen)
 {
-    if (chatStorageReady && !activeChatId.isEmpty()) {
+    if (chatStorageReady && !activeChatId.isEmpty() && inputBuffer != persistedDraft) {
         const cardputer::OperationResult saved = saveCurrentChat();
         if (!saved.success) {
             statusMessage = saved.error;
@@ -1625,12 +1633,14 @@ void executeStoredPromptRequest(const std::string& prompt,
 
 void submitPrompt()
 {
+    const std::uint32_t submitStartedAt = millis();
     if (inputBuffer.empty()) {
         statusMessage = "Type a message before pressing Enter";
         render();
         return;
     }
     ensureNetworkReady();
+    const std::uint32_t networkReadyAt = millis();
     if (WiFi.status() != WL_CONNECTED || std::time(nullptr) < 1700000000) {
         render();
         return;
@@ -1645,8 +1655,11 @@ void submitPrompt()
         render();
         return;
     }
+    statusMessage = "Saving message...";
+    render();
     const cardputer::OperationResult writeAccess = cardputer::requireSdWriteAccess(
         0, cardputer::kStorageOperationalFloorBytes);
+    const std::uint32_t writeAccessReadyAt = millis();
     if (!writeAccess.success) {
         statusMessage = writeAccess.error;
         render();
@@ -1665,6 +1678,7 @@ void submitPrompt()
         cardputer::loadProject(activeProjectId);
     const cardputer::ChatDocumentResult storedChat = cardputer::loadProjectChatMetadata(
         activeProjectId, activeChatId);
+    const std::uint32_t storageLoadedAt = millis();
     if (!activeProject.success || !storedChat.success) {
         statusMessage = activeProject.success ? storedChat.error : activeProject.error;
         render();
@@ -1679,12 +1693,14 @@ void submitPrompt()
     pendingHistory.push_back({"user", prompt});
     cardputer::ContextWindowResult pendingFit = cardputer::fitMessagesToByteBudget(
         pendingHistory, requestPolicy.contextByteBudget);
+    const std::uint32_t contextReadyAt = millis();
     const String pendingTitle = history.empty()
         ? String(cardputer::makeChatTitle(prompt, cardputer::kMaximumChatTitleCells).c_str())
         : activeChatTitle;
     const cardputer::OperationResult pendingSave = cardputer::appendProjectChatMessages(
         activeProjectId, activeChatId, {{"user", prompt}}, currentChatTimestamp(),
         settings.projectChatHistoryQuotaBytes);
+    const std::uint32_t promptSavedAt = millis();
     if (!pendingSave.success) {
         statusMessage = pendingSave.error;
         render();
@@ -1694,11 +1710,21 @@ void submitPrompt()
     activeChatTitle = pendingTitle;
     inputBuffer.clear();
     const cardputer::OperationResult pendingMetadataSave = saveCurrentChat();
+    const std::uint32_t metadataSavedAt = millis();
     if (!pendingMetadataSave.success) {
         statusMessage = pendingMetadataSave.error;
         render();
         return;
     }
+    Serial.printf(
+        "INFO event=chat_submit_timing network_ms=%u access_ms=%u load_ms=%u context_ms=%u append_ms=%u metadata_ms=%u total_ms=%u\n",
+        static_cast<unsigned int>(networkReadyAt - submitStartedAt),
+        static_cast<unsigned int>(writeAccessReadyAt - networkReadyAt),
+        static_cast<unsigned int>(storageLoadedAt - writeAccessReadyAt),
+        static_cast<unsigned int>(contextReadyAt - storageLoadedAt),
+        static_cast<unsigned int>(promptSavedAt - contextReadyAt),
+        static_cast<unsigned int>(metadataSavedAt - promptSavedAt),
+        static_cast<unsigned int>(metadataSavedAt - submitStartedAt));
     std::string requestInstructions = consumeRequestInstructionsOverride(activeChatId);
     executeStoredPromptRequest(
         prompt, activeProject.project, storedChat.chat,
@@ -2063,19 +2089,25 @@ void loop()
         lastTimerRenderAt = millis();
         renderTimerMenu();
     }
+    if (currentScreen == Screen::Chat && M5Cardputer.BtnA.wasPressed()) {
+        handleVoiceInput();
+    } else {
+        handleKeyboard();
+    }
+    const std::uint32_t now = millis();
+    const bool draftIdle = now - lastDraftEditAt >= kDraftAutosaveIdleMs;
+    const bool draftSaveRetryReady =
+        now - lastDraftAutosaveAt >= kDraftAutosaveIdleMs;
+    const bool draftMaximumAgeReached = draftDirtySinceAt != 0 &&
+        now - draftDirtySinceAt >= kDraftAutosaveMaximumDirtyMs;
     if (currentScreen == Screen::Chat && inputBuffer != persistedDraft &&
-        millis() - lastDraftAutosaveAt >= kDraftAutosaveIntervalMs) {
-        lastDraftAutosaveAt = millis();
+        draftSaveRetryReady && (draftIdle || draftMaximumAgeReached)) {
+        lastDraftAutosaveAt = now;
         const cardputer::OperationResult saved = saveCurrentChat();
         if (!saved.success) {
             statusMessage = "Draft autosave failed: " + saved.error;
             render();
         }
-    }
-    if (currentScreen == Screen::Chat && M5Cardputer.BtnA.wasPressed()) {
-        handleVoiceInput();
-    } else {
-        handleKeyboard();
     }
     delay(5);
 }
