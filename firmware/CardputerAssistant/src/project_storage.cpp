@@ -835,10 +835,6 @@ OperationResult saveProject(const ProjectDocument& project)
 
 OperationResult deleteProject(const String& id)
 {
-    const ProjectDocumentResult loaded = loadProject(id);
-    if (!loaded.success) {
-        return {false, loaded.error};
-    }
     const StorageIndexLookupResult previous = findJsonlSdIndexEntry(kProjectsIndex, "id", id);
     if (!previous.success || !previous.found) {
         return {false, previous.success ? String("Project index entry is missing") : previous.error};
