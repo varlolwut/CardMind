@@ -163,6 +163,7 @@ bool webSshHostChanged = false;
 std::uint32_t webSshConnectMs = 0;
 std::uint32_t webSshAuthenticateMs = 0;
 std::uint32_t webSshOpenMs = 0;
+std::uint32_t webSshWorkerStackFree = 0;
 bool webSshAwaitingTrust = false;
 bool webSshTerminalOpen = false;
 bool consoleEscapeConsumed = false;
@@ -326,6 +327,16 @@ void releaseConsoleSessionState()
     std::string().swap(failedWebRequestInstructions);
     failedWebRequestInstructionsChatId = String();
     failedWebRequestOutputTokens = 0;
+}
+
+void releaseActiveDocuments()
+{
+    ChatDocument releasedChat;
+    ProjectDocument releasedProject;
+    using std::swap;
+    swap(activeChat, releasedChat);
+    swap(activeProject, releasedProject);
+    std::string().swap(activeResponse);
 }
 
 void failUpload(const String& error)
@@ -886,13 +897,13 @@ std::size_t activeProjectTailByteBudget()
 OperationResult loadActiveChat(const String& id)
 {
     const std::uint32_t startedAt = millis();
-    const ChatDocumentResult loaded = loadProjectChat(
+    ChatDocumentResult loaded = loadProjectChat(
         activeProject.summary.id, id, 96, activeProjectTailByteBudget());
     recordWebSdRead(millis() - startedAt);
     if (!loaded.success) {
         return {false, loaded.error};
     }
-    activeChat = loaded.chat;
+    activeChat = std::move(loaded.chat);
     activeResponse.clear();
     ++chatRevision;
     return {true, ""};
@@ -921,13 +932,22 @@ OperationResult saveActiveChatSelection(const String& chatId)
     stored.project.activeChatId = chatId;
     const OperationResult result = saveProject(stored.project);
     if (result.success) {
-        activeProject = stored.project;
+        activeProject = std::move(stored.project);
     }
     return result;
 }
 
 OperationResult selectActiveProject(const String& id)
 {
+    if (activeProject.summary.id != id) {
+        const auto project = std::find_if(
+            consoleProjects.begin(), consoleProjects.end(),
+            [&id](const ProjectSummary& summary) { return summary.id == id; });
+        if (project == consoleProjects.end()) {
+            return {false, "Requested project is absent from the project index"};
+        }
+        releaseActiveDocuments();
+    }
     ProjectDocumentResult loaded = loadProject(id);
     if (!loaded.success) {
         return {false, loaded.error};
@@ -945,7 +965,7 @@ OperationResult selectActiveProject(const String& id)
             return result;
         }
     }
-    activeProject = loaded.project;
+    activeProject = std::move(loaded.project);
     ++projectRevision;
     result = refreshChats();
     if (!result.success) {
@@ -956,12 +976,13 @@ OperationResult selectActiveProject(const String& id)
     } else if (!consoleChats.empty()) {
         result = loadActiveChat(consoleChats.front().id);
     } else {
-        const ChatDocumentResult created = createProjectChat(id, "New chat");
+        ChatDocumentResult created = createProjectChat(id, "New chat");
         if (!created.success) {
             return {false, created.error};
         }
-        activeChat = created.chat;
-        result = saveActiveChatSelection(created.chat.summary.id);
+        const String createdId = created.chat.summary.id;
+        activeChat = std::move(created.chat);
+        result = saveActiveChatSelection(createdId);
         if (result.success) {
             ++chatRevision;
             ++projectRevision;
@@ -1369,6 +1390,7 @@ void handleState()
         std::uint32_t connectMs = 0;
         std::uint32_t authenticateMs = 0;
         std::uint32_t openMs = 0;
+        std::uint32_t workerStackFree = 0;
         portENTER_CRITICAL(&webSshStateMux);
         stage = webSshStage;
         std::memcpy(error, webSshError, sizeof(error));
@@ -1378,6 +1400,7 @@ void handleState()
         connectMs = webSshConnectMs;
         authenticateMs = webSshAuthenticateMs;
         openMs = webSshOpenMs;
+        workerStackFree = webSshWorkerStackFree;
         portEXIT_CRITICAL(&webSshStateMux);
         document["ssh_stage"] = webSshStageName(stage);
         document["ssh_error"] = error;
@@ -1387,6 +1410,7 @@ void handleState()
         document["ssh_connect_ms"] = connectMs;
         document["ssh_authenticate_ms"] = authenticateMs;
         document["ssh_open_ms"] = openMs;
+        document["ssh_worker_stack_free"] = workerStackFree;
     } else if (view == "settings") {
         buildWebConsoleSettingsState(consoleSettings, runtime, settingsRevision,
                                      document);
@@ -1821,10 +1845,10 @@ void handleRenameProject()
     OperationResult result = renameProject(
         activeProject.summary.id, server.arg("title"));
     if (result.success) {
-        const ProjectDocumentResult loaded = loadProject(activeProject.summary.id);
+        ProjectDocumentResult loaded = loadProject(activeProject.summary.id);
         result = loaded.success ? OperationResult{true, ""}
                                 : OperationResult{false, loaded.error};
-        if (loaded.success) activeProject = loaded.project;
+        if (loaded.success) activeProject = std::move(loaded.project);
     }
     if (result.success) result = refreshProjects();
     if (!result.success) {
@@ -1872,10 +1896,10 @@ void handleArchiveProject()
     const bool archived = server.arg("archived") == "1";
     OperationResult result = setProjectArchived(activeProject.summary.id, archived);
     if (result.success) {
-        const ProjectDocumentResult loaded = loadProject(activeProject.summary.id);
+        ProjectDocumentResult loaded = loadProject(activeProject.summary.id);
         result = loaded.success ? OperationResult{true, ""}
                                 : OperationResult{false, loaded.error};
-        if (loaded.success) activeProject = loaded.project;
+        if (loaded.success) activeProject = std::move(loaded.project);
     }
     if (result.success) result = refreshProjects();
     if (!result.success) {
@@ -1994,15 +2018,16 @@ void handleNewChat()
         return;
     }
     const std::uint32_t startedAt = millis();
-    const ChatDocumentResult created = createProjectChat(
+    ChatDocumentResult created = createProjectChat(
         activeProject.summary.id, "New chat");
     recordWebSdWrite(millis() - startedAt);
     if (!created.success) {
         sendWebJsonError(server, 400, created.error);
         return;
     }
-    activeChat = created.chat;
-    OperationResult result = saveActiveChatSelection(created.chat.summary.id);
+    const String createdId = created.chat.summary.id;
+    activeChat = std::move(created.chat);
+    OperationResult result = saveActiveChatSelection(createdId);
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
@@ -2287,15 +2312,16 @@ void handleDuplicateChat()
         return;
     }
     const std::uint32_t startedAt = millis();
-    const ChatDocumentResult duplicated = duplicateProjectChat(
+    ChatDocumentResult duplicated = duplicateProjectChat(
         activeProject.summary.id, activeChat.summary.id);
     recordWebSdWrite(millis() - startedAt);
     if (!duplicated.success) {
         sendWebJsonError(server, 500, duplicated.error);
         return;
     }
-    activeChat = duplicated.chat;
-    OperationResult selected = saveActiveChatSelection(duplicated.chat.summary.id);
+    const String duplicatedId = duplicated.chat.summary.id;
+    activeChat = std::move(duplicated.chat);
+    OperationResult selected = saveActiveChatSelection(duplicatedId);
     if (!selected.success) {
         sendWebJsonError(server, 500, selected.error);
         return;
@@ -2416,14 +2442,15 @@ void handleDeleteChat()
         return;
     }
     if (consoleChats.empty()) {
-        const ChatDocumentResult created = createProjectChat(
+        ChatDocumentResult created = createProjectChat(
             activeProject.summary.id, "New chat");
         if (!created.success) {
             sendWebJsonError(server, 500, created.error);
             return;
         }
-        activeChat = created.chat;
-        result = saveActiveChatSelection(created.chat.summary.id);
+        const String createdId = created.chat.summary.id;
+        activeChat = std::move(created.chat);
+        result = saveActiveChatSelection(createdId);
         if (!result.success) {
             sendWebJsonError(server, 500, result.error);
             return;
@@ -2864,6 +2891,7 @@ void completeWebSshWorker(WebSshStage stage, const String& error,
     }
     publishWebSshStage(stage, error);
     portENTER_CRITICAL(&webSshStateMux);
+    webSshWorkerStackFree = uxTaskGetStackHighWaterMark(nullptr);
     webSshTask = nullptr;
     webSshCancelRequested = false;
     portEXIT_CRITICAL(&webSshStateMux);
@@ -2871,6 +2899,7 @@ void completeWebSshWorker(WebSshStage stage, const String& error,
 
 void runWebSshWorker(void* parameter)
 {
+    vTaskDelay(pdMS_TO_TICKS(25));
     const bool authenticateOnly = reinterpret_cast<std::uintptr_t>(parameter) == 1U;
     OperationResult result = {true, ""};
     if (!authenticateOnly) {
@@ -2906,6 +2935,7 @@ void runWebSshWorker(void* parameter)
             webSshHostChanged = trust.found && !trust.matches;
             webSshAwaitingTrust = true;
             webSshStage = WebSshStage::AwaitingTrust;
+            webSshWorkerStackFree = uxTaskGetStackHighWaterMark(nullptr);
             webSshTask = nullptr;
             portEXIT_CRITICAL(&webSshStateMux);
             vTaskDelete(nullptr);
@@ -2963,7 +2993,7 @@ OperationResult startWebSshWorker(bool authenticateOnly)
     TaskHandle_t task = nullptr;
     vTaskSuspendAll();
     const BaseType_t created = xTaskCreate(
-        runWebSshWorker, "web-ssh-connect", 12288,
+        runWebSshWorker, "web-ssh-connect", 8192,
         reinterpret_cast<void*>(authenticateOnly ? 1U : 0U), 1, &task);
     if (created == pdPASS && task != nullptr) {
         portENTER_CRITICAL(&webSshStateMux);
@@ -3002,6 +3032,7 @@ void handleSshStart()
     webSshConnectMs = 0;
     webSshAuthenticateMs = 0;
     webSshOpenMs = 0;
+    webSshWorkerStackFree = 0;
     webSshFingerprint[0] = '\0';
     webSshHostKeyType[0] = '\0';
     webSshHostChanged = false;
@@ -3802,11 +3833,11 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         result = selectActiveProject(manifest.manifest.activeProjectId);
         if (result.success && !initialChatId.isEmpty() &&
             initialChatId != activeChat.summary.id) {
-            const ChatDocumentResult requested = loadProjectChat(
+            ChatDocumentResult requested = loadProjectChat(
                 activeProject.summary.id, initialChatId, 96,
                 activeProjectTailByteBudget());
             if (requested.success) {
-                activeChat = requested.chat;
+                activeChat = std::move(requested.chat);
                 result = saveActiveChatSelection(initialChatId);
                 if (result.success) {
                     ++chatRevision;
