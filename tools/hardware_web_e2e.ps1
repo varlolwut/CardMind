@@ -7,7 +7,7 @@ param(
     [int]$BaudRate,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("projects", "retry", "compaction", "summary-regeneration", "context-history", "context-history-orphan-recover", "archive-quota", "archive-quota-recover", "binary-text", "binary-text-recover", "history-heap", "limits", "chat-scale", "workspace-scale", "file-scale", "unicode-path", "shared-isolation", "large-stream", "atomic-failure", "version-history", "sd-degraded", "instructions", "request-settings", "diagnostics", "ssh", "full")]
+    [ValidateSet("projects", "retry", "compaction", "summary-regeneration", "context-history", "context-history-orphan-recover", "archive-quota", "archive-quota-recover", "binary-text", "binary-text-recover", "history-heap", "limits", "chat-scale", "workspace-scale", "file-scale", "unicode-path", "shared-isolation", "large-stream", "atomic-failure", "version-history", "sd-degraded", "instructions", "request-settings", "diagnostics", "ssh", "workspace-tool", "full")]
     [string]$Suite,
 
     [Parameter(Mandatory = $true)]

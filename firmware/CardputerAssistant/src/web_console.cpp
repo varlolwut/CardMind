@@ -1473,19 +1473,30 @@ void streamStoredWebPrompt(const ChatDocument& storedChat,
     };
     markOperation(chatToolPolicyIsEnabled(toolPolicy)
         ? "web_console_tools" : "web_console_chat");
+    bool workspaceFilesChanged = false;
     const ChatResult result = chatToolPolicyIsEnabled(toolPolicy)
         ? streamChatCompletionWithToolsAndBudget(
               requestSettings, requestFit.retained, effectiveInstructions,
               toolPolicy.sshEnabled, requestPolicy.maximumOutputTokens, onText,
-              [&toolPolicy, &isCancelled](const ToolCall& call) {
-                  return routeProjectToolCall(
+              [&toolPolicy, &isCancelled,
+               &workspaceFilesChanged](const ToolCall& call) {
+                  ToolExecutionResult executed = routeProjectToolCall(
                       consoleSettings, toolPolicy, activeProject.summary.id, call,
                       isCancelled);
+                  if (executed.success &&
+                      (call.name == "write_file" || call.name == "append_file")) {
+                      workspaceFilesChanged = true;
+                  }
+                  return executed;
               }, isCancelled)
         : streamChatCompletionWithBudget(
               requestSettings, requestFit.retained, effectiveInstructions,
               requestPolicy.maximumOutputTokens, onText, isCancelled);
     markOperation("idle");
+    if (workspaceFilesChanged) {
+        filesIndexReady = false;
+        ++filesRevision;
+    }
     if (!result.success) {
         consoleStatus = result.error;
         activeResponse = result.response;
@@ -1746,13 +1757,17 @@ void handleNewProject()
                          "Project title must be valid UTF-8 up to 120 bytes");
         return;
     }
-    const ProjectDocumentResult created = createProject(title.c_str());
-    if (!created.success) {
-        sendWebJsonError(server, 500, created.error);
-        return;
+    String createdId;
+    {
+        const ProjectDocumentResult created = createProject(title.c_str());
+        if (!created.success) {
+            sendWebJsonError(server, 500, created.error);
+            return;
+        }
+        createdId = created.project.summary.id;
     }
-    OperationResult result = selectActiveProject(created.project.summary.id);
-    if (result.success) result = refreshProjects();
+    OperationResult result = refreshProjects();
+    if (result.success) result = selectActiveProject(createdId);
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
@@ -1869,14 +1884,18 @@ void handleDuplicateProject()
     }
     String title = server.arg("title");
     if (title.isEmpty()) title = activeProject.summary.title + " copy";
-    const ProjectDocumentResult duplicated = duplicateProject(
-        activeProject.summary.id, title);
-    if (!duplicated.success) {
-        sendWebJsonError(server, 500, duplicated.error);
-        return;
+    String duplicatedId;
+    {
+        const ProjectDocumentResult duplicated = duplicateProject(
+            activeProject.summary.id, title);
+        if (!duplicated.success) {
+            sendWebJsonError(server, 500, duplicated.error);
+            return;
+        }
+        duplicatedId = duplicated.project.summary.id;
     }
-    OperationResult result = selectActiveProject(duplicated.project.summary.id);
-    if (result.success) result = refreshProjects();
+    OperationResult result = refreshProjects();
+    if (result.success) result = selectActiveProject(duplicatedId);
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
@@ -2402,15 +2421,19 @@ void handleImportChatBundle()
         return;
     }
     const std::uint32_t startedAt = millis();
-    const ProjectDocumentResult imported = importProjectBundle(server.arg("name"));
-    recordWebSdWrite(millis() - startedAt);
-    if (!imported.success) {
-        sendWebJsonError(server, 400, imported.error);
-        return;
+    String importedId;
+    {
+        const ProjectDocumentResult imported = importProjectBundle(server.arg("name"));
+        recordWebSdWrite(millis() - startedAt);
+        if (!imported.success) {
+            sendWebJsonError(server, 400, imported.error);
+            return;
+        }
+        importedId = imported.project.summary.id;
     }
     OperationResult refreshed = refreshProjects();
     if (refreshed.success) {
-        refreshed = selectActiveProject(imported.project.summary.id);
+        refreshed = selectActiveProject(importedId);
     }
     if (!refreshed.success) {
         sendWebJsonError(server, 500, refreshed.error);
