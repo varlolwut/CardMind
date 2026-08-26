@@ -175,18 +175,13 @@ void addWorkspaceTools(JsonDocument& document)
     listTool["type"] = "function";
     listTool["function"]["name"] = "list_files";
     listTool["function"]["description"] =
-        "List one bounded page of user-visible UTF-8 text files in the Cardputer "
+        "List up to 16 user-visible UTF-8 text files from one page of the Cardputer "
         "microSD workspace. Continue with next_offset until eof=true.";
     listTool["function"]["parameters"]["type"] = "object";
     listTool["function"]["parameters"]["properties"]["offset"]["type"] = "integer";
     listTool["function"]["parameters"]["properties"]["offset"]["minimum"] = 0;
     listTool["function"]["parameters"]["properties"]["offset"]["description"] =
         "Omit or use 0 for the first page, then pass the previous next_offset.";
-    listTool["function"]["parameters"]["properties"]["max_entries"]["type"] = "integer";
-    listTool["function"]["parameters"]["properties"]["max_entries"]["minimum"] = 1;
-    listTool["function"]["parameters"]["properties"]["max_entries"]["maximum"] = 16;
-    listTool["function"]["parameters"]["properties"]["max_entries"]["description"] =
-        "Maximum source entries to inspect in this page; omitted means 16.";
     listTool["function"]["parameters"]["additionalProperties"] = false;
 
     JsonObject readTool = tools.add<JsonObject>();
@@ -985,6 +980,9 @@ ChatResult streamChatCompletionWithToolsAndBudget(
     std::size_t missingRequiredToolRetries = 0;
     const bool requiresInitialWorkspaceTool =
         requestsWorkspaceAccess(history.back().content);
+    const bool requiresSuccessfulWorkspaceWrite =
+        requestsWorkspaceWrite(history.back().content);
+    bool completedWorkspaceWrite = false;
     while (roundIndex <= kMaximumToolRounds) {
         if (ESP.getFreeHeap() < kMinimumRequestHeapBytes) {
             return {false, completeResponse, "Not enough free heap to continue tool request safely"};
@@ -1023,6 +1021,10 @@ ChatResult streamChatCompletionWithToolsAndBudget(
                 return {false, completeResponse,
                         "Model did not call the required workspace tool after 2 attempts"};
             }
+            if (requiresSuccessfulWorkspaceWrite && !completedWorkspaceWrite) {
+                return {false, completeResponse,
+                        "Model did not complete the required workspace file write"};
+            }
             if (turn.response.empty()) {
                 return {false, completeResponse, "Tool-enabled completion ended without response text"};
             }
@@ -1051,10 +1053,6 @@ ChatResult streamChatCompletionWithToolsAndBudget(
                 return {false, completeResponse,
                         "Tool executor returned empty or invalid UTF-8 output"};
             }
-            if (!result.success) {
-                return {false, completeResponse,
-                        "Tool '" + String(call.name.c_str()) + "' failed: " + result.error};
-            }
             if (result.output.size() > kMaximumToolOutputBytes - toolOutputBytes) {
                 return {false, completeResponse,
                         "Tool output exceeded the 32768-byte conversation limit"};
@@ -1062,6 +1060,10 @@ ChatResult streamChatCompletionWithToolsAndBudget(
             toolOutputBytes += result.output.size();
             Serial.printf("INFO event=tool_execution name=%s result=%s\n",
                           call.name.c_str(), result.success ? "ok" : "failed");
+            if (result.success &&
+                (call.name == "write_file" || call.name == "append_file")) {
+                completedWorkspaceWrite = true;
+            }
             round.results.push_back(std::move(result));
         }
         rounds.push_back(std::move(round));
