@@ -26,6 +26,10 @@ project bundle.
   configured context budget. With automatic compaction enabled, CardMind summarizes
   omitted turns and includes that summary in later requests. Use **Regenerate context
   summary** in chat actions when a new summary is needed.
+- Raw chat archives have no fixed CardMind size ceiling. They grow within available
+  microSD capacity unless a per-chat history quota is configured. A write that would
+  exceed the quota or safe free-space reserve fails before changing the archive.
+  Device presets are Available capacity, 16, 64, 256, and 1024 MiB.
 
 ## Voice and speech
 
@@ -46,6 +50,28 @@ Files appear as ordinary documents: select a file, open it, move through the doc
 edit the visible text window, and save it. Nested UTF-8 paths are supported. Large
 files are streamed internally; the document remains one file rather than a set of
 user-visible parts. Storage and editing limits are listed in [Limits](limitations.md).
+
+Text editing, QR text display, and model text tools are limited to these
+case-insensitive extensions: `.txt`, `.md`, `.json`, `.jsonl`, `.csv`, `.html`,
+`.svg`, `.py`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.conf`, `.log`, `.xml`,
+`.css`, `.js`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.sh`, `.bash`, `.zsh`, `.c`, `.h`,
+`.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`, `.ino`, `.env`, `.properties`, and
+`.sql`. Other files are transfer-only: they can still be uploaded, downloaded,
+renamed, linked, unlinked, deleted, and transferred over SFTP without being decoded
+as text.
+
+Workspace file count and file size have no CardMind-specific ceiling. Lists are read in
+bounded pages, while available microSD capacity, filesystem limits, 32-bit file offsets,
+and the safe free-space reserve define the practical limits. The model's `list_files`
+tool reads at most 16 source entries per call and follows `next_offset` until `eof=true`;
+the complete directory is never accumulated in RAM.
+
+CardMind does not create automatic versions when a file is saved. A replacement is
+written to a target-specific `.tmp` file, the previous file is kept only as a
+short-lived `.bak` recovery copy, and both artifacts are removed after a verified
+commit. A rejected save keeps the current file unchanged and removes its staged data;
+after an interrupted commit, recovery preserves the last valid copy. Create an
+explicit backup when you need long-term version retention.
 
 Shared files are not exposed to a project automatically. Link a selected file to the
 active project before asking the model to read or append it. A file created by the

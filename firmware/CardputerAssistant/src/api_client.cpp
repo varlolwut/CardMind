@@ -1,5 +1,6 @@
 #include "api_client.h"
 
+#include "instruction_policy.h"
 #include "text_utils.h"
 
 #include <ArduinoJson.h>
@@ -153,18 +154,8 @@ String buildChatRequest(const Settings& settings,
     if (!settings.globalInstructions.isEmpty() || !instructions.empty()) {
         JsonObject system = messages.add<JsonObject>();
         system["role"] = "system";
-        String combined;
-        if (!settings.globalInstructions.isEmpty()) {
-            combined = "Global instructions supplied by the user:\n";
-            combined += settings.globalInstructions;
-        }
-        if (!instructions.empty()) {
-            if (!combined.isEmpty()) {
-                combined += "\n\n";
-            }
-            combined += "Chat-specific instructions override conflicting global instructions:\n";
-            combined += instructions.c_str();
-        }
+        const String combined = buildUserInstructionScopes(
+            settings.globalInstructions.c_str(), instructions).c_str();
         system["content"] = combined;
     }
     for (const auto& message : history) {
@@ -184,9 +175,18 @@ void addWorkspaceTools(JsonDocument& document)
     listTool["type"] = "function";
     listTool["function"]["name"] = "list_files";
     listTool["function"]["description"] =
-        "List user-visible UTF-8 text files in the Cardputer microSD workspace.";
+        "List one bounded page of user-visible UTF-8 text files in the Cardputer "
+        "microSD workspace. Continue with next_offset until eof=true.";
     listTool["function"]["parameters"]["type"] = "object";
-    listTool["function"]["parameters"]["properties"].to<JsonObject>();
+    listTool["function"]["parameters"]["properties"]["offset"]["type"] = "integer";
+    listTool["function"]["parameters"]["properties"]["offset"]["minimum"] = 0;
+    listTool["function"]["parameters"]["properties"]["offset"]["description"] =
+        "Omit or use 0 for the first page, then pass the previous next_offset.";
+    listTool["function"]["parameters"]["properties"]["max_entries"]["type"] = "integer";
+    listTool["function"]["parameters"]["properties"]["max_entries"]["minimum"] = 1;
+    listTool["function"]["parameters"]["properties"]["max_entries"]["maximum"] = 16;
+    listTool["function"]["parameters"]["properties"]["max_entries"]["description"] =
+        "Maximum source entries to inspect in this page; omitted means 16.";
     listTool["function"]["parameters"]["additionalProperties"] = false;
 
     JsonObject readTool = tools.add<JsonObject>();
@@ -212,7 +212,8 @@ void addWorkspaceTools(JsonDocument& document)
     writeTool["function"]["name"] = "write_file";
     writeTool["function"]["description"] =
         "Create or replace a downloadable UTF-8 text file with an initial chunk up to 12288 bytes. "
-        "Allowed extensions: .txt, .md, .json, .csv, .html, .svg, .py. "
+        "Use a safe text, source, or config extension; binary and unrecognized extensions are "
+        "transfer-only. "
         "MicroPython can run .py files from the same workspace. Use append_file for more content.";
     writeTool["function"]["parameters"]["type"] = "object";
     writeTool["function"]["parameters"]["properties"]["name"]["type"] = "string";
@@ -227,7 +228,8 @@ void addWorkspaceTools(JsonDocument& document)
     appendTool["function"]["name"] = "append_file";
     appendTool["function"]["description"] =
         "Atomically append a UTF-8 chunk up to 12288 bytes to an existing workspace file. "
-        "The final file may contain up to 256 MiB.";
+        "Only safe text, source, and config extensions are accepted. "
+        "The final file is bounded by available microSD space and supported 32-bit file offsets.";
     appendTool["function"]["parameters"]["type"] = "object";
     appendTool["function"]["parameters"]["properties"]["name"]["type"] = "string";
     appendTool["function"]["parameters"]["properties"]["content"]["type"] = "string";
@@ -338,14 +340,11 @@ String buildToolChatRequest(const Settings& settings,
             "Use ssh_command only for remote-machine work requested by the user. Report the command's "
             "non-zero exit status and never claim success when its output says otherwise.";
     }
-    if (!settings.globalInstructions.isEmpty()) {
-        systemPrompt += "\n\nGlobal instructions supplied by the user:\n";
-        systemPrompt += settings.globalInstructions;
-    }
-    if (!instructions.empty()) {
-        systemPrompt +=
-            "\n\nChat-specific instructions override conflicting global instructions:\n";
-        systemPrompt += instructions.c_str();
+    const std::string userInstructionScopes = buildUserInstructionScopes(
+        settings.globalInstructions.c_str(), instructions);
+    if (!userInstructionScopes.empty()) {
+        systemPrompt += "\n\n";
+        systemPrompt += userInstructionScopes.c_str();
     }
     system["content"] = systemPrompt;
     for (const auto& message : history) {
@@ -588,6 +587,65 @@ String transportError(const char* operation, int status, WiFiClientSecure& clien
     return error;
 }
 
+struct SerializedRequestFacts {
+    bool valid;
+    bool precedence;
+    bool model;
+    bool outputTokens;
+    bool tools;
+};
+
+SerializedRequestFacts inspectSerializedRequest(
+    const String& payload,
+    const ResolvedProjectRequestPolicy& policy,
+    const std::string& globalInstructions,
+    const std::string& projectInstructions,
+    const std::string& chatInstructions,
+    const std::string& requestInstructions,
+    const std::string& contextSummary,
+    bool expectTools)
+{
+    JsonDocument document;
+    if (deserializeJson(document, payload)) {
+        return {false, false, false, false, false};
+    }
+    const char* serializedModel = document["model"].as<const char*>();
+    const bool modelMatches = serializedModel != nullptr &&
+        policy.model == serializedModel;
+    const bool outputMatches = document["max_tokens"].is<std::uint32_t>() &&
+        document["max_tokens"].as<std::uint32_t>() == policy.maximumOutputTokens;
+    const JsonArrayConst tools = document["tools"].as<JsonArrayConst>();
+    const bool toolsMatch = expectTools ? !tools.isNull() && tools.size() > 0
+                                        : tools.isNull();
+    const JsonArrayConst messages = document["messages"].as<JsonArrayConst>();
+    const char* firstRole = messages.isNull() || messages.size() == 0
+        ? nullptr : messages[0]["role"].as<const char*>();
+    if (messages.isNull() || messages.size() == 0 ||
+        firstRole == nullptr || String(firstRole) != "system") {
+        return {false, false, modelMatches, outputMatches, toolsMatch};
+    }
+    const char* content = messages[0]["content"].as<const char*>();
+    if (content == nullptr) {
+        return {false, false, modelMatches, outputMatches, toolsMatch};
+    }
+    const std::string systemContent(content);
+    const std::size_t global = systemContent.find(globalInstructions);
+    const std::size_t project = systemContent.find(projectInstructions);
+    const std::size_t chat = systemContent.find(chatInstructions);
+    const std::size_t request = systemContent.find(requestInstructions);
+    const std::size_t summary = systemContent.find(contextSummary);
+    const bool ordered = global != std::string::npos && global < project &&
+        project < chat && chat < request && summary != std::string::npos &&
+        chat < summary && summary < request;
+    return {
+        modelMatches && outputMatches && toolsMatch && ordered,
+        ordered,
+        modelMatches,
+        outputMatches,
+        toolsMatch,
+    };
+}
+
 }  // namespace
 
 OperationResult connectToWifi(const Settings& settings)
@@ -682,6 +740,66 @@ ModelsResult fetchModels(const Settings& settings)
         return {false, {}, "/v1/models returned an empty model list"};
     }
     return {true, models, ""};
+}
+
+ChatRequestSerializationValidation validateChatRequestSerialization(
+    const Settings& settings,
+    const ResolvedProjectRequestPolicy& policy,
+    const std::string& globalInstructions,
+    const std::string& projectInstructions,
+    const std::string& chatInstructions,
+    const std::string& requestInstructions,
+    const std::string& contextSummary)
+{
+    if (globalInstructions.empty() || projectInstructions.empty() ||
+        chatInstructions.empty() || requestInstructions.empty() ||
+        contextSummary.empty()) {
+        return {false, false, false, false, false, false, false,
+                "Request serialization markers must not be empty"};
+    }
+    Settings fixtureSettings = settings;
+    fixtureSettings.model = policy.model;
+    fixtureSettings.globalInstructions = globalInstructions.c_str();
+    std::vector<Message> history = {{"user", "/file list request-contract"}};
+    const std::string scoped = buildScopedInstructions(
+        projectInstructions, chatInstructions, requestInstructions, contextSummary);
+    const String noToolPayload = buildChatRequest(
+        fixtureSettings, history, scoped, policy.maximumOutputTokens);
+    const SerializedRequestFacts noToolFacts = inspectSerializedRequest(
+        noToolPayload, policy, globalInstructions, projectInstructions,
+        chatInstructions, requestInstructions, contextSummary, false);
+    const String toolPayload = buildToolChatRequest(
+        fixtureSettings, history, scoped, false, policy.maximumOutputTokens, {});
+    const SerializedRequestFacts toolFacts = inspectSerializedRequest(
+        toolPayload, policy, globalInstructions, projectInstructions,
+        chatInstructions, requestInstructions, contextSummary, true);
+
+    const std::string inherited = buildScopedInstructions("", "", "", "");
+    const String inheritedPayload = buildChatRequest(
+        fixtureSettings, history, inherited, policy.maximumOutputTokens);
+    JsonDocument inheritedDocument;
+    const DeserializationError inheritedJson = deserializeJson(
+        inheritedDocument, inheritedPayload);
+    const char* inheritedContent = inheritedJson
+        ? nullptr : inheritedDocument["messages"][0]["content"].as<const char*>();
+    const std::string inheritedSystem = inheritedContent == nullptr
+        ? std::string() : std::string(inheritedContent);
+    const bool inheritance = inheritedContent != nullptr &&
+        inheritedSystem.find(globalInstructions) != std::string::npos &&
+        inheritedSystem.find("Project instructions supplied by the user") ==
+            std::string::npos &&
+        inheritedSystem.find("Chat-specific instructions") == std::string::npos &&
+        inheritedSystem.find("Instructions for this request") == std::string::npos;
+    const bool precedence = noToolFacts.precedence && toolFacts.precedence;
+    const bool model = noToolFacts.model && toolFacts.model;
+    const bool outputTokens = noToolFacts.outputTokens && toolFacts.outputTokens;
+    const bool noTools = noToolFacts.tools;
+    const bool tools = toolFacts.tools;
+    const bool success = precedence && inheritance && model && outputTokens &&
+        noTools && tools;
+    return {
+        success, precedence, inheritance, model, outputTokens, noTools, tools,
+        success ? String() : String("Serialized request contract validation failed")};
 }
 
 namespace {

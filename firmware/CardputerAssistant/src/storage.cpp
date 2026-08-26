@@ -10,6 +10,23 @@ namespace cardputer {
 namespace {
 
 constexpr const char* kNamespace = "assistant";
+constexpr const char* kSdVolumeIdentityKey = "sd_volume_id";
+constexpr std::size_t kSdVolumeIdentityBytes = 16;
+
+bool isValidSdVolumeIdentity(const String& identity)
+{
+    if (identity.length() != kSdVolumeIdentityBytes) {
+        return false;
+    }
+    for (std::size_t index = 0; index < identity.length(); ++index) {
+        const char character = identity[index];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
 
 OperationResult verifyStoredLength(std::size_t storedLength, std::size_t expectedLength, const char* field)
 {
@@ -42,6 +59,11 @@ bool isSafeTtsIdentifier(const String& value)
 
 }  // namespace
 
+bool isValidProjectChatHistoryQuota(std::uint32_t quotaBytes)
+{
+    return quotaBytes == 0 || quotaBytes >= kMinimumProjectChatHistoryQuotaBytes;
+}
+
 OperationResult loadSettings(Settings& settings)
 {
     Preferences preferences;
@@ -70,6 +92,7 @@ OperationResult loadSettings(Settings& settings)
         preferences.getUShort("sleep_min", 5),
         preferences.getUShort("key_repeat", 125),
         preferences.getUChar("power", 1),
+        preferences.getUInt("chat_quota", 0),
     };
     preferences.end();
     loaded.apiKey.trim();
@@ -154,6 +177,9 @@ OperationResult saveSettings(const Settings& settings)
     if (settings.powerProfile > 2) {
         return {false, "Power profile must be Performance, Balanced, or Saver"};
     }
+    if (!isValidProjectChatHistoryQuota(settings.projectChatHistoryQuotaBytes)) {
+        return {false, "Chat history quota must be 0 or at least 2 MiB"};
+    }
 
     Preferences preferences;
     if (!preferences.begin(kNamespace, false)) {
@@ -236,6 +262,10 @@ OperationResult saveSettings(const Settings& settings)
     if (result.success && preferences.putUChar("power", settings.powerProfile) != 1) {
         result = {false, "Failed to store power profile"};
     }
+    if (result.success &&
+        preferences.putUInt("chat_quota", settings.projectChatHistoryQuotaBytes) != 4) {
+        result = {false, "Failed to store project chat history quota"};
+    }
     if (result.success) {
         result = verifyStoredValue(preferences.getString("ssid", ""), settings.wifiSsid, "Wi-Fi SSID");
     }
@@ -310,6 +340,10 @@ OperationResult saveSettings(const Settings& settings)
     }
     if (result.success && preferences.getUChar("power", 255) != settings.powerProfile) {
         result = {false, "Failed to verify power profile after NVS write"};
+    }
+    if (result.success &&
+        preferences.getUInt("chat_quota", 1) != settings.projectChatHistoryQuotaBytes) {
+        result = {false, "Failed to verify project chat history quota after NVS write"};
     }
     preferences.end();
     return result;
@@ -392,6 +426,42 @@ OperationResult saveActiveChatId(const String& id)
     if (result.success) {
         result = verifyStoredValue(
             preferences.getString("active_chat", ""), id, "active chat id");
+    }
+    preferences.end();
+    return result;
+}
+
+OperationResult loadSdVolumeIdentity(String& identity)
+{
+    Preferences preferences;
+    if (!preferences.begin(kNamespace, true)) {
+        return {false, "Failed to open NVS namespace 'assistant' for microSD identity"};
+    }
+    const String loaded = preferences.getString(kSdVolumeIdentityKey, "");
+    preferences.end();
+    if (!loaded.isEmpty() && !isValidSdVolumeIdentity(loaded)) {
+        return {false, "Stored microSD identity is invalid"};
+    }
+    identity = loaded;
+    return {true, ""};
+}
+
+OperationResult saveSdVolumeIdentity(const String& identity)
+{
+    if (!isValidSdVolumeIdentity(identity)) {
+        return {false, "Cannot store an invalid microSD identity"};
+    }
+    Preferences preferences;
+    if (!preferences.begin(kNamespace, false)) {
+        return {false, "Failed to open NVS namespace 'assistant' for microSD identity write"};
+    }
+    OperationResult result = verifyStoredLength(
+        preferences.putString(kSdVolumeIdentityKey, identity),
+        identity.length(), "microSD identity");
+    if (result.success) {
+        result = verifyStoredValue(
+            preferences.getString(kSdVolumeIdentityKey, ""), identity,
+            "microSD identity");
     }
     preferences.end();
     return result;

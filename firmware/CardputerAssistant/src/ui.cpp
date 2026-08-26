@@ -920,7 +920,7 @@ void showFilenameEntry(const String& title,
     canvas->print(clippedLine(title, 30));
     canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     canvas->setCursor(5, 27);
-    canvas->print("ASCII name with extension:");
+    canvas->print("UTF-8 nested path:");
     canvas->drawRoundRect(4, 47, 232, 25, 4, TFT_DARKGREY);
     canvas->setTextColor(TFT_WHITE, TFT_BLACK);
     canvas->setCursor(9, 52);
@@ -929,16 +929,16 @@ void showFilenameEntry(const String& title,
     canvas->setTextColor(status.isEmpty() ? TFT_CYAN : TFT_YELLOW, TFT_BLACK);
     canvas->setCursor(5, 83);
     canvas->print(clippedLine(status.isEmpty()
-                                  ? String(".txt .md .json .csv .html .svg")
+                                  ? String("Transfer: any safe ext; text: .txt/.md/...")
                                   : status,
                               42));
     canvas->setCursor(5, 101);
     canvas->setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    canvas->print(String(input.size()) + "/180 bytes");
+    canvas->print(String(input.size()) + "/512 bytes");
     canvas->fillRect(0, 117, 240, 18, TFT_DARKGREY);
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(4, 120);
-    canvas->print("ENTER confirm   ESC cancel");
+    canvas->print("ENTER confirm ESC  Fn+3 lang");
     canvas->pushSprite(0, 0);
 }
 

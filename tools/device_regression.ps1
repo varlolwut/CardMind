@@ -7,7 +7,7 @@ param(
     [int]$BaudRate,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("audio", "offline", "online", "p1", "full")]
+    [ValidateSet("status", "sd-mount", "audio", "offline", "online", "p1", "p2-storage", "p2-migration", "p2-migration-exact", "p2-projects", "p2-chats", "p2-context", "p2-summary", "p2-limits", "p2-archive", "p2-file", "p2-binary", "web-console-start", "web-console-cycle", "full")]
     [string]$Suite,
 
     [Parameter(Mandatory = $true)]
@@ -67,6 +67,32 @@ function Read-SerialLines {
     }
 }
 
+function Add-SerialCrashTail {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.Ports.SerialPort]$Serial,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LogPath
+    )
+
+    $pending = ""
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($stopwatch.Elapsed.TotalSeconds -lt 4) {
+        Start-Sleep -Milliseconds 40
+        $read = Read-SerialLines -Serial $Serial -Pending $pending
+        $pending = $read.Pending
+        foreach ($line in $read.Lines) {
+            if ($line.Length -gt 0) {
+                Add-Content -LiteralPath $LogPath -Value $line
+            }
+        }
+    }
+    if ($pending.Length -gt 0) {
+        Add-Content -LiteralPath $LogPath -Value $pending
+    }
+}
+
 function Invoke-RegressionCase {
     param(
         [Parameter(Mandatory = $true)]
@@ -97,6 +123,7 @@ function Invoke-RegressionCase {
                 }
                 Add-Content -LiteralPath $LogPath -Value $syncLine
                 if ($syncLine -match "Guru Meditation|Brownout|abort\(\)|ESP-ROM:esp32s3|rst:0x") {
+                    Add-SerialCrashTail -Serial $Serial -LogPath $LogPath
                     throw "Device reset or panic while synchronizing before '$($Case.Name)': $syncLine"
                 }
                 if ($syncLine -eq "PONG") {
@@ -135,6 +162,7 @@ function Invoke-RegressionCase {
             }
             Add-Content -LiteralPath $LogPath -Value $line
             if ($line -match "Guru Meditation|Brownout|abort\(\)|ESP-ROM:esp32s3|rst:0x") {
+                Add-SerialCrashTail -Serial $Serial -LogPath $LogPath
                 throw "Device reset or panic during '$($Case.Name)': $line"
             }
             if ($line -match $Case.CompletionPattern) {
@@ -229,6 +257,65 @@ $p1Cases = @(
     (New-RegressionCase -Name "post-P1 responsiveness" -Command "STATUS" -CompletionPattern "^STATUS version=" -PassPattern "wifi=connected.*heap=[1-9][0-9]+" -TimeoutSeconds 15)
 )
 
+$p2StorageCases = @(
+    (New-RegressionCase -Name "project schema and pagination" -Command "PROJECTSCHEMATEST" -CompletionPattern "^PROJECTSCHEMATEST result=" -PassPattern "^PROJECTSCHEMATEST result=pass chats=33 error=none$" -TimeoutSeconds 180),
+    (New-RegressionCase -Name "legacy project migration" -Command "MIGRATIONTEST" -CompletionPattern "^MIGRATIONTEST result=" -PassPattern "^MIGRATIONTEST result=pass legacy=([1-9][0-9]*) matched=\1 messages=[1-9][0-9]* archived=[0-9]+ history_fnv32=[0-9a-f]{8} metadata=pass history=pass revision=[1-9][0-9]* error=none$" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "migration interruption and corruption" -Command "MIGRATIONRECOVERYTEST" -CompletionPattern "^MIGRATIONRECOVERYTEST result=" -PassPattern "^MIGRATIONRECOVERYTEST result=pass staging=yes corruption=yes restored=yes error=none$" -TimeoutSeconds 180)
+)
+
+$p2SharedNonce = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString(
+    [System.Globalization.CultureInfo]::InvariantCulture)
+$p2SharedCommand = "P2SHAREDTEST$p2SharedNonce"
+$p2SharedCompletion = '^P2SHAREDTEST result=(?:pass|failed) nonce={0} ' -f (
+    [regex]::Escape($p2SharedNonce))
+$p2SharedPass = '^P2SHAREDTEST result=pass nonce={0} identity=pass tools=pass isolation=pass cleanup=pass remaining=0 errors=0 error=none$' -f (
+    [regex]::Escape($p2SharedNonce))
+
+$p2ProjectCases = @(
+    (New-RegressionCase -Name "project device parity" -Command "PROJECTPARITYTEST" -CompletionPattern "^PROJECTPARITYTEST result=" -PassPattern "^PROJECTPARITYTEST result=pass ui=pass error=none$" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "shared project isolation" -Command $p2SharedCommand -CompletionPattern $p2SharedCompletion -PassPattern $p2SharedPass -TimeoutSeconds 180)
+)
+
+$p2ChatCases = @(
+    (New-RegressionCase -Name "project chat isolation" -Command "PROJECTCHATTEST" -CompletionPattern "^PROJECTCHATTEST result=" -PassPattern "^PROJECTCHATTEST result=pass chats=3 error=none$" -TimeoutSeconds 120),
+    (New-RegressionCase -Name "instruction precedence" -Command "INSTRUCTIONTEST" -CompletionPattern "^INSTRUCTIONTEST result=" -PassPattern "^INSTRUCTIONTEST result=pass order=pass error=none$" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "retry persistence" -Command "RETRYPERSISTENCETEST" -CompletionPattern "^RETRYPERSISTENCETEST result=" -PassPattern "^RETRYPERSISTENCETEST result=pass messages=2 user_copies=1 error=none$" -TimeoutSeconds 60),
+    (New-RegressionCase -Name "context compaction persistence" -Command "COMPACTIONTEST" -CompletionPattern "^COMPACTIONTEST result=" -PassPattern "^COMPACTIONTEST result=pass raw=12 manual_tail=8 auto_tail=4 error=none$" -TimeoutSeconds 60),
+    (New-RegressionCase -Name "production summary regeneration" -Command "P2SUMMARYTEST26001" -CompletionPattern "^P2SUMMARYTEST result=" -PassPattern "^P2SUMMARYTEST result=pass nonce=26001 provider=pass replace=pass covered=pass raw=pass context=pass cleanup=pass error=none$" -TimeoutSeconds 180)
+)
+
+$p2LimitCases = @(
+    (New-RegressionCase -Name "P2 storage and request boundaries" -Command "P2LIMITTEST" -CompletionPattern "^P2LIMITTEST result=" -PassPattern "^P2LIMITTEST result=pass prompt=pass project=pass chat=pass error=none$" -TimeoutSeconds 120)
+)
+
+$p2FileCases = @(
+    (New-RegressionCase -Name "large workspace window, search and edit" -Command "FILETEST" -CompletionPattern "^FILETEST result=" -PassPattern "^FILETEST result=pass$" -TimeoutSeconds 180)
+)
+
+$p2DiagnosticNonce = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString(
+    [System.Globalization.CultureInfo]::InvariantCulture)
+$p2ArchiveCases = @(
+    (New-RegressionCase -Name "unbounded project chat archive" -Command "P2ARCHIVETEST$p2DiagnosticNonce" -CompletionPattern "^P2ARCHIVETEST result=(?:pass|failed) nonce=$p2DiagnosticNonce " -PassPattern "^P2ARCHIVETEST result=pass nonce=$p2DiagnosticNonce beyond_2mib=pass quota=pass full=pass planner=pass nonmutation=pass first=pass middle=pass last=pass count=pass hash=pass artifacts=pass cleanup=pass heap_before=[1-9][0-9]* heap_after=[1-9][0-9]* largest_before=[1-9][0-9]* largest_after=[1-9][0-9]* error=none$" -TimeoutSeconds 600)
+)
+$p2BinaryCases = @(
+    (New-RegressionCase -Name "binary transfer and text-tool boundary" -Command "P2BINARYTEST$p2DiagnosticNonce" -CompletionPattern "^P2BINARYTEST result=(?:pass|failed) nonce=$p2DiagnosticNonce " -PassPattern "^P2BINARYTEST result=pass nonce=$p2DiagnosticNonce matrix=pass ui=pass read=pass write=pass append=pass nonmutation=pass cleanup=pass error=none$" -TimeoutSeconds 90)
+)
+
+$sdMountCases = @(
+    (New-RegressionCase -Name "SD remount" -Command "SDMOUNTTEST" -CompletionPattern "^SDMOUNTTEST result=" -PassPattern "^SDMOUNTTEST result=pass card_type=[1-9][0-9]* total_bytes=[1-9][0-9]* used_bytes=[0-9]+ error=none$" -TimeoutSeconds 20)
+)
+
+$webConsoleStartCases = @(
+    (New-RegressionCase -Name "web console start" -Command "CONSOLE" -CompletionPattern "^WEB_CONSOLE result=ready" -PassPattern "^WEB_CONSOLE result=ready" -TimeoutSeconds 20)
+)
+
+$webConsoleCycleCases = @(
+    (New-RegressionCase -Name "web console first start" -Command "CONSOLE" -CompletionPattern "^WEB_CONSOLE result=ready" -PassPattern "^WEB_CONSOLE result=ready" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "web console first exit" -Command "EXIT" -CompletionPattern "^WEB_CONSOLE result=stopped" -PassPattern "^WEB_CONSOLE result=stopped$" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "web console second start" -Command "CONSOLE" -CompletionPattern "^WEB_CONSOLE result=ready" -PassPattern "^WEB_CONSOLE result=ready" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "web console second exit" -Command "EXIT" -CompletionPattern "^WEB_CONSOLE result=stopped" -PassPattern "^WEB_CONSOLE result=stopped$" -TimeoutSeconds 20)
+)
+
 $resolvedLogPath = [System.IO.Path]::GetFullPath($LogPath)
 $logDirectory = [System.IO.Path]::GetDirectoryName($resolvedLogPath)
 if (-not [string]::IsNullOrEmpty($logDirectory)) {
@@ -248,6 +335,12 @@ try {
     Start-Sleep -Seconds 12
     $serial.ReadExisting() | Out-Null
     $cases = [System.Collections.Generic.List[object]]::new()
+    if ($Suite -eq "status") {
+        $cases.Add($offlineCases[0])
+    }
+    if ($Suite -eq "sd-mount") {
+        $cases.AddRange([object[]]$sdMountCases)
+    }
     if ($Suite -eq "audio") {
         $cases.AddRange([object[]]$audioCases)
     }
@@ -259,6 +352,46 @@ try {
     }
     if ($Suite -eq "p1") {
         $cases.AddRange([object[]]$p1Cases)
+    }
+    if ($Suite -eq "p2-storage" -or $Suite -eq "full") {
+        $cases.AddRange([object[]]$p2StorageCases)
+    }
+    if ($Suite -eq "p2-migration") {
+        $cases.Add($p2StorageCases[1])
+        $cases.Add($p2StorageCases[2])
+    }
+    if ($Suite -eq "p2-migration-exact") {
+        $cases.Add($p2StorageCases[1])
+    }
+    if ($Suite -eq "p2-projects" -or $Suite -eq "full") {
+        $cases.AddRange([object[]]$p2ProjectCases)
+    }
+    if ($Suite -eq "p2-chats" -or $Suite -eq "full") {
+        $cases.AddRange([object[]]$p2ChatCases)
+    }
+    if ($Suite -eq "p2-summary") {
+        $cases.Add($p2ChatCases[4])
+    }
+    if ($Suite -eq "p2-context") {
+        $cases.Add($p2ChatCases[3])
+    }
+    if ($Suite -eq "p2-limits" -or $Suite -eq "full") {
+        $cases.AddRange([object[]]$p2LimitCases)
+    }
+    if ($Suite -eq "p2-archive") {
+        $cases.AddRange([object[]]$p2ArchiveCases)
+    }
+    if ($Suite -eq "p2-file") {
+        $cases.AddRange([object[]]$p2FileCases)
+    }
+    if ($Suite -eq "p2-binary") {
+        $cases.AddRange([object[]]$p2BinaryCases)
+    }
+    if ($Suite -eq "web-console-start") {
+        $cases.AddRange([object[]]$webConsoleStartCases)
+    }
+    if ($Suite -eq "web-console-cycle") {
+        $cases.AddRange([object[]]$webConsoleCycleCases)
     }
     foreach ($case in $cases) {
         Invoke-RegressionCase -Serial $serial -Case $case -LogPath $resolvedLogPath

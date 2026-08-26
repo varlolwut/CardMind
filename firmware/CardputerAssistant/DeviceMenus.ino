@@ -60,6 +60,13 @@ String powerProfileLabel(std::uint8_t profile)
     return "Saver";
 }
 
+String projectChatHistoryQuotaLabel(std::uint32_t quotaBytes)
+{
+    return quotaBytes == 0
+        ? String("SD available")
+        : String(quotaBytes / (1024U * 1024U)) + " MiB";
+}
+
 cardputer::OperationResult applyDisplayAndCpuSettings(const cardputer::Settings& candidate)
 {
     M5Cardputer.Display.setBrightness(candidate.displayBrightness);
@@ -108,6 +115,8 @@ std::vector<String> deviceMenuItems()
         "Screen sleep: " + sleepSettingLabel(settings.screenSleepMinutes),
         "Keyboard repeat: " + keyboardRepeatSettingLabel(settings.keyboardRepeatMs),
         "Power: " + powerProfileLabel(settings.powerProfile),
+        "Chat archive quota: " +
+            projectChatHistoryQuotaLabel(settings.projectChatHistoryQuotaBytes),
         "Create local backup",
         "Restore local backup...",
         "Backup information",
@@ -206,9 +215,12 @@ String resetReasonLabel()
 
 std::vector<String> workspaceFileItems()
 {
+    const String importLabel = workspaceListMode == WorkspaceListMode::ImportProject
+        ? String("Choose a project bundle below")
+        : String("Choose a chat bundle below");
     std::vector<String> items = {
-        workspaceListMode == WorkspaceListMode::ImportChat
-            ? String("Choose a chat bundle below")
+        workspaceListMode != WorkspaceListMode::Browse
+            ? importLabel
             : String("+ New text file")};
     items.reserve(workspaceFiles.size() + 3);
     for (const auto& file : workspaceFiles) {
@@ -216,7 +228,7 @@ std::vector<String> workspaceFileItems()
                         file.name + (file.directory ? String() :
                         "  " + String(file.size) + " B"));
     }
-    if (!workspacePreviousPageOffsets.empty()) {
+    if (workspacePageOffset > 0) {
         items.push_back("< Previous entries");
     }
     if (!workspacePageEof) {
@@ -227,12 +239,21 @@ std::vector<String> workspaceFileItems()
 
 std::vector<String> fileActionItems()
 {
-    const String mode = cardputer::documentReaderModeLabel(fileReaderMode).c_str();
     const cardputer::SharedFileLinkResult linked =
         cardputer::projectHasSharedFileLink(activeProjectId, fileViewerName);
     const String linkAction = linked.success && linked.linked
         ? String("Unlink from active project")
         : String("Link to active project");
+    if (!cardputer::isWorkspaceTextFile(std::string(fileViewerName.c_str()))) {
+        return {
+            "Save copy as...",
+            "Rename...",
+            linkAction,
+            "Delete file",
+            "Back",
+        };
+    }
+    const String mode = cardputer::documentReaderModeLabel(fileReaderMode).c_str();
     return {
         "View as " + mode,
         "Edit current page",
@@ -371,6 +392,27 @@ std::uint16_t nextKeyboardRepeatMs(std::uint16_t currentIntervalMs)
     return 0;
 }
 
+std::uint32_t nextProjectChatHistoryQuotaBytes(std::uint32_t currentQuotaBytes)
+{
+    constexpr std::uint32_t kMebibyte = 1024U * 1024U;
+    if (currentQuotaBytes == 0) {
+        return 16U * kMebibyte;
+    }
+    if (currentQuotaBytes < 16U * kMebibyte) {
+        return 16U * kMebibyte;
+    }
+    if (currentQuotaBytes < 64U * kMebibyte) {
+        return 64U * kMebibyte;
+    }
+    if (currentQuotaBytes < 256U * kMebibyte) {
+        return 256U * kMebibyte;
+    }
+    if (currentQuotaBytes < 1024U * kMebibyte) {
+        return 1024U * kMebibyte;
+    }
+    return 0;
+}
+
 std::vector<String> controlsHelpItems()
 {
     return {
@@ -425,6 +467,15 @@ void renderGlobalInstructions()
         cardputer::kMaximumChatInstructionsBytes, globalInstructionsStatus,
         "Applied to every chat",
         "ENTER save  FN+DEL clear  ESC back");
+}
+
+void renderRequestInstructions()
+{
+    cardputer::showTextEditor(
+        "NEXT REQUEST INSTRUCTIONS", requestInstructionsInput, keyboardLayout,
+        cardputer::kMaximumRequestInstructionsBytes, requestInstructionsStatus,
+        "Overrides chat instructions once",
+        "ENTER use once  FN+DEL clear  ESC back");
 }
 
 void openAiMenu()

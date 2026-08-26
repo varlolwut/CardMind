@@ -456,6 +456,100 @@ String parentSftpPath(const String& path)
     return separator <= 0 ? String("/") : path.substring(0, separator);
 }
 
+struct WorkspaceFileSelectionResult {
+    bool success;
+    bool selected;
+    bool empty;
+    cardputer::WorkspaceFile file;
+    String error;
+};
+
+using WorkspaceFilePredicate = bool (*)(const cardputer::WorkspaceFile& file);
+using WorkspaceFileLabel = String (*)(const cardputer::WorkspaceFile& file);
+
+bool includeWorkspaceFile(const cardputer::WorkspaceFile& file)
+{
+    return !file.directory;
+}
+
+bool includeWorkspacePrivateKey(const cardputer::WorkspaceFile& file)
+{
+    return !file.directory && (file.name.endsWith(".pem") || file.name.endsWith(".key"));
+}
+
+String workspaceUploadLabel(const cardputer::WorkspaceFile& file)
+{
+    return file.name + "  " + String(file.size) + " B";
+}
+
+String workspacePrivateKeyLabel(const cardputer::WorkspaceFile& file)
+{
+    return file.name;
+}
+
+WorkspaceFileSelectionResult selectWorkspaceFilePage(
+    const String& title,
+    WorkspaceFilePredicate include,
+    WorkspaceFileLabel label)
+{
+    constexpr std::uint32_t kPageEntries = 16;
+    std::uint32_t offset = 0;
+    bool foundAnyCandidate = false;
+    while (true) {
+        const cardputer::WorkspaceFilesPageResult page =
+            cardputer::listWorkspaceFilesPage(offset, kPageEntries);
+        if (!page.success) {
+            return {false, false, false, {}, page.error};
+        }
+        std::vector<String> items;
+        std::vector<int> actions;
+        items.reserve(page.files.size() + 2);
+        actions.reserve(page.files.size() + 2);
+        if (offset > 0) {
+            items.push_back("< Previous entries");
+            actions.push_back(-1);
+        }
+        for (std::size_t index = 0; index < page.files.size(); ++index) {
+            if (include(page.files[index])) {
+                foundAnyCandidate = true;
+                items.push_back(label(page.files[index]));
+                actions.push_back(static_cast<int>(index));
+            }
+        }
+        if (page.eof && !foundAnyCandidate) {
+            return {true, false, true, {}, ""};
+        }
+        if (!page.eof) {
+            items.push_back("Next entries >");
+            actions.push_back(-2);
+        }
+        if (items.empty()) {
+            return {true, false, true, {}, ""};
+        }
+        const int selected = modalSelection(
+            title + " " + String(offset + 1), items, 0,
+            "UP/DOWN  ENTER  ESC cancel");
+        if (selected < 0) {
+            return {true, false, false, {}, ""};
+        }
+        const int action = actions[static_cast<std::size_t>(selected)];
+        if (action == -1) {
+            offset = offset >= kPageEntries ? offset - kPageEntries : 0;
+            continue;
+        }
+        if (action == -2) {
+            if (page.nextOffset <= offset) {
+                return {false, false, false, {},
+                        "Workspace pagination did not advance"};
+            }
+            offset = page.nextOffset;
+            continue;
+        }
+        return {true, true, false,
+                page.files[static_cast<std::size_t>(action)], ""};
+    }
+}
+
 cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
 {
     cardputer::SshClient client;
@@ -495,30 +589,25 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
             continue;
         }
         if (selected == 1) {
-            const cardputer::WorkspaceFilesResult workspace = cardputer::listWorkspaceFiles();
-            if (!workspace.success) {
-                result = {false, workspace.error};
+            const WorkspaceFileSelectionResult selection = selectWorkspaceFilePage(
+                "UPLOAD FROM SD", includeWorkspaceFile, workspaceUploadLabel);
+            if (!selection.success) {
+                result = {false, selection.error};
                 break;
             }
-            std::vector<String> names;
-            for (const auto& file : workspace.files) {
-                names.push_back(file.name + "  " + String(file.size) + " B");
-            }
-            if (names.empty()) {
+            if (selection.empty) {
                 cardputer::showTextViewer("SFTP UPLOAD", {"SD workspace is empty."}, 0,
                                          "ENTER/ESC close");
                 delay(1200);
                 continue;
             }
-            const int fileIndex = modalSelection("UPLOAD FROM SD", names, 0,
-                                                 "UP/DOWN  ENTER  ESC cancel");
-            if (fileIndex < 0) continue;
-            std::string remoteName = workspace.files[fileIndex].name.c_str();
+            if (!selection.selected) continue;
+            std::string remoteName = selection.file.name.c_str();
             if (!modalTextInput("REMOTE NAME", "Destination filename", remoteName, 255,
                                 false, remoteName)) continue;
             cardputer::showBusyScreen("SFTP UPLOAD", "Writing remote file...");
             cardputer::markOperation("sftp_upload");
-            result = client.uploadSftpFile(workspace.files[fileIndex].name,
+            result = client.uploadSftpFile(selection.file.name,
                                            joinSftpPath(path, remoteName.c_str()), 60000);
             if (!result.success) break;
             continue;
@@ -560,7 +649,7 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
             "UP/DOWN  ENTER  ESC cancel");
         if (action == 0) {
             std::string localName = entry.name.c_str();
-            if (!modalTextInput("DOWNLOAD TO SD", "Workspace filename", localName, 48,
+            if (!modalTextInput("DOWNLOAD TO SD", "Workspace filename", localName, 502,
                                 false, localName)) continue;
             cardputer::showBusyScreen("SFTP DOWNLOAD", "Saving to microSD workspace...");
             cardputer::markOperation("sftp_download");
@@ -586,23 +675,12 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
 
 cardputer::OperationResult installSshKeyFromWorkspace()
 {
-    const cardputer::WorkspaceFilesResult workspace = cardputer::listWorkspaceFiles();
-    if (!workspace.success) return {false, workspace.error};
-    std::vector<std::size_t> indexes;
-    std::vector<String> items;
-    for (std::size_t index = 0; index < workspace.files.size(); ++index) {
-        const String lower = workspace.files[index].name;
-        if (lower.endsWith(".pem") || lower.endsWith(".key")) {
-            indexes.push_back(index);
-            items.push_back(workspace.files[index].name);
-        }
-    }
-    if (items.empty()) return {false, "Put a .pem or .key file in the SD workspace first"};
-    const int selected = modalSelection("INSTALL SSH KEY", items, 0,
-                                        "UP/DOWN  ENTER  ESC cancel");
-    if (selected < 0) return {true, "Key installation cancelled"};
-    const String sourcePath = cardputer::workspaceFilePath(
-        workspace.files[indexes[static_cast<std::size_t>(selected)]].name);
+    const WorkspaceFileSelectionResult selection = selectWorkspaceFilePage(
+        "INSTALL SSH KEY", includeWorkspacePrivateKey, workspacePrivateKeyLabel);
+    if (!selection.success) return {false, selection.error};
+    if (selection.empty) return {false, "Put a .pem or .key file in the SD workspace first"};
+    if (!selection.selected) return {true, "Key installation cancelled"};
+    const String sourcePath = cardputer::workspaceFilePath(selection.file.name);
     cardputer::OperationResult result = cardputer::installSshPrivateKey(sourcePath);
     if (result.success && !SD.remove(sourcePath)) {
         result = {false, "Private key installed, but its workspace source could not be removed"};

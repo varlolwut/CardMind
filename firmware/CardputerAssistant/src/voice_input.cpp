@@ -2,6 +2,7 @@
 
 #include "adv_audio_power.h"
 #include "audio_utils.h"
+#include "sd_storage.h"
 
 #include <M5Cardputer.h>
 #include <SD.h>
@@ -26,7 +27,8 @@ constexpr std::uint32_t kMinimumSamples = kSampleRate / 2;
 constexpr std::uint32_t kMaximumRecordingSeconds = 60;
 constexpr std::uint32_t kMaximumSamples = kSampleRate * kMaximumRecordingSeconds;
 constexpr std::size_t kWavHeaderSize = 44;
-constexpr std::uint8_t kSdMountAttempts = 3;
+constexpr std::uint8_t kSdMountAttempts = 6;
+constexpr std::uint32_t kSdInitialSettleMilliseconds = 500;
 
 std::uint16_t normalizedPeak(const std::array<std::int16_t, kChunkSamples>& samples)
 {
@@ -49,6 +51,8 @@ std::uint16_t normalizedMean(std::uint64_t absoluteTotal, std::uint32_t sampleCo
 
 OperationResult deleteRecordingIfPresent()
 {
+    const OperationResult access = requireSdWriteAccess(0, kStorageOperationalFloorBytes);
+    if (!access.success) return access;
     if (!SD.exists(kVoicePath)) {
         return {true, ""};
     }
@@ -63,11 +67,17 @@ OperationResult deleteRecordingIfPresent()
 OperationResult initializeVoiceStorage()
 {
     bool mountSucceeded = false;
+    delay(kSdInitialSettleMilliseconds);
     for (std::uint8_t attempt = 1; attempt <= kSdMountAttempts; ++attempt) {
         SPI.begin(kSdClockPin, kSdMisoPin, kSdMosiPin, kSdChipSelectPin);
         const bool mounted = SD.begin(kSdChipSelectPin, SPI, 25000000);
         mountSucceeded = mountSucceeded || mounted;
         if (mounted && SD.cardType() != CARD_NONE) {
+            const OperationResult identity = initializeSdStorageIdentity();
+            if (!identity.success) return identity;
+            if (inspectSdStorage().state == SdStorageState::Full) {
+                return {true, ""};
+            }
             return deleteRecordingIfPresent();
         }
         Serial.printf("WARN event=sd_mount attempt=%u result=failed\n",
@@ -75,18 +85,28 @@ OperationResult initializeVoiceStorage()
         SD.end();
         SPI.end();
         if (attempt < kSdMountAttempts) {
-            delay(static_cast<std::uint32_t>(attempt) * 250U);
+            delay(static_cast<std::uint32_t>(attempt) * 500U);
         }
     }
-    return mountSucceeded
-        ? OperationResult{false, "No microSD card was detected after 3 attempts"}
-        : OperationResult{false, "Failed to mount microSD after 3 attempts; reinsert or check the card"};
+    const SdStorageStatus status = inspectSdStorage();
+    return {false, status.error.isEmpty()
+        ? (mountSucceeded
+            ? String("No microSD card was detected after 6 attempts")
+            : String("Failed to mount microSD after 6 attempts; reinsert or check the card"))
+        : status.error};
 }
 
 VoiceRecordingResult recordVoiceWhileButtonHeld(const VoiceProgressCallback& onProgress)
 {
     if (!M5Cardputer.BtnA.isPressed()) {
         return {false, 0, 0, 0, "Hold the G0 microphone button while speaking"};
+    }
+    const std::uint64_t maximumRecordingBytes = kWavHeaderSize +
+        static_cast<std::uint64_t>(kMaximumSamples) * sizeof(std::int16_t);
+    const OperationResult access = requireSdWriteAccess(
+        maximumRecordingBytes, kStorageOperationalFloorBytes);
+    if (!access.success) {
+        return {false, 0, 0, 0, access.error};
     }
     const OperationResult deleteResult = deleteRecordingIfPresent();
     if (!deleteResult.success) {

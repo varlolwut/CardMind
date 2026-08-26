@@ -8,6 +8,7 @@
 #include "file_workspace.h"
 #include "python_mode.h"
 #include "project_bundle.h"
+#include "instruction_policy.h"
 #include "project_chat_storage.h"
 #include "project_storage.h"
 #include "sd_storage.h"
@@ -35,7 +36,9 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cardputer {
@@ -45,7 +48,49 @@ constexpr std::uint32_t kSessionIdleMs = 15U * 60U * 1000U;
 constexpr std::uint32_t kLoginLockMs = 30U * 1000U;
 constexpr std::size_t kMaximumLoginFailures = 5;
 constexpr std::size_t kMaximumPromptBytes = 16384;
+constexpr std::size_t kPromptFramePrefixBytes = 4;
+constexpr std::size_t kMaximumPromptFrameBytes =
+    kPromptFramePrefixBytes + kMaximumRequestInstructionsBytes + kMaximumPromptBytes;
+constexpr const char* kPromptFrameContentType =
+    "application/vnd.cardmind.prompt-v1";
 constexpr std::size_t kMaximumWebFileChunkBytes = 12288;
+
+struct RawTextRequestState {
+    std::string body;
+    String error;
+    int errorStatus = 400;
+    bool started = false;
+    bool complete = false;
+};
+
+struct RawTextRequestResult {
+    bool success;
+    std::string body;
+    int errorStatus;
+    String error;
+};
+
+struct WebPromptRequest {
+    bool success;
+    std::string prompt;
+    std::string requestInstructions;
+    int errorStatus;
+    String error;
+};
+
+struct WebContextSummaryResult {
+    bool success;
+    std::string summary;
+    std::uint32_t includedMessages;
+    String error;
+};
+
+struct DecodedHeaderResult {
+    bool success;
+    std::string value;
+    int errorStatus;
+    String error;
+};
 
 WebServer server(80);
 Settings consoleSettings;
@@ -87,7 +132,10 @@ String uploadError;
 std::size_t uploadBytes = 0;
 bool uploadCreated = false;
 bool uploadReplacing = false;
-constexpr const char* kWebSaveTemporaryName = "_cardmind-web-save.txt";
+RawTextRequestState rawTextRequest;
+std::string failedWebRequestInstructions;
+String failedWebRequestInstructionsChatId;
+std::uint32_t failedWebRequestOutputTokens = 0;
 File sshKeyUploadFile;
 String sshKeyUploadError;
 std::size_t sshKeyUploadBytes = 0;
@@ -227,10 +275,13 @@ void releaseConsoleSessionState()
     if (uploadFile) {
         uploadFile.close();
     }
-    if (uploadCreated && !uploadStorageName.isEmpty()) {
+    const bool storageWritable = requireSdWriteAccess(0, 0).success;
+    if (storageWritable && uploadCreated && !uploadStorageName.isEmpty()) {
         SD.remove(workspaceFilePath(uploadStorageName));
     }
-    SD.remove(kSshKeyUploadPath);
+    if (storageWritable) {
+        SD.remove(kSshKeyUploadPath);
+    }
     sshKeyUploadError = String();
     sshKeyUploadBytes = 0;
     uploadName = String();
@@ -272,6 +323,9 @@ void releaseConsoleSessionState()
     sshRevision = 0;
     settingsRevision = 0;
     std::string().swap(activeResponse);
+    std::string().swap(failedWebRequestInstructions);
+    failedWebRequestInstructionsChatId = String();
+    failedWebRequestOutputTokens = 0;
 }
 
 void failUpload(const String& error)
@@ -279,7 +333,8 @@ void failUpload(const String& error)
     if (uploadFile) {
         uploadFile.close();
     }
-    if (uploadCreated && !uploadStorageName.isEmpty()) {
+    if (requireSdWriteAccess(0, 0).success && uploadCreated &&
+        !uploadStorageName.isEmpty()) {
         SD.remove(workspaceFilePath(uploadStorageName));
     }
     uploadCreated = false;
@@ -352,6 +407,402 @@ bool requestHasValidCsrf()
 {
     return sessionIsActive() && !csrfToken.isEmpty() &&
            constantTimeEquals(server.header("X-CardMind-CSRF"), csrfToken);
+}
+
+enum class WebStorageAccess {
+    None,
+    Read,
+    Write,
+};
+
+WebStorageAccess webStorageAccessForRoute(WebConsoleRouteHandler route)
+{
+    switch (route) {
+        case WebConsoleRouteHandler::State: {
+            const String path = server.uri();
+            return path == "/api/projects" || path == "/api/chats" ||
+                   path == "/api/chat" || path == "/api/files" ||
+                   path == "/api/ssh/state"
+                ? WebStorageAccess::Read
+                : WebStorageAccess::None;
+        }
+        case WebConsoleRouteHandler::ProjectLinks:
+        case WebConsoleRouteHandler::ArchivedMessages:
+        case WebConsoleRouteHandler::SftpUpload:
+        case WebConsoleRouteHandler::QrFile:
+        case WebConsoleRouteHandler::FileRead:
+        case WebConsoleRouteHandler::FileDownload:
+            return WebStorageAccess::Read;
+        case WebConsoleRouteHandler::SelectProject:
+        case WebConsoleRouteHandler::NewProject:
+        case WebConsoleRouteHandler::ProjectSettings:
+        case WebConsoleRouteHandler::ProjectSettingsRawComplete:
+        case WebConsoleRouteHandler::RenameProject:
+        case WebConsoleRouteHandler::DuplicateProject:
+        case WebConsoleRouteHandler::ArchiveProject:
+        case WebConsoleRouteHandler::DeleteProject:
+        case WebConsoleRouteHandler::ProjectLinkUpdate:
+        case WebConsoleRouteHandler::Prompt:
+        case WebConsoleRouteHandler::PromptRawComplete:
+        case WebConsoleRouteHandler::PromptRetry:
+        case WebConsoleRouteHandler::SelectChat:
+        case WebConsoleRouteHandler::NewChat:
+        case WebConsoleRouteHandler::Instructions:
+        case WebConsoleRouteHandler::InstructionsRawComplete:
+        case WebConsoleRouteHandler::ChatCompact:
+        case WebConsoleRouteHandler::ChatPermissions:
+        case WebConsoleRouteHandler::RenameChat:
+        case WebConsoleRouteHandler::PinChat:
+        case WebConsoleRouteHandler::ArchiveChat:
+        case WebConsoleRouteHandler::DuplicateChat:
+        case WebConsoleRouteHandler::ExportChat:
+        case WebConsoleRouteHandler::ExportChatBundle:
+        case WebConsoleRouteHandler::ImportChatBundle:
+        case WebConsoleRouteHandler::DeleteChat:
+        case WebConsoleRouteHandler::ClearChat:
+        case WebConsoleRouteHandler::SshSettings:
+        case WebConsoleRouteHandler::SshSelect:
+        case WebConsoleRouteHandler::SshDelete:
+        case WebConsoleRouteHandler::SshStart:
+        case WebConsoleRouteHandler::SshTrust:
+        case WebConsoleRouteHandler::SftpDownload:
+        case WebConsoleRouteHandler::SshKeyComplete:
+        case WebConsoleRouteHandler::FileSave:
+        case WebConsoleRouteHandler::FileRename:
+        case WebConsoleRouteHandler::FileDelete:
+        case WebConsoleRouteHandler::FileUploadComplete:
+            return WebStorageAccess::Write;
+        default:
+            return WebStorageAccess::None;
+    }
+}
+
+int webStorageErrorStatus(SdStorageState state)
+{
+    switch (state) {
+        case SdStorageState::Full: return 507;
+        case SdStorageState::Replaced: return 409;
+        case SdStorageState::Missing:
+        case SdStorageState::Removed: return 503;
+        case SdStorageState::Ready: return 500;
+    }
+    return 500;
+}
+
+bool allowWebStorageRoute(WebConsoleRouteHandler route)
+{
+    const WebStorageAccess access = webStorageAccessForRoute(route);
+    if (access == WebStorageAccess::None || !sessionIsActive()) {
+        return true;
+    }
+    if (access == WebStorageAccess::Write && !requestHasValidCsrf()) {
+        return true;
+    }
+    const OperationResult result = access == WebStorageAccess::Read
+        ? requireSdReadAccess()
+        : requireSdWriteAccess(0, kStorageOperationalFloorBytes);
+    if (result.success) {
+        return true;
+    }
+    const SdStorageStatus storage = inspectSdStorage();
+    sendWebJsonError(server, webStorageErrorStatus(storage.state), result.error);
+    return false;
+}
+
+void releaseRawTextBody()
+{
+    std::string().swap(rawTextRequest.body);
+}
+
+void resetRawTextRequest()
+{
+    releaseRawTextBody();
+    rawTextRequest.error = "";
+    rawTextRequest.errorStatus = 400;
+    rawTextRequest.started = false;
+    rawTextRequest.complete = false;
+}
+
+void failRawTextRequest(int status, const String& error)
+{
+    if (rawTextRequest.error.isEmpty()) {
+        rawTextRequest.errorStatus = status;
+        rawTextRequest.error = error;
+    }
+}
+
+bool requestHasRawTextContentType()
+{
+    String contentType = server.header("Content-Type");
+    contentType.toLowerCase();
+    return contentType == "text/plain" ||
+           contentType.startsWith("text/plain;");
+}
+
+bool requestHasPromptFrameContentType()
+{
+    String contentType = server.header("Content-Type");
+    contentType.toLowerCase();
+    return contentType == kPromptFrameContentType;
+}
+
+void collectRawRequestBody(std::size_t maximumBytes)
+{
+    HTTPRaw& raw = server.raw();
+    if (raw.status == RAW_START) {
+        resetRawTextRequest();
+        rawTextRequest.started = true;
+        if (!requestHasValidCsrf()) {
+            failRawTextRequest(401, "Authentication required");
+            return;
+        }
+        if (!server.hasHeader("Content-Length") ||
+            !server.header("Transfer-Encoding").isEmpty()) {
+            failRawTextRequest(
+                400, "Raw text requests require a fixed Content-Length");
+            return;
+        }
+        const int contentLength = server.clientContentLength();
+        if (contentLength < 0 ||
+            static_cast<std::size_t>(contentLength) > maximumBytes) {
+            failRawTextRequest(
+                400, "Raw request exceeds its endpoint byte limit");
+            return;
+        }
+        try {
+            rawTextRequest.body.reserve(static_cast<std::size_t>(contentLength));
+        } catch (const std::bad_alloc&) {
+            failRawTextRequest(
+                503, "Not enough contiguous memory to receive the raw text request");
+        }
+        return;
+    }
+    if (raw.status == RAW_ABORTED) {
+        resetRawTextRequest();
+        return;
+    }
+    if (!rawTextRequest.started || !rawTextRequest.error.isEmpty()) {
+        return;
+    }
+    if (raw.status == RAW_WRITE) {
+        if (raw.currentSize > maximumBytes - rawTextRequest.body.size()) {
+            releaseRawTextBody();
+            failRawTextRequest(
+                400, "Raw request exceeds its endpoint byte limit");
+            return;
+        }
+        try {
+            rawTextRequest.body.append(
+                reinterpret_cast<const char*>(raw.buf), raw.currentSize);
+        } catch (const std::bad_alloc&) {
+            releaseRawTextBody();
+            failRawTextRequest(
+                503, "Not enough contiguous memory to receive the raw text request");
+        }
+        return;
+    }
+    if (raw.status == RAW_END) {
+        const int contentLength = server.clientContentLength();
+        if (contentLength < 0 ||
+            rawTextRequest.body.size() != static_cast<std::size_t>(contentLength) ||
+            rawTextRequest.body.size() != raw.totalSize) {
+            releaseRawTextBody();
+            failRawTextRequest(
+                400, "Raw text request ended before its declared byte length");
+            return;
+        }
+        rawTextRequest.complete = true;
+    }
+}
+
+void rejectRawRequestContentType(const String& error)
+{
+    if (!rawTextRequest.started) {
+        resetRawTextRequest();
+        rawTextRequest.started = true;
+        failRawTextRequest(415, error);
+    }
+}
+
+void collectRawTextRequest(std::size_t maximumBytes)
+{
+    if (!requestHasRawTextContentType()) {
+        rejectRawRequestContentType(
+            "Raw text endpoints require Content-Type text/plain");
+        return;
+    }
+    collectRawRequestBody(maximumBytes);
+}
+
+void collectRawPromptRequest()
+{
+    if (requestHasRawTextContentType()) {
+        collectRawRequestBody(kMaximumPromptBytes);
+        return;
+    }
+    if (requestHasPromptFrameContentType()) {
+        collectRawRequestBody(kMaximumPromptFrameBytes);
+        return;
+    }
+    rejectRawRequestContentType(
+        "Raw prompt endpoints require text/plain or application/vnd.cardmind.prompt-v1");
+}
+
+RawTextRequestResult consumeRawTextRequest()
+{
+    if (!rawTextRequest.started) {
+        return {
+            false, {}, 400,
+            "Raw text request did not start correctly"};
+    }
+    if (!rawTextRequest.error.isEmpty()) {
+        RawTextRequestResult result = {
+            false, {}, rawTextRequest.errorStatus, rawTextRequest.error};
+        resetRawTextRequest();
+        return result;
+    }
+    if (!rawTextRequest.complete) {
+        resetRawTextRequest();
+        return {
+            false, {}, 400,
+            "Raw text request did not finish correctly"};
+    }
+    RawTextRequestResult result = {
+        true, std::move(rawTextRequest.body), 200, ""};
+    resetRawTextRequest();
+    return result;
+}
+
+WebPromptRequest parseWebPromptRequest(RawTextRequestResult request,
+                                       bool framed)
+{
+    if (!request.success) {
+        return {
+            false, {}, {}, request.errorStatus, request.error};
+    }
+    if (!framed) {
+        return {
+            true, std::move(request.body), {}, 200, ""};
+    }
+    if (request.body.size() < kPromptFramePrefixBytes) {
+        return {
+            false, {}, {}, 400,
+            "Framed prompt is missing its four-byte instruction length"};
+    }
+    const auto* prefix = reinterpret_cast<const unsigned char*>(
+        request.body.data());
+    const std::uint32_t instructionBytes =
+        (static_cast<std::uint32_t>(prefix[0]) << 24U) |
+        (static_cast<std::uint32_t>(prefix[1]) << 16U) |
+        (static_cast<std::uint32_t>(prefix[2]) << 8U) |
+        static_cast<std::uint32_t>(prefix[3]);
+    const std::size_t payloadBytes =
+        request.body.size() - kPromptFramePrefixBytes;
+    if (instructionBytes > kMaximumRequestInstructionsBytes) {
+        return {
+            false, {}, {}, 400,
+            "Request instructions must not exceed 2048 bytes"};
+    }
+    if (instructionBytes > payloadBytes) {
+        return {
+            false, {}, {}, 400,
+            "Framed prompt instruction length exceeds the received body"};
+    }
+    const std::size_t promptBytes = payloadBytes - instructionBytes;
+    if (promptBytes == 0 || promptBytes > kMaximumPromptBytes) {
+        return {
+            false, {}, {}, 400,
+            "Framed prompt must contain between 1 and 16384 bytes"};
+    }
+    std::string requestInstructions;
+    try {
+        requestInstructions = request.body.substr(
+            kPromptFramePrefixBytes, instructionBytes);
+    } catch (const std::bad_alloc&) {
+        return {
+            false, {}, {}, 503,
+            "Not enough contiguous memory to parse request instructions"};
+    }
+    request.body.erase(0, kPromptFramePrefixBytes + instructionBytes);
+    if (!isValidUtf8(requestInstructions) || !isValidUtf8(request.body)) {
+        return {
+            false, {}, {}, 400,
+            "Prompt and request instructions must contain valid UTF-8"};
+    }
+    return {
+        true, std::move(request.body), std::move(requestInstructions), 200, ""};
+}
+
+void clearFailedWebRequestInstructions()
+{
+    std::string().swap(failedWebRequestInstructions);
+    failedWebRequestInstructionsChatId = "";
+    failedWebRequestOutputTokens = 0;
+}
+
+std::uint8_t percentEncodedNibble(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return static_cast<std::uint8_t>(value - '0');
+    }
+    if (value >= 'A' && value <= 'F') {
+        return static_cast<std::uint8_t>(value - 'A' + 10);
+    }
+    if (value >= 'a' && value <= 'f') {
+        return static_cast<std::uint8_t>(value - 'a' + 10);
+    }
+    return UINT8_MAX;
+}
+
+DecodedHeaderResult decodePercentEncodedHeader(const String& header,
+                                               std::size_t maximumBytes)
+{
+    if (!header.startsWith("v1:")) {
+        return {false, {}, 400, "Encoded model header is missing or invalid"};
+    }
+    const std::string encoded = header.substring(3).c_str();
+    if (encoded.size() > maximumBytes * 3U) {
+        return {false, {}, 400, "Encoded model header exceeds its byte limit"};
+    }
+    std::string decoded;
+    try {
+        decoded.reserve(std::min(encoded.size(), maximumBytes));
+        for (std::size_t index = 0; index < encoded.size(); ++index) {
+            if (encoded[index] != '%') {
+                decoded.push_back(encoded[index]);
+                continue;
+            }
+            if (index + 2 >= encoded.size()) {
+                return {false, {}, 400, "Encoded model header has an incomplete escape"};
+            }
+            const std::uint8_t high = percentEncodedNibble(encoded[index + 1]);
+            const std::uint8_t low = percentEncodedNibble(encoded[index + 2]);
+            if (high == UINT8_MAX || low == UINT8_MAX) {
+                return {false, {}, 400, "Encoded model header has an invalid escape"};
+            }
+            decoded.push_back(static_cast<char>((high << 4U) | low));
+            index += 2;
+        }
+    } catch (const std::bad_alloc&) {
+        return {false, {}, 503, "Not enough memory to decode the model header"};
+    }
+    if (decoded.size() > maximumBytes || decoded.find('\0') != std::string::npos ||
+        !isValidUtf8(decoded)) {
+        return {false, {}, 400, "Decoded model header is not valid UTF-8"};
+    }
+    return {true, std::move(decoded), 200, ""};
+}
+
+void rejectLegacyRawTextRoute()
+{
+    const RawTextRequestResult request = consumeRawTextRequest();
+    if (!request.success) {
+        sendWebJsonError(server, request.errorStatus, request.error);
+        return;
+    }
+    sendWebJsonError(
+        server, 415,
+        "Use the corresponding /raw endpoint with Content-Type text/plain");
 }
 
 std::uint64_t currentTimestamp()
@@ -427,11 +878,16 @@ OperationResult refreshSshProfiles()
     return {true, ""};
 }
 
+std::size_t activeProjectTailByteBudget()
+{
+    return std::min<std::size_t>(131072, activeProject.contextByteBudget);
+}
+
 OperationResult loadActiveChat(const String& id)
 {
     const std::uint32_t startedAt = millis();
     const ChatDocumentResult loaded = loadProjectChat(
-        activeProject.summary.id, id, 96, 131072);
+        activeProject.summary.id, id, 96, activeProjectTailByteBudget());
     recordWebSdRead(millis() - startedAt);
     if (!loaded.success) {
         return {false, loaded.error};
@@ -455,6 +911,9 @@ OperationResult saveActiveChat()
 
 OperationResult saveActiveChatSelection(const String& chatId)
 {
+    if (activeProject.activeChatId == chatId) {
+        return {true, ""};
+    }
     ProjectDocumentResult stored = loadProject(activeProject.summary.id);
     if (!stored.success) {
         return {false, stored.error};
@@ -477,11 +936,14 @@ OperationResult selectActiveProject(const String& id)
     if (!manifest.success) {
         return {false, manifest.error};
     }
-    manifest.manifest.activeProjectId = id;
-    ++manifest.manifest.revision;
-    OperationResult result = saveProjectStorageManifest(manifest.manifest);
-    if (!result.success) {
-        return result;
+    OperationResult result = {true, ""};
+    if (manifest.manifest.activeProjectId != id) {
+        manifest.manifest.activeProjectId = id;
+        ++manifest.manifest.revision;
+        result = saveProjectStorageManifest(manifest.manifest);
+        if (!result.success) {
+            return result;
+        }
     }
     activeProject = loaded.project;
     ++projectRevision;
@@ -516,67 +978,80 @@ OperationResult selectActiveProject(const String& id)
     return result;
 }
 
-std::string effectiveProjectChatInstructions(const ProjectDocument& project,
-                                             const ChatDocument& chat)
+OperationResult loadCommittedConsoleStorageReadOnly()
 {
-    std::string result;
-    if (!project.instructions.empty()) {
-        result = "Project instructions supplied by the user:\n" + project.instructions;
+    const ProjectStorageManifestResult manifest = loadProjectStorageManifest();
+    if (!manifest.success) {
+        return {false, manifest.error};
     }
-    if (!chat.instructions.empty()) {
-        if (!result.empty()) result += "\n\n";
-        result += "Chat-specific instructions override conflicting project instructions:\n";
-        result += chat.instructions;
+    if (manifest.manifest.activeProjectId.isEmpty()) {
+        return {false, "Active project is missing"};
     }
-    if (!chat.contextSummary.empty()) {
-        if (!result.empty()) result += "\n\n";
-        result += "Conversation summary for turns omitted from the active context:\n";
-        result += chat.contextSummary;
+    ProjectDocumentResult project = loadProject(manifest.manifest.activeProjectId);
+    if (!project.success) {
+        return {false, project.error};
+    }
+    activeProject = std::move(project.project);
+    ++projectRevision;
+    OperationResult result = refreshProjects();
+    if (result.success) {
+        result = refreshChats();
+    }
+    if (!result.success) {
+        return result;
+    }
+    if (!activeProject.activeChatId.isEmpty()) {
+        result = loadActiveChat(activeProject.activeChatId);
+    } else {
+        activeChat = ChatDocument{};
+        activeResponse.clear();
+        ++chatRevision;
+    }
+    if (result.success) {
+        result = refreshFiles();
     }
     return result;
 }
 
-OperationResult regenerateWebContextSummary(const std::vector<Message>& omitted)
+std::string effectiveProjectChatInstructions(const ProjectDocument& project,
+                                             const ChatDocument& chat,
+                                             const std::string& requestInstructions)
 {
-    if (omitted.empty()) {
-        return {true, ""};
+    return buildScopedInstructions(
+        project.instructions, chat.instructions, requestInstructions,
+        chat.contextSummary);
+}
+
+WebContextSummaryResult generateWebContextSummary(
+    const std::string& previousSummary,
+    const std::vector<Message>& messages)
+{
+    if (messages.empty()) {
+        return {false, {}, 0, "No messages are available to summarize"};
     }
-    ChatDocumentResult stored = loadProjectChat(
-        activeProject.summary.id, activeChat.summary.id, 1, 1);
-    if (!stored.success) {
-        return {false, stored.error};
+    constexpr std::size_t kCompactionHeapReserve = 16384;
+    const std::size_t largestBlock =
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largestBlock <= kCompactionHeapReserve) {
+        return {
+            false, {}, 0,
+            "Context compaction needs a larger contiguous heap block; close SSH and retry"};
     }
-    std::string transcript;
-    transcript.reserve(32768);
-    if (!stored.chat.contextSummary.empty()) {
-        transcript += "Previous summary:\n";
-        transcript += stored.chat.contextSummary;
-        transcript += "\n\nNewly omitted messages:\n";
+    ContextSummaryPromptResult prompt = buildContextSummaryPrompt(
+        previousSummary, messages,
+        std::min<std::size_t>(
+            std::min<std::size_t>(activeProject.contextByteBudget, 32768),
+            largestBlock - kCompactionHeapReserve));
+    if (!prompt.success) {
+        return {false, {}, 0, prompt.error.c_str()};
     }
-    std::uint32_t includedMessages = 0;
-    for (const Message& message : omitted) {
-        const std::string prefix = message.role == "user" ? "You: " : "AI: ";
-        if (transcript.size() + prefix.size() + message.content.size() + 1 > 32768) {
-            break;
-        }
-        transcript += prefix;
-        transcript += message.content;
-        transcript += '\n';
-        ++includedMessages;
-    }
-    if (includedMessages == 0) {
-        return {false, "Omitted messages exceed the context summary request budget"};
-    }
+    const std::uint32_t includedMessages = prompt.includedMessages;
     Settings summarySettings = consoleSettings;
     summarySettings.globalInstructions = "";
     if (!activeProject.model.isEmpty()) summarySettings.model = activeProject.model;
-    const std::vector<Message> request = {{
-        "user",
-        "Create a compact factual conversation summary. Preserve decisions, names, "
-        "constraints, unresolved questions and file or command references. Do not add "
-        "facts. Return only the summary.\n\n" + transcript,
-    }};
-    const ChatResult summary = streamChatCompletionWithBudget(
+    std::vector<Message> request;
+    request.push_back({"user", std::move(prompt.prompt)});
+    ChatResult summary = streamChatCompletionWithBudget(
         summarySettings, request,
         "This is a context compaction operation, not a user-facing answer.",
         768, [](const std::string&) {}, []() {
@@ -584,16 +1059,37 @@ OperationResult regenerateWebContextSummary(const std::vector<Message>& omitted)
             return consoleEscapePressed() || !server.client().connected();
         });
     if (!summary.success) {
-        return {false, "Context summary failed: " + summary.error};
+        return {false, {}, 0, "Context summary failed: " + summary.error};
     }
-    stored = loadProjectChat(activeProject.summary.id, activeChat.summary.id, 1, 1);
+    if (summary.response.empty() || !isValidUtf8(summary.response)) {
+        return {false, {}, 0, "Context summary returned invalid UTF-8 or no content"};
+    }
+    return {true, std::move(summary.response), includedMessages, ""};
+}
+
+OperationResult regenerateWebContextSummary(const std::vector<Message>& omitted)
+{
+    if (omitted.empty()) {
+        return {true, ""};
+    }
+    ChatDocumentResult stored = loadProjectChatMetadata(
+        activeProject.summary.id, activeChat.summary.id);
     if (!stored.success) {
         return {false, stored.error};
     }
-    stored.chat.contextSummary = summary.response;
+    WebContextSummaryResult generated = generateWebContextSummary(
+        stored.chat.contextSummary, omitted);
+    if (!generated.success) {
+        return {false, generated.error};
+    }
+    stored = loadProjectChatMetadata(activeProject.summary.id, activeChat.summary.id);
+    if (!stored.success) {
+        return {false, stored.error};
+    }
+    stored.chat.contextSummary = std::move(generated.summary);
     stored.chat.summarizedMessageCount = std::min(
         stored.chat.summary.messageCount,
-        stored.chat.summarizedMessageCount + includedMessages);
+        stored.chat.summarizedMessageCount + generated.includedMessages);
     return saveProjectChatMetadata(stored.chat);
 }
 
@@ -696,6 +1192,7 @@ void handleLogout()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    clearFailedWebRequestInstructions();
     sessionToken = "";
     csrfToken = "";
     server.sendHeader("Set-Cookie", "cm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
@@ -714,6 +1211,34 @@ void handleCloseConsole()
     JsonDocument document;
     document["ok"] = true;
     document["message"] = "Web Console is closing";
+    sendWebJson(server, 200, document);
+    clearFailedWebRequestInstructions();
+    exitRequested = true;
+}
+
+void handleStorageConfirm()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    const SdStorageStatus before = inspectSdStorage();
+    if (before.state != SdStorageState::Replaced) {
+        sendWebJsonError(server, 409,
+                         "microSD replacement confirmation is not currently required");
+        return;
+    }
+    const OperationResult result = confirmSdStorageReplacement();
+    if (!result.success) {
+        const SdStorageStatus storage = inspectSdStorage();
+        sendWebJsonError(server, webStorageErrorStatus(storage.state), result.error);
+        return;
+    }
+    clearFailedWebRequestInstructions();
+    JsonDocument document;
+    document["ok"] = true;
+    document["message"] =
+        "microSD replacement confirmed; restart CardMind to initialize the workspace";
     sendWebJson(server, 200, document);
     exitRequested = true;
 }
@@ -787,7 +1312,9 @@ void handleState()
     } else if (view == "chat") {
         Settings requestSettings = consoleSettings;
         if (!activeProject.model.isEmpty()) requestSettings.model = activeProject.model;
-        buildWebConsoleChatState(requestSettings, activeChat, chatRevision, document);
+        buildWebConsoleChatState(
+            requestSettings, activeChat, activeProject.contextByteBudget,
+            chatRevision, document);
         document["project_id"] = activeProject.summary.id;
         document["project_title"] = activeProject.summary.title;
         document["project_archived"] = activeProject.summary.archived;
@@ -801,11 +1328,12 @@ void handleState()
         document["total_messages"] = activeChat.summary.messageCount;
         const std::uint32_t displayedMessages =
             document["messages"].as<JsonArrayConst>().size();
-        document["history_before_offset"] = activeChat.summary.messageCount > displayedMessages
+        const std::uint32_t historyBeforeMessages =
+            activeChat.summary.messageCount > displayedMessages
             ? activeChat.summary.messageCount - displayedMessages
             : 0;
-        document["maximum_context_messages"] = 0;
-        document["maximum_context_bytes"] = activeProject.contextByteBudget;
+        document["history_before_offset"] = historyBeforeMessages;
+        document["history_before_messages"] = historyBeforeMessages;
     } else if (view == "files") {
         std::uint32_t offset = 0;
         if (!server.arg("offset").isEmpty() &&
@@ -869,60 +1397,21 @@ void handleState()
     sendWebJson(server, 200, document);
 }
 
-void handlePrompt()
+void streamStoredWebPrompt(const ChatDocument& storedChat,
+                           std::vector<Message> requestMessages,
+                           std::uint32_t requestOutputTokens,
+                           const std::string& requestInstructions)
 {
-    if (!requestHasValidCsrf()) {
-        sendWebJsonError(server, 401, "Authentication required");
+    const ResolvedProjectRequestPolicy requestPolicy = resolveProjectRequestPolicy(
+        consoleSettings, activeProject, requestOutputTokens);
+    ContextWindowResult requestFit = fitOwnedMessagesToByteBudget(
+        std::move(requestMessages), requestPolicy.contextByteBudget);
+    if (requestFit.retained.empty() ||
+        requestFit.retained.back().role != "user") {
+        sendWebJsonError(server, 500, "Prompt request context lost its user message");
         return;
     }
-    if (webSshTaskIsRunning()) {
-        sendWebJsonError(
-            server, 409,
-            "Wait for the background SSH connection attempt to finish or stop it");
-        return;
-    }
-    const String promptValue = server.arg("prompt");
-    const std::string prompt = promptValue.c_str();
-    if (prompt.empty() || prompt.size() > kMaximumPromptBytes || !isValidUtf8(prompt)) {
-        sendWebJsonError(server, 400, "Prompt must be valid UTF-8 between 1 and 16384 bytes");
-        return;
-    }
-    const ChatDocumentResult storedChat = loadProjectChat(
-        activeProject.summary.id, activeChat.summary.id, 96, 131072);
-    if (!storedChat.success) {
-        sendWebJsonError(server, 500, storedChat.error);
-        return;
-    }
-    std::vector<Message> requestMessages = storedChat.chat.messages;
-    requestMessages.push_back({"user", prompt});
-    ContextWindowResult requestFit = fitMessagesToByteBudget(
-        requestMessages, activeProject.contextByteBudget);
-    OperationResult saved = appendProjectChatMessages(
-        activeProject.summary.id, activeChat.summary.id,
-        {{"user", prompt}}, currentTimestamp());
-    if (!saved.success) {
-        sendWebJsonError(server, 500, saved.error);
-        return;
-    }
-    if (storedChat.chat.summary.messageCount == 0) {
-        ChatDocument titled = storedChat.chat;
-        titled.summary.messageCount = 1;
-        titled.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
-        const ChatDocumentResult appended = loadProjectChat(
-            activeProject.summary.id, activeChat.summary.id, 1, 1);
-        if (!appended.success) {
-            sendWebJsonError(server, 500, appended.error);
-            return;
-        }
-        titled.summary = appended.chat.summary;
-        titled.summary.title = makeChatTitle(prompt, kMaximumChatTitleCells).c_str();
-        titled.projectId = activeProject.summary.id;
-        saved = saveProjectChatMetadata(titled);
-        if (!saved.success) {
-            sendWebJsonError(server, 500, saved.error);
-            return;
-        }
-    }
+    const std::string& prompt = requestFit.retained.back().content;
     const bool sshWasOpen = webSshTerminalOpen || webSshAwaitingTrust;
     if (sshWasOpen) {
         closeWebSshConnection();
@@ -942,11 +1431,14 @@ void handlePrompt()
         sendWebSse(server, "delta", text, "");
     };
     Settings requestSettings = consoleSettings;
-    if (!activeProject.model.isEmpty()) requestSettings.model = activeProject.model;
+    requestSettings.model = requestPolicy.model;
     const std::string effectiveInstructions = effectiveProjectChatInstructions(
-        activeProject, storedChat.chat);
+        activeProject, storedChat, requestInstructions);
+    failedWebRequestInstructions = requestInstructions;
+    failedWebRequestInstructionsChatId = activeChat.summary.id;
+    failedWebRequestOutputTokens = requestPolicy.maximumOutputTokens;
     const ChatToolPolicy toolPolicy = resolveChatToolPolicy(
-        consoleSettings, prompt, activeChat.sshToolsEnabled, sshToolIsAvailable());
+        consoleSettings, prompt, storedChat.sshToolsEnabled, sshToolIsAvailable());
     const CancelCallback isCancelled = []() {
         M5Cardputer.update();
         if (consoleEscapePressed()) {
@@ -959,20 +1451,16 @@ void handlePrompt()
         ? "web_console_tools" : "web_console_chat");
     const ChatResult result = chatToolPolicyIsEnabled(toolPolicy)
         ? streamChatCompletionWithToolsAndBudget(
-                                        requestSettings, requestFit.retained,
-                                        effectiveInstructions, toolPolicy.sshEnabled,
-                                        activeProject.maximumOutputTokens,
-                                        onText,
-                                        [&toolPolicy, &isCancelled](const ToolCall& call) {
-                                            return routeProjectToolCall(
-                                                consoleSettings, toolPolicy,
-                                                activeProject.summary.id, call,
-                                                isCancelled);
-                                        },
-                                        isCancelled)
+              requestSettings, requestFit.retained, effectiveInstructions,
+              toolPolicy.sshEnabled, requestPolicy.maximumOutputTokens, onText,
+              [&toolPolicy, &isCancelled](const ToolCall& call) {
+                  return routeProjectToolCall(
+                      consoleSettings, toolPolicy, activeProject.summary.id, call,
+                      isCancelled);
+              }, isCancelled)
         : streamChatCompletionWithBudget(
               requestSettings, requestFit.retained, effectiveInstructions,
-              activeProject.maximumOutputTokens, onText, isCancelled);
+              requestPolicy.maximumOutputTokens, onText, isCancelled);
     markOperation("idle");
     if (!result.success) {
         consoleStatus = result.error;
@@ -985,23 +1473,25 @@ void handlePrompt()
         renderConsoleScreen();
         return;
     }
-    std::vector<Message> finalMessages = requestFit.retained;
+    clearFailedWebRequestInstructions();
+    std::vector<Message> finalMessages = std::move(requestFit.retained);
     finalMessages.push_back({"assistant", result.response});
-    const ContextWindowResult finalFit = fitMessagesToByteBudget(
-        finalMessages, activeProject.contextByteBudget);
-    std::vector<Message> omitted;
-    if (finalFit.droppedMessages > 0) {
-        omitted.assign(finalMessages.begin(),
-                       finalMessages.begin() + finalFit.droppedMessages);
-    }
-    saved = appendProjectChatMessages(
+    std::vector<Message> omitted = takeMessagesDroppedToByteBudget(
+        std::move(finalMessages), requestPolicy.contextByteBudget);
+    OperationResult saved = appendProjectChatMessages(
         activeProject.summary.id, activeChat.summary.id,
-        {{"assistant", result.response}}, currentTimestamp());
-    if (saved.success && activeProject.automaticCompaction && !omitted.empty()) {
+        {{"assistant", result.response}}, currentTimestamp(),
+        consoleSettings.projectChatHistoryQuotaBytes);
+    if (saved.success && shouldAutomaticallyCompactRequest(
+            requestPolicy, static_cast<std::uint32_t>(omitted.size()))) {
         const OperationResult compacted = regenerateWebContextSummary(omitted);
         if (!compacted.success) {
             consoleStatus = compacted.error;
             sendWebSse(server, "notice", "", compacted.error);
+        } else {
+            sendWebSse(
+                server, "notice", "",
+                "Context summary updated automatically; raw history was preserved");
         }
     }
     if (saved.success) {
@@ -1020,6 +1510,185 @@ void handlePrompt()
     renderConsoleScreen();
 }
 
+struct RequestOutputBudgetResult {
+    bool success;
+    std::uint32_t tokens;
+    String error;
+};
+
+RequestOutputBudgetResult resolveWebRequestOutputBudget(
+    const String& value, std::uint32_t projectTokens)
+{
+    std::uint32_t requestedTokens = projectTokens;
+    if (!value.isEmpty() &&
+        (!parseUnsignedArgument(value, requestedTokens) ||
+         requestedTokens < 128 || requestedTokens > 16384)) {
+        return {
+            false, 0,
+            "Request output tokens must be an integer between 128 and 16384"};
+    }
+    return {
+        true,
+        resolveRequestOutputTokens(
+            projectTokens, value.isEmpty() ? 0 : requestedTokens),
+        ""};
+}
+
+void handlePrompt()
+{
+    rejectLegacyRawTextRoute();
+}
+
+RequestOutputBudgetResult resolveRawWebRequestOutputBudget(
+    const String& value, std::uint32_t projectTokens)
+{
+    std::uint32_t requestedTokens = 0;
+    if (!parseUnsignedArgument(value, requestedTokens) ||
+        (requestedTokens != 0 &&
+         (requestedTokens < 128 || requestedTokens > 16384))) {
+        return {
+            false, 0,
+            "Raw prompt output tokens must be 0 or an integer between 128 and 16384"};
+    }
+    return {
+        true,
+        resolveRequestOutputTokens(projectTokens, requestedTokens),
+        ""};
+}
+
+void processWebPrompt(std::string prompt,
+                      std::string requestInstructions,
+                      const String& outputTokenValue)
+{
+    if (webSshTaskIsRunning()) {
+        sendWebJsonError(
+            server, 409,
+            "Wait for the background SSH connection attempt to finish or stop it");
+        return;
+    }
+    if (prompt.empty() || prompt.size() > kMaximumPromptBytes || !isValidUtf8(prompt)) {
+        sendWebJsonError(server, 400, "Prompt must be valid UTF-8 between 1 and 16384 bytes");
+        return;
+    }
+    const RequestOutputBudgetResult outputBudget = resolveRawWebRequestOutputBudget(
+        outputTokenValue, activeProject.maximumOutputTokens);
+    if (!outputBudget.success) {
+        sendWebJsonError(server, 400, outputBudget.error);
+        return;
+    }
+    ChatDocumentResult storedChat = loadProjectChat(
+        activeProject.summary.id, activeChat.summary.id, 96,
+        activeProjectTailByteBudget());
+    if (!storedChat.success) {
+        sendWebJsonError(server, 500, storedChat.error);
+        return;
+    }
+    std::vector<Message> submittedMessages;
+    submittedMessages.reserve(1);
+    submittedMessages.push_back({"user", std::move(prompt)});
+    std::vector<Message> requestMessages = unsummarizedChatTail(storedChat.chat);
+    const std::uint32_t previousMessageCount =
+        storedChat.chat.summary.messageCount;
+    storedChat.chat = ChatDocument{};
+    OperationResult saved = appendProjectChatMessages(
+        activeProject.summary.id, activeChat.summary.id,
+        submittedMessages, currentTimestamp(),
+        consoleSettings.projectChatHistoryQuotaBytes);
+    if (!saved.success) {
+        sendWebJsonError(server, 500, saved.error);
+        return;
+    }
+    const ResolvedProjectRequestPolicy submittedPolicy = resolveProjectRequestPolicy(
+        consoleSettings, activeProject, outputBudget.tokens);
+    failedWebRequestInstructions = std::move(requestInstructions);
+    failedWebRequestInstructionsChatId = activeChat.summary.id;
+    failedWebRequestOutputTokens = submittedPolicy.maximumOutputTokens;
+    const std::string& submittedPrompt = submittedMessages.front().content;
+    if (previousMessageCount == 0) {
+        activeChat.summary.messageCount = 1;
+        activeChat.summary.updatedAt = currentTimestamp();
+        activeChat.summary.title = makeChatTitle(
+            submittedPrompt, kMaximumChatTitleCells).c_str();
+        saved = saveProjectChatMetadata(activeChat);
+        if (!saved.success) {
+            loadActiveChat(activeChat.summary.id);
+            sendWebJsonError(server, 500, saved.error);
+            return;
+        }
+    }
+    requestMessages.reserve(requestMessages.size() + 1);
+    requestMessages.push_back(std::move(submittedMessages.front()));
+    streamStoredWebPrompt(
+        activeChat, std::move(requestMessages), outputBudget.tokens,
+        failedWebRequestInstructions);
+}
+
+void handlePromptRawData()
+{
+    collectRawPromptRequest();
+}
+
+void handlePromptRawComplete()
+{
+    WebPromptRequest request = parseWebPromptRequest(
+        consumeRawTextRequest(), requestHasPromptFrameContentType());
+    if (!request.success) {
+        sendWebJsonError(server, request.errorStatus, request.error);
+        return;
+    }
+    processWebPrompt(
+        std::move(request.prompt), std::move(request.requestInstructions),
+        server.header("X-CardMind-Output-Tokens"));
+}
+
+void handlePromptRetry()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    if (webSshTaskIsRunning()) {
+        sendWebJsonError(
+            server, 409,
+            "Wait for the background SSH connection attempt to finish or stop it");
+        return;
+    }
+    const String requestedOutputTokens = server.arg("maximum_output_tokens");
+    const bool retryMatchesFailedRequest =
+        failedWebRequestInstructionsChatId == activeChat.summary.id;
+    RequestOutputBudgetResult outputBudget = resolveWebRequestOutputBudget(
+        requestedOutputTokens, activeProject.maximumOutputTokens);
+    if (requestedOutputTokens.isEmpty() && retryMatchesFailedRequest &&
+        failedWebRequestOutputTokens != 0) {
+        outputBudget = {true, failedWebRequestOutputTokens, ""};
+    }
+    if (!outputBudget.success) {
+        sendWebJsonError(server, 400, outputBudget.error);
+        return;
+    }
+    const ChatDocumentResult stored = loadProjectChat(
+        activeProject.summary.id, activeChat.summary.id, 96,
+        activeProjectTailByteBudget());
+    if (!stored.success) {
+        sendWebJsonError(server, 500, stored.error);
+        return;
+    }
+    const ResolvedProjectRequestPolicy requestPolicy = resolveProjectRequestPolicy(
+        consoleSettings, activeProject, outputBudget.tokens);
+    RetryRequestResult retry = prepareRetryRequest(
+        unsummarizedChatTail(stored.chat), requestPolicy.contextByteBudget);
+    if (!retry.success) {
+        sendWebJsonError(server, 409, retry.error.c_str());
+        return;
+    }
+    const std::string emptyRequestInstructions;
+    const std::string& requestInstructions = retryMatchesFailedRequest
+        ? failedWebRequestInstructions : emptyRequestInstructions;
+    streamStoredWebPrompt(
+        stored.chat, std::move(retry.messages), outputBudget.tokens,
+        requestInstructions);
+}
+
 void handleSelectProject()
 {
     if (!requestHasValidCsrf()) {
@@ -1032,6 +1701,7 @@ void handleSelectProject()
         sendWebJsonError(server, 400, result.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     consoleStatus = "Project selected";
     JsonDocument document;
     document["ok"] = true;
@@ -1063,6 +1733,7 @@ void handleNewProject()
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     consoleStatus = "Project created";
     JsonDocument document;
     document["ok"] = true;
@@ -1072,32 +1743,64 @@ void handleNewProject()
 
 void handleProjectSettings()
 {
-    if (!requestHasValidCsrf()) {
-        sendWebJsonError(server, 401, "Authentication required");
+    rejectLegacyRawTextRoute();
+}
+
+void handleProjectSettingsRawData()
+{
+    collectRawTextRequest(kMaximumProjectInstructionsBytes);
+}
+
+void handleProjectSettingsRawComplete()
+{
+    RawTextRequestResult request = consumeRawTextRequest();
+    if (!request.success) {
+        sendWebJsonError(server, request.errorStatus, request.error);
         return;
     }
-    const std::string instructions = server.arg("instructions").c_str();
-    String model = server.arg("model");
+    const DecodedHeaderResult decodedModel = decodePercentEncodedHeader(
+        server.header("X-CardMind-Model-Encoded"), 120);
+    if (!decodedModel.success) {
+        sendWebJsonError(server, decodedModel.errorStatus, decodedModel.error);
+        return;
+    }
+    String model = decodedModel.value.c_str();
     model.trim();
     std::uint32_t contextBytes = 0;
     std::uint32_t outputTokens = 0;
-    if (instructions.size() > kMaximumProjectInstructionsBytes ||
-        !isValidUtf8(instructions) || model.length() > 120 ||
-        !parseUnsignedArgument(server.arg("context_byte_budget"), contextBytes) ||
+    const String automaticCompaction = server.header("X-CardMind-Auto-Compact");
+    if (request.body.size() > kMaximumProjectInstructionsBytes ||
+        !isValidUtf8(request.body) || model.length() > 120 ||
+        !parseUnsignedArgument(server.header("X-CardMind-Context-Bytes"), contextBytes) ||
         contextBytes < 8192 || contextBytes > 262144 ||
-        !parseUnsignedArgument(server.arg("maximum_output_tokens"), outputTokens) ||
-        outputTokens < 128 || outputTokens > 8192) {
+        !parseUnsignedArgument(server.header("X-CardMind-Output-Tokens"), outputTokens) ||
+        outputTokens < 128 || outputTokens > 8192 ||
+        (automaticCompaction != "0" && automaticCompaction != "1")) {
         sendWebJsonError(server, 400,
                          "Project settings contain invalid instructions, model or budgets");
         return;
     }
-    activeProject.instructions = instructions;
+    std::string previousInstructions = std::move(activeProject.instructions);
+    const String previousModel = activeProject.model;
+    const std::uint32_t previousContextBytes = activeProject.contextByteBudget;
+    const std::uint32_t previousOutputTokens = activeProject.maximumOutputTokens;
+    const bool previousAutomaticCompaction = activeProject.automaticCompaction;
+    activeProject.instructions = std::move(request.body);
     activeProject.model = model;
     activeProject.contextByteBudget = contextBytes;
     activeProject.maximumOutputTokens = outputTokens;
-    activeProject.automaticCompaction = server.arg("automatic_compaction") == "1";
+    activeProject.automaticCompaction = automaticCompaction == "1";
     OperationResult result = saveProject(activeProject);
-    if (result.success) result = refreshProjects();
+    if (!result.success) {
+        activeProject.instructions = std::move(previousInstructions);
+        activeProject.model = previousModel;
+        activeProject.contextByteBudget = previousContextBytes;
+        activeProject.maximumOutputTokens = previousOutputTokens;
+        activeProject.automaticCompaction = previousAutomaticCompaction;
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    result = refreshProjects();
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
@@ -1275,6 +1978,7 @@ void handleSelectChat()
         sendWebJsonError(server, 500, selected.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     ++projectRevision;
     consoleStatus = "Chat selected";
     renderConsoleScreen();
@@ -1310,6 +2014,7 @@ void handleNewChat()
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     consoleStatus = "New chat created";
     renderConsoleScreen();
     JsonDocument document;
@@ -1319,21 +2024,34 @@ void handleNewChat()
 
 void handleInstructions()
 {
-    if (!requestHasValidCsrf()) {
-        sendWebJsonError(server, 401, "Authentication required");
+    rejectLegacyRawTextRoute();
+}
+
+void handleInstructionsRawData()
+{
+    collectRawTextRequest(kMaximumProjectChatInstructionsBytes);
+}
+
+void handleInstructionsRawComplete()
+{
+    RawTextRequestResult request = consumeRawTextRequest();
+    if (!request.success) {
+        sendWebJsonError(server, request.errorStatus, request.error);
         return;
     }
-    const String value = server.arg("instructions");
-    const std::string instructions = value.c_str();
-    if (instructions.size() > kMaximumProjectChatInstructionsBytes ||
-        !isValidUtf8(instructions)) {
+    if (request.body.size() > kMaximumProjectChatInstructionsBytes ||
+        !isValidUtf8(request.body)) {
         sendWebJsonError(server, 400, "Instructions must be valid UTF-8 up to 16384 bytes");
         return;
     }
-    activeChat.instructions = instructions;
+    std::string previousInstructions = std::move(activeChat.instructions);
+    const std::uint64_t previousUpdatedAt = activeChat.summary.updatedAt;
+    activeChat.instructions = std::move(request.body);
     activeChat.summary.updatedAt = currentTimestamp();
     const OperationResult saved = saveActiveChat();
     if (!saved.success) {
+        activeChat.instructions = std::move(previousInstructions);
+        activeChat.summary.updatedAt = previousUpdatedAt;
         sendWebJsonError(server, 500, saved.error);
         return;
     }
@@ -1342,11 +2060,98 @@ void handleInstructions()
         sendWebJsonError(server, 500, refreshed.error);
         return;
     }
-    consoleStatus = instructions.empty() ? String("Instructions disabled")
-                                         : String("Instructions saved");
+    consoleStatus = activeChat.instructions.empty()
+        ? String("Instructions disabled") : String("Instructions saved");
     renderConsoleScreen();
     JsonDocument document;
     document["ok"] = true;
+    sendWebJson(server, 200, document);
+}
+
+void handleChatCompact()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    if (webSshTaskIsRunning()) {
+        sendWebJsonError(
+            server, 409,
+            "Wait for the background SSH connection attempt to finish or stop it");
+        return;
+    }
+    const ChatDocumentResult stored = loadProjectChatMetadata(
+        activeProject.summary.id, activeChat.summary.id);
+    if (!stored.success) {
+        sendWebJsonError(server, 500, stored.error);
+        return;
+    }
+    constexpr std::uint32_t kRetainedMessages = 8;
+    const std::uint32_t summaryTarget = stored.chat.summary.messageCount >
+            kRetainedMessages
+        ? stored.chat.summary.messageCount - kRetainedMessages : 0;
+    if (summaryTarget == 0) {
+        sendWebJsonError(
+            server, 409, "This chat is too short to compact");
+        return;
+    }
+    if (webSshTerminalOpen || webSshAwaitingTrust) {
+        closeWebSshConnection();
+    }
+    std::string stagedSummary;
+    std::uint32_t nextMessageIndex = 0;
+    while (nextMessageIndex < summaryTarget) {
+        const std::uint32_t remaining = summaryTarget - nextMessageIndex;
+        const IndexedMessagesPageResult page = readProjectChatMessagesByIndex(
+            activeProject.summary.id, activeChat.summary.id, nextMessageIndex,
+            std::min<std::uint32_t>(remaining, 32), 32768);
+        if (!page.success || page.messages.empty() ||
+            page.nextMessageIndex <= nextMessageIndex ||
+            page.nextMessageIndex > summaryTarget) {
+            sendWebJsonError(
+                server, 500,
+                page.success ? String("Context summary raw-history page did not advance")
+                             : page.error);
+            return;
+        }
+        WebContextSummaryResult generated = generateWebContextSummary(
+            stagedSummary, page.messages);
+        if (!generated.success || generated.includedMessages == 0 ||
+            generated.includedMessages > page.messages.size()) {
+            sendWebJsonError(
+                server, 500,
+                generated.success ? String("Context summary request did not advance")
+                                  : generated.error);
+            return;
+        }
+        stagedSummary = std::move(generated.summary);
+        nextMessageIndex += generated.includedMessages;
+    }
+    ChatDocumentResult current = loadProjectChatMetadata(
+        activeProject.summary.id, activeChat.summary.id);
+    if (!current.success) {
+        sendWebJsonError(server, 500, current.error);
+        return;
+    }
+    if (current.chat.summary.messageCount != stored.chat.summary.messageCount) {
+        sendWebJsonError(
+            server, 409,
+            "Chat history changed while the context summary was being regenerated");
+        return;
+    }
+    current.chat.contextSummary = std::move(stagedSummary);
+    current.chat.summarizedMessageCount = summaryTarget;
+    OperationResult result = saveProjectChatMetadata(current.chat);
+    if (result.success) result = loadActiveChat(activeChat.summary.id);
+    if (result.success) result = refreshChats();
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    document["summary_event"] = "manual_regenerated";
+    document["summarized_messages"] = activeChat.summarizedMessageCount;
     sendWebJson(server, 200, document);
 }
 
@@ -1713,12 +2518,17 @@ void handleSettings()
     updated.ttsModel = server.arg("tts_model");
     updated.ttsVoice = server.arg("tts_voice");
     updated.ttsAutoPlay = server.arg("tts_auto_play") == "1";
+    std::uint32_t historyQuotaMiB = 0;
     std::uint32_t volume = 0;
     std::uint32_t brightness = 0;
     std::uint32_t sleepMinutes = 0;
     std::uint32_t repeatMs = 0;
     std::uint32_t powerProfile = 0;
-    if (!parseUnsignedArgument(server.arg("tts_volume"), volume) || volume > 255 ||
+    if (!parseUnsignedArgument(
+            server.arg("project_chat_history_quota_mib"), historyQuotaMiB) ||
+        (historyQuotaMiB != 0 &&
+         (historyQuotaMiB < 2 || historyQuotaMiB > 4095)) ||
+        !parseUnsignedArgument(server.arg("tts_volume"), volume) || volume > 255 ||
         !parseUnsignedArgument(server.arg("display_brightness"), brightness) ||
         brightness < 32 || brightness > 255 ||
         !parseUnsignedArgument(server.arg("screen_sleep_minutes"), sleepMinutes) ||
@@ -1735,6 +2545,7 @@ void handleSettings()
     updated.screenSleepMinutes = static_cast<std::uint16_t>(sleepMinutes);
     updated.keyboardRepeatMs = static_cast<std::uint16_t>(repeatMs);
     updated.powerProfile = static_cast<std::uint8_t>(powerProfile);
+    updated.projectChatHistoryQuotaBytes = historyQuotaMiB * 1024U * 1024U;
     const OperationResult result = saveSettings(updated);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
@@ -1768,6 +2579,7 @@ void handleClearChat()
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     consoleStatus = "Chat messages cleared";
     renderConsoleScreen();
     JsonDocument document;
@@ -2413,6 +3225,12 @@ void handleSshKeyUploadData()
             sshKeyUploadError = "Authentication required";
             return;
         }
+        const OperationResult storage = requireSdWriteAccess(
+            0, kStorageOperationalFloorBytes);
+        if (!storage.success) {
+            sshKeyUploadError = storage.error;
+            return;
+        }
         const OperationResult initialized = initializeSshStorage();
         if (!initialized.success) {
             sshKeyUploadError = initialized.error;
@@ -2429,19 +3247,32 @@ void handleSshKeyUploadData()
         if (!sshKeyUploadError.isEmpty()) {
             return;
         }
+        const OperationResult storage = requireSdWriteAccess(
+            0, kStorageOperationalFloorBytes);
+        if (!storage.success) {
+            sshKeyUploadError = storage.error;
+            if (sshKeyUploadFile) {
+                sshKeyUploadFile.close();
+            }
+            return;
+        }
         if (!sshKeyUploadFile || upload.currentSize > 16384 - sshKeyUploadBytes) {
             sshKeyUploadError = "SSH private key exceeds 16384 bytes";
             if (sshKeyUploadFile) {
                 sshKeyUploadFile.close();
             }
-            SD.remove(kSshKeyUploadPath);
+            if (requireSdWriteAccess(0, 0).success) {
+                SD.remove(kSshKeyUploadPath);
+            }
             return;
         }
         const std::size_t written = sshKeyUploadFile.write(upload.buf, upload.currentSize);
         if (written != upload.currentSize) {
             sshKeyUploadError = "microSD did not accept the complete SSH key chunk";
             sshKeyUploadFile.close();
-            SD.remove(kSshKeyUploadPath);
+            if (requireSdWriteAccess(0, 0).success) {
+                SD.remove(kSshKeyUploadPath);
+            }
             return;
         }
         sshKeyUploadBytes += written;
@@ -2451,10 +3282,26 @@ void handleSshKeyUploadData()
         if (!sshKeyUploadError.isEmpty()) {
             return;
         }
+        OperationResult storage = requireSdWriteAccess(
+            0, kStorageOperationalFloorBytes);
+        if (!storage.success) {
+            sshKeyUploadError = storage.error;
+            if (sshKeyUploadFile) {
+                sshKeyUploadFile.close();
+            }
+            return;
+        }
         sshKeyUploadFile.flush();
         sshKeyUploadFile.close();
+        storage = requireSdWriteAccess(0, kStorageOperationalFloorBytes);
+        if (!storage.success) {
+            sshKeyUploadError = storage.error;
+            return;
+        }
         const OperationResult installed = installSshPrivateKey(kSshKeyUploadPath);
-        SD.remove(kSshKeyUploadPath);
+        if (requireSdWriteAccess(0, 0).success) {
+            SD.remove(kSshKeyUploadPath);
+        }
         if (!installed.success) {
             sshKeyUploadError = installed.error;
         }
@@ -2464,7 +3311,9 @@ void handleSshKeyUploadData()
         if (sshKeyUploadFile) {
             sshKeyUploadFile.close();
         }
-        SD.remove(kSshKeyUploadPath);
+        if (requireSdWriteAccess(0, 0).success) {
+            SD.remove(kSshKeyUploadPath);
+        }
         sshKeyUploadError = "SSH private-key upload was aborted";
     }
 }
@@ -2476,7 +3325,11 @@ void handleSshKeyUploadComplete()
         return;
     }
     if (!sshKeyUploadError.isEmpty()) {
-        sendWebJsonError(server, 400, sshKeyUploadError);
+        const SdStorageStatus storage = inspectSdStorage();
+        const int errorStatus = storage.state == SdStorageState::Ready
+            ? 400
+            : webStorageErrorStatus(storage.state);
+        sendWebJsonError(server, errorStatus, sshKeyUploadError);
         return;
     }
     const OperationResult refreshed = refreshSshProfiles();
@@ -2518,9 +3371,14 @@ void handleQrFile()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const String name = server.arg("name");
+    if (!isWorkspaceTextFile(std::string(name.c_str()))) {
+        sendWebJsonError(server, 400, "Selected workspace file is not editable text");
+        return;
+    }
     const std::uint32_t startedAt = millis();
     const WorkspaceChunkResult result = readWorkspaceFileChunk(
-        server.arg("name"), 0, kMaximumQrPayloadBytes + 1);
+        name, 0, kMaximumQrPayloadBytes + 1);
     recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
@@ -2559,6 +3417,11 @@ void handleFileRead()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const String name = server.arg("name");
+    if (!isWorkspaceTextFile(std::string(name.c_str()))) {
+        sendWebJsonError(server, 400, "Selected workspace file is not editable text");
+        return;
+    }
     std::uint32_t offset = 0;
     if (!parseUnsignedArgument(server.arg("offset"), offset)) {
         sendWebJsonError(server, 400, "File offset must be an unsigned integer");
@@ -2566,7 +3429,7 @@ void handleFileRead()
     }
     const std::uint32_t startedAt = millis();
     const WorkspaceChunkResult result = readWorkspaceFileChunk(
-        server.arg("name"), offset, kMaximumWebFileChunkBytes);
+        name, offset, kMaximumWebFileChunkBytes);
     recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
@@ -2588,6 +3451,11 @@ void handleFileSave()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    const String name = server.arg("name");
+    if (!isWorkspaceTextFile(std::string(name.c_str()))) {
+        sendWebJsonError(server, 400, "Selected workspace file is not editable text");
+        return;
+    }
     std::uint32_t offset = 0;
     std::uint32_t originalBytes = 0;
     if (!parseUnsignedArgument(server.arg("offset"), offset) ||
@@ -2602,7 +3470,7 @@ void handleFileSave()
     }
     const std::uint32_t startedAt = millis();
     OperationResult result = replaceWorkspaceFileRange(
-        server.arg("name"), offset, originalBytes, content);
+        name, offset, originalBytes, content);
     recordWebSdWrite(millis() - startedAt);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
@@ -2685,9 +3553,63 @@ void handleFileDownload()
         sendWebJsonError(server, 404, "Workspace file does not exist: " + name);
         return;
     }
-    server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
-    server.streamFile(file, "text/plain; charset=utf-8");
+    const std::size_t totalBytesValue = file.size();
+    if (totalBytesValue > kMaximumWorkspaceFileBytes) {
+        file.close();
+        sendWebJsonError(server, 400,
+                         "Workspace file exceeds the supported 32-bit file range");
+        return;
+    }
+    const std::uint32_t totalBytes = static_cast<std::uint32_t>(totalBytesValue);
+    Client& client = server.client();
+    const String responseHeader =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/octet-stream\r\n"
+        "Content-Disposition: attachment\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n"
+        "Content-Length: " + String(static_cast<unsigned long long>(totalBytes)) +
+        "\r\n\r\n";
+    auto writeExact = [&client](const std::uint8_t* data, std::size_t bytes) -> bool {
+        std::size_t written = 0;
+        while (written < bytes) {
+            if (!client.connected()) {
+                return false;
+            }
+            const std::size_t accepted = client.write(data + written, bytes - written);
+            if (accepted == 0 || accepted > bytes - written) {
+                return false;
+            }
+            written += accepted;
+        }
+        return true;
+    };
+    bool success = writeExact(
+        reinterpret_cast<const std::uint8_t*>(responseHeader.c_str()),
+        responseHeader.length());
+    std::uint8_t buffer[4096] = {};
+    std::uint32_t sentBytes = 0;
+    while (success && sentBytes < totalBytes) {
+        const std::size_t blockBytes = std::min<std::size_t>(
+            sizeof(buffer), totalBytes - sentBytes);
+        const std::size_t readBytes = file.read(buffer, blockBytes);
+        if (readBytes != blockBytes || !writeExact(buffer, readBytes)) {
+            success = false;
+            break;
+        }
+        sentBytes += static_cast<std::uint32_t>(readBytes);
+        if ((sentBytes % (64U * 1024U)) == 0) {
+            delay(0);
+        }
+    }
     file.close();
+    client.flush();
+    client.stop();
+    if (!success || sentBytes != totalBytes) {
+        Serial.printf("WEB_FILE_DOWNLOAD result=failed sent_bytes=%u expected_bytes=%u\n",
+                      static_cast<unsigned int>(sentBytes),
+                      static_cast<unsigned int>(totalBytes));
+    }
 }
 
 void handleFileUploadData()
@@ -2696,7 +3618,7 @@ void handleFileUploadData()
     if (upload.status == UPLOAD_FILE_START) {
         uploadReplacing = server.arg("replace") == "1";
         uploadName = uploadReplacing ? server.arg("name") : upload.filename;
-        uploadStorageName = uploadReplacing ? String(kWebSaveTemporaryName) : uploadName;
+        uploadStorageName = uploadReplacing ? uploadName + ".tmp" : uploadName;
         uploadError = "";
         uploadBytes = 0;
         uploadCreated = false;
@@ -2704,15 +3626,26 @@ void handleFileUploadData()
             uploadError = "Authentication required";
             return;
         }
-        if (uploadReplacing &&
-            (!isValidWorkspaceFilename(uploadName.c_str()) ||
-             !SD.exists(workspaceFilePath(uploadName)))) {
-            uploadError = "Workspace file does not exist: " + uploadName;
+        const OperationResult storage = requireSdWriteAccess(
+            0, kStorageOperationalFloorBytes);
+        if (!storage.success) {
+            uploadError = storage.error;
             return;
         }
-        if (uploadReplacing && SD.exists(workspaceFilePath(uploadStorageName)) &&
-            !SD.remove(workspaceFilePath(uploadStorageName))) {
-            uploadError = "Failed to clear the temporary Web Console save file";
+        if (uploadReplacing && !isValidWorkspaceFilename(uploadName.c_str())) {
+            uploadError = "Invalid workspace filename";
+            return;
+        }
+        if (uploadReplacing) {
+            const OperationResult recovered = recoverAtomicSdFile(
+                workspaceFilePath(uploadName));
+            if (!recovered.success) {
+                uploadError = recovered.error;
+                return;
+            }
+        }
+        if (uploadReplacing && !SD.exists(workspaceFilePath(uploadName))) {
+            uploadError = "Workspace file does not exist: " + uploadName;
             return;
         }
         if (!uploadReplacing) {
@@ -2734,8 +3667,9 @@ void handleFileUploadData()
         if (!uploadError.isEmpty()) {
             return;
         }
-        if (!uploadFile || upload.currentSize > kMaximumWorkspaceFileBytes - uploadBytes) {
-            failUpload("Uploaded file exceeds the 256 MiB size limit");
+        if (!uploadFile || uploadBytes > kMaximumWorkspaceFileBytes ||
+            upload.currentSize > kMaximumWorkspaceFileBytes - uploadBytes) {
+            failUpload("Uploaded file exceeds the supported 32-bit file range");
             return;
         }
         const OperationResult space = checkSdOperationSpace(
@@ -2759,11 +3693,6 @@ void handleFileUploadData()
         uploadFile.flush();
         uploadFile.close();
         if (uploadReplacing) {
-            const OperationResult valid = validateWorkspaceFileUtf8(uploadStorageName);
-            if (!valid.success) {
-                failUpload(valid.error);
-                return;
-            }
             const OperationResult replaced = replaceWorkspaceFileWithTemporary(
                 uploadName, uploadStorageName);
             if (!replaced.success) {
@@ -2852,41 +3781,66 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
     }
     Serial.println("WEB_CONSOLE stage=refresh_projects");
     Serial.flush();
-    result = refreshProjects();
-    if (!result.success) {
-        releaseConsoleSessionState();
-        return {false, initialChatId, result.error};
-    }
     settingsRevision = 1;
-    Serial.println("WEB_CONSOLE stage=load_project");
-    Serial.flush();
-    const ProjectStorageManifestResult manifest = loadProjectStorageManifest();
-    if (!manifest.success || manifest.manifest.activeProjectId.isEmpty()) {
-        releaseConsoleSessionState();
-        return {false, initialChatId,
-                manifest.success ? String("Active project is missing") : manifest.error};
-    }
-    result = selectActiveProject(manifest.manifest.activeProjectId);
-    if (result.success && !initialChatId.isEmpty() &&
-        initialChatId != activeChat.summary.id) {
-        const ChatDocumentResult requested = loadProjectChat(
-            activeProject.summary.id, initialChatId, 96, 131072);
-        if (requested.success) {
-            activeChat = requested.chat;
-            result = saveActiveChatSelection(initialChatId);
-            if (result.success) {
-                ++chatRevision;
-                ++projectRevision;
+    String storageStartupError;
+    const SdStorageStatus startupStorage = inspectSdStorage();
+    result = requireSdReadAccess();
+    if (result.success && startupStorage.state == SdStorageState::Ready) {
+        result = refreshProjects();
+        if (!result.success) {
+            releaseConsoleSessionState();
+            return {false, initialChatId, result.error};
+        }
+        Serial.println("WEB_CONSOLE stage=load_project");
+        Serial.flush();
+        const ProjectStorageManifestResult manifest = loadProjectStorageManifest();
+        if (!manifest.success || manifest.manifest.activeProjectId.isEmpty()) {
+            releaseConsoleSessionState();
+            return {false, initialChatId,
+                    manifest.success ? String("Active project is missing") : manifest.error};
+        }
+        result = selectActiveProject(manifest.manifest.activeProjectId);
+        if (result.success && !initialChatId.isEmpty() &&
+            initialChatId != activeChat.summary.id) {
+            const ChatDocumentResult requested = loadProjectChat(
+                activeProject.summary.id, initialChatId, 96,
+                activeProjectTailByteBudget());
+            if (requested.success) {
+                activeChat = requested.chat;
+                result = saveActiveChatSelection(initialChatId);
+                if (result.success) {
+                    ++chatRevision;
+                    ++projectRevision;
+                }
             }
         }
-    }
-    if (!result.success) {
-        releaseConsoleSessionState();
-        return {false, initialChatId, result.error};
+        if (!result.success) {
+            releaseConsoleSessionState();
+            return {false, initialChatId, result.error};
+        }
+    } else if (result.success && startupStorage.state == SdStorageState::Full) {
+        result = loadCommittedConsoleStorageReadOnly();
+        storageStartupError = startupStorage.error;
+        if (!result.success) {
+            activeProject = ProjectDocument{};
+            activeChat = ChatDocument{};
+            consoleProjects.clear();
+            consoleChats.clear();
+            consoleFiles.clear();
+            storageStartupError += "; ";
+            storageStartupError += result.error;
+        }
+    } else {
+        activeProject = ProjectDocument{};
+        activeChat = ChatDocument{};
+        consoleProjects.clear();
+        consoleChats.clear();
+        consoleFiles.clear();
+        storageStartupError = result.success ? startupStorage.error : result.error;
     }
     sessionToken = "";
     csrfToken = "";
-    consoleStatus = "";
+    consoleStatus = storageStartupError;
     exitRequested = false;
     pythonRestartRequested = false;
     consoleEscapeConsumed = consoleEscapePressed();
@@ -2900,9 +3854,12 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleSession,
             handleCloseConsole,
             handleState,
+            handleStorageConfirm,
             handleSelectProject,
             handleNewProject,
             handleProjectSettings,
+            handleProjectSettingsRawComplete,
+            handleProjectSettingsRawData,
             handleRenameProject,
             handleDuplicateProject,
             handleArchiveProject,
@@ -2910,9 +3867,15 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleProjectLinks,
             handleProjectLinkUpdate,
             handlePrompt,
+            handlePromptRawComplete,
+            handlePromptRawData,
+            handlePromptRetry,
             handleSelectChat,
             handleNewChat,
             handleInstructions,
+            handleInstructionsRawComplete,
+            handleInstructionsRawData,
+            handleChatCompact,
             handleChatPermissions,
             handleRenameChat,
             handlePinChat,
@@ -2954,7 +3917,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleFileUploadComplete,
             handleFileUploadData,
             []() { sendWebJsonError(server, 404, "Not found"); },
-        }};
+        }, allowWebStorageRoute};
         configureWebConsoleRoutes(server, handlers);
         routesConfigured = true;
     }
