@@ -12,16 +12,19 @@
 
 ## Current firmware limits
 
-- Projects and chats use paginated microSD indexes rather than a small in-memory count.
-  The current implementation indexes up to 4,096 Shared workspace entries; practical
-  project and chat capacity is otherwise bounded by microSD space and index integrity.
+- Projects, chats, and Shared workspace files use paginated microSD indexes rather than
+  a small in-memory count. A 500-file workspace is exercised by the hardware release
+  suite without making 500 a product limit. Per-file bookmark metadata currently
+  supports up to 4,096 bookmarked files.
 - Request context is configurable per project from 8 KiB to 256 KiB. The default is
   32 KiB. Complete raw history stays on microSD and does not have a fixed 16- or
   64-message ceiling.
 - Project and chat instructions: 16 KiB each. A compacted context summary may use up
   to 128 KiB on microSD.
 - A typed or pasted chat prompt is limited to 16 KiB of valid UTF-8.
-- Workspace file: 256 MiB. Nested relative UTF-8 paths are supported; absolute paths,
+- Workspace files have no CardMind-specific size ceiling. Available microSD capacity,
+  filesystem limits, 32-bit file offsets, and the safe free-space reserve are the
+  effective limits. Nested relative UTF-8 paths are supported; absolute paths,
   traversal, control characters, and internal `.tmp`/`.bak` targets are rejected.
 - Arbitrary binary files may be stored, downloaded, copied, and transferred over SFTP.
   Editing and model read/append tools require valid UTF-8 text and use bounded internal

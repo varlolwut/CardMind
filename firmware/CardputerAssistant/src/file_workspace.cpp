@@ -18,6 +18,17 @@ constexpr const char* kWorkspaceDirectory = "/assistant/files";
 constexpr const char* kBookmarksPath = "/assistant/file_bookmarks.json";
 constexpr std::size_t kCopyBufferBytes = 4096;
 constexpr std::size_t kMaximumSearchBytes = 128;
+constexpr std::size_t kDefaultWorkspaceToolListEntries = 16;
+constexpr std::size_t kMaximumWorkspaceToolListEntries = 16;
+
+OperationResult requireWorkspaceTextFile(const String& name)
+{
+    return isWorkspaceTextFile(std::string(name.c_str()))
+        ? OperationResult{true, ""}
+        : OperationResult{false,
+                          "Workspace text operation requires a safe text, source, or config extension: " +
+                              name};
+}
 
 struct BookmarkEntry {
     String name;
@@ -43,6 +54,45 @@ struct WorkspaceRecoveryCollector {
     std::vector<String> targets;
     String error;
 };
+
+struct ListFilesArgumentsResult {
+    bool success;
+    std::uint32_t offset;
+    std::size_t maximumEntries;
+    String error;
+};
+
+ListFilesArgumentsResult parseListFilesArguments(const JsonObjectConst& arguments)
+{
+    std::uint32_t offset = 0;
+    std::size_t maximumEntries = kDefaultWorkspaceToolListEntries;
+    for (const JsonPairConst field : arguments) {
+        const String name = field.key().c_str();
+        if (name == "offset") {
+            if (!field.value().is<std::uint32_t>()) {
+                return {false, 0, 0,
+                        "list_files field 'offset' must be a non-negative 32-bit integer"};
+            }
+            offset = field.value().as<std::uint32_t>();
+        } else if (name == "max_entries") {
+            if (!field.value().is<std::uint32_t>()) {
+                return {false, 0, 0,
+                        "list_files field 'max_entries' must be an integer between 1 and 16"};
+            }
+            const std::uint32_t requestedEntries = field.value().as<std::uint32_t>();
+            if (requestedEntries == 0 ||
+                requestedEntries > kMaximumWorkspaceToolListEntries) {
+                return {false, 0, 0,
+                        "list_files field 'max_entries' must be between 1 and 16"};
+            }
+            maximumEntries = requestedEntries;
+        } else {
+            return {false, 0, 0,
+                    "list_files accepts only optional fields 'offset' and 'max_entries'"};
+        }
+    }
+    return {true, offset, maximumEntries, ""};
+}
 
 String baseName(const String& path)
 {
@@ -74,14 +124,21 @@ void collectWorkspaceEntries(File& directory,
         if (entry.isDirectory()) {
             collectWorkspaceEntries(entry, relativePath, depth + 1, collector);
         } else {
+            const std::size_t fileBytes = entry.size();
+            if (fileBytes > kMaximumWorkspaceFileBytes) {
+                collector.error = "Workspace file exceeds the supported 32-bit file range: " +
+                    relativePath;
+                entry.close();
+                return;
+            }
             if (collector.visited >= collector.skipped) {
                 if (collector.entries.size() >= collector.maximumEntries) {
                     collector.hasMore = true;
                     entry.close();
                     return;
                 }
-                collector.entries.push_back({relativePath,
-                                              static_cast<std::uint32_t>(entry.size()), false});
+                collector.entries.push_back(
+                    {relativePath, static_cast<std::uint32_t>(fileBytes), false});
             }
             ++collector.visited;
         }
@@ -200,15 +257,28 @@ OperationResult copyFile(const String& sourcePath, const String& destinationPath
     if (!source) {
         return {false, "Failed to open source workspace file for copying"};
     }
+    const std::size_t expectedBytes = source.size();
+    if (expectedBytes > kMaximumWorkspaceFileBytes) {
+        source.close();
+        return {false, "Workspace source exceeds the supported 32-bit file range"};
+    }
+    const OperationResult space = checkSdOperationSpace(
+        expectedBytes, kStorageOperationalFloorBytes);
+    if (!space.success) {
+        source.close();
+        return space;
+    }
     File destination = SD.open(destinationPath, FILE_WRITE);
     if (!destination) {
         source.close();
         return {false, "Failed to create temporary workspace copy"};
     }
     std::uint8_t buffer[kCopyBufferBytes] = {};
-    std::size_t copiedBytes = 0;
-    while (source.available() > 0) {
-        const std::size_t readBytes = source.read(buffer, sizeof(buffer));
+    std::uint32_t copiedBytes = 0;
+    while (copiedBytes < expectedBytes) {
+        const std::size_t blockBytes = std::min<std::size_t>(
+            sizeof(buffer), expectedBytes - copiedBytes);
+        const std::size_t readBytes = source.read(buffer, blockBytes);
         if (readBytes == 0) {
             source.close();
             destination.close();
@@ -220,9 +290,13 @@ OperationResult copyFile(const String& sourcePath, const String& destinationPath
             destination.close();
             return {false, "Workspace copy could not write a complete block"};
         }
-        copiedBytes += writtenBytes;
+        if (writtenBytes > kMaximumWorkspaceFileBytes - copiedBytes) {
+            source.close();
+            destination.close();
+            return {false, "Workspace copy exceeds the supported 32-bit file range"};
+        }
+        copiedBytes += static_cast<std::uint32_t>(writtenBytes);
     }
-    const std::size_t expectedBytes = source.size();
     destination.flush();
     source.close();
     destination.close();
@@ -265,20 +339,79 @@ bool isFileUtf8Boundary(File& file, std::size_t offset, std::size_t totalBytes)
     return value >= 0 && (static_cast<std::uint8_t>(value) & 0xC0U) != 0x80U;
 }
 
+OperationResult validateWorkspaceFileUtf8Path(const String& path)
+{
+    File file = SD.open(path, FILE_READ);
+    if (!file) {
+        return {false, "Workspace file does not exist: " + path};
+    }
+    const std::size_t fileBytes = file.size();
+    if (fileBytes > kMaximumWorkspaceFileBytes) {
+        file.close();
+        return {false, "Workspace file exceeds the supported 32-bit file range"};
+    }
+    constexpr std::size_t blockBytes = 4096;
+    std::vector<std::uint8_t> block(blockBytes);
+    std::string pending;
+    while (file.position() < fileBytes) {
+        const std::size_t readRequestBytes = std::min<std::size_t>(
+            block.size(), fileBytes - file.position());
+        const std::size_t readBytes = file.read(block.data(), readRequestBytes);
+        if (readBytes == 0) {
+            file.close();
+            return {false, "microSD read stopped while validating UTF-8"};
+        }
+        pending.append(reinterpret_cast<const char*>(block.data()), readBytes);
+        if (file.position() == fileBytes) {
+            break;
+        }
+        bool prefixValid = false;
+        for (std::size_t retained = 0; retained <= 3 && retained <= pending.size(); ++retained) {
+            const std::size_t prefixBytes = pending.size() - retained;
+            if (isValidUtf8(pending.substr(0, prefixBytes))) {
+                pending = pending.substr(prefixBytes);
+                prefixValid = true;
+                break;
+            }
+        }
+        if (!prefixValid) {
+            file.close();
+            return {false, "Workspace file contains invalid UTF-8"};
+        }
+    }
+    file.close();
+    return isValidUtf8(pending)
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Workspace file contains incomplete or invalid UTF-8"};
+}
+
 OperationResult commitTemporaryFile(const String& target,
                                     const String& temporary,
                                     const String& backup)
 {
     const bool hadTarget = SD.exists(target);
     if (hadTarget && !SD.rename(target, backup)) {
-        removeIfPresent(temporary);
-        return {false, "Failed to create a backup before replacing workspace file"};
+        const OperationResult cleaned = removeIfPresent(temporary);
+        return cleaned.success
+            ? OperationResult{
+                false, "Failed to create a backup before replacing workspace file"}
+            : OperationResult{
+                false,
+                "Failed to create a backup before replacing workspace file; " +
+                    cleaned.error};
     }
     if (!SD.rename(temporary, target)) {
         if (hadTarget && !SD.rename(backup, target)) {
             return {false, "Failed to commit workspace file and restore its backup"};
         }
-        return {false, "Failed to commit workspace file"};
+        const OperationResult cleaned = removeIfPresent(temporary);
+        return cleaned.success
+            ? OperationResult{false, "Failed to commit workspace file"}
+            : OperationResult{
+                false,
+                String("Failed to commit workspace file") +
+                    (hadTarget ? " after restoring its backup; " : "; ") +
+                    cleaned.error};
     }
     return hadTarget ? removeIfPresent(backup) : OperationResult{true, ""};
 }
@@ -358,20 +491,28 @@ OperationResult saveBookmarkEntries(const std::vector<BookmarkEntry>& entries)
     return commitTemporaryFile(target, temporary, backup);
 }
 
-ToolExecutionResult listFilesTool()
+ToolExecutionResult listFilesTool(std::uint32_t offset, std::size_t maximumEntries)
 {
-    const WorkspaceFilesResult result = listWorkspaceFiles();
+    const WorkspaceFilesPageResult result = listWorkspaceFilesPage(offset, maximumEntries);
     if (!result.success) {
         return toolFailure(result.error);
+    }
+    if (!result.eof && result.nextOffset <= offset) {
+        return toolFailure("Workspace pagination did not advance");
     }
     JsonDocument document;
     document["ok"] = true;
     JsonArray files = document["files"].to<JsonArray>();
     for (const auto& file : result.files) {
+        if (!isWorkspaceTextFile(std::string(file.name.c_str()))) {
+            continue;
+        }
         JsonObject item = files.add<JsonObject>();
         item["name"] = file.name;
         item["bytes"] = file.size;
     }
+    document["next_offset"] = result.nextOffset;
+    document["eof"] = result.eof;
     return {true, jsonOutput(document), ""};
 }
 
@@ -402,6 +543,10 @@ ToolExecutionResult writeFileTool(const String& name, const std::string& content
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
         return toolFailure("Invalid workspace-relative path");
+    }
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return toolFailure(textFile.error);
     }
     if (content.size() > kMaximumWorkspaceToolChunkBytes) {
         return toolFailure("write_file content exceeds 12288 bytes; write an initial chunk, then use append_file");
@@ -454,6 +599,10 @@ ToolExecutionResult appendFileTool(const String& name, const std::string& conten
     if (!isValidWorkspaceFilename(name.c_str())) {
         return toolFailure("Invalid workspace-relative path");
     }
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return toolFailure(textFile.error);
+    }
     if (content.size() > kMaximumWorkspaceToolChunkBytes) {
         return toolFailure("append_file content exceeds the 12288-byte chunk limit");
     }
@@ -465,11 +614,14 @@ ToolExecutionResult appendFileTool(const String& name, const std::string& conten
     if (!existing) {
         return toolFailure("Workspace file does not exist; create it with write_file before appending");
     }
-    const std::size_t currentBytes = existing.size();
+    const std::size_t currentBytesValue = existing.size();
     existing.close();
-    if (currentBytes > kMaximumWorkspaceFileBytes ||
-        content.size() > kMaximumWorkspaceFileBytes - currentBytes) {
-        return toolFailure("Appending would exceed the 256 MiB per-file limit");
+    if (currentBytesValue > kMaximumWorkspaceFileBytes) {
+        return toolFailure("Workspace file exceeds the supported 32-bit file range");
+    }
+    const std::uint32_t currentBytes = static_cast<std::uint32_t>(currentBytesValue);
+    if (content.size() > kMaximumWorkspaceFileBytes - currentBytes) {
+        return toolFailure("Appending would exceed the supported 32-bit file range");
     }
     const OperationResult space = checkSdOperationSpace(
         currentBytes + content.size(), kStorageOperationalFloorBytes);
@@ -536,58 +688,40 @@ OperationResult ensureWorkspaceFileParent(const String& name)
     return ensureWorkspaceParentDirectories(name);
 }
 
-WorkspaceFilesResult listWorkspaceFiles()
+ToolExecutionResult listProjectFilesTool(const String& projectId,
+                                         std::uint32_t offset,
+                                         std::size_t maximumEntries)
 {
-    std::vector<WorkspaceFile> files;
-    std::uint32_t offset = 0;
-    bool eof = false;
-    while (!eof) {
-        const WorkspaceFilesPageResult page = listWorkspaceFilesPage(offset, 64);
-        if (!page.success) {
-            return {false, {}, page.error};
-        }
-        files.insert(files.end(), page.files.begin(), page.files.end());
-        if (!page.eof && page.nextOffset <= offset) {
-            return {false, {}, "Workspace pagination did not advance"};
-        }
-        offset = page.nextOffset;
-        eof = page.eof;
+    const SharedFileLinksPageResult page = listProjectSharedLinksPage(
+        projectId, offset, maximumEntries);
+    if (!page.success) {
+        return toolFailure(page.error);
     }
-    return {true, std::move(files), ""};
-}
-
-ToolExecutionResult listProjectFilesTool(const String& projectId)
-{
+    if (!page.eof && page.nextOffset <= offset) {
+        return toolFailure("Project Shared-link pagination did not advance");
+    }
     JsonDocument document;
     document["ok"] = true;
     JsonArray files = document["files"].to<JsonArray>();
-    std::uint32_t offset = 0;
-    bool eof = false;
-    while (!eof) {
-        const SharedFileLinksPageResult page = listProjectSharedLinksPage(
-            projectId, offset, 32);
-        if (!page.success) {
-            return toolFailure(page.error);
-        }
-        for (const SharedFileLink& link : page.links) {
-            File file = SD.open(workspaceFilePath(link.path), FILE_READ);
-            if (!file || file.isDirectory()) {
-                if (file) {
-                    file.close();
-                }
-                return toolFailure("Project links a missing Shared file: " + link.path);
+    for (const SharedFileLink& link : page.links) {
+        File file = SD.open(workspaceFilePath(link.path), FILE_READ);
+        if (!file || file.isDirectory()) {
+            if (file) {
+                file.close();
             }
-            JsonObject item = files.add<JsonObject>();
-            item["name"] = link.path;
-            item["bytes"] = file.size();
+            return toolFailure("Project links a missing Shared file: " + link.path);
+        }
+        if (!isWorkspaceTextFile(std::string(link.path.c_str()))) {
             file.close();
+            continue;
         }
-        if (!page.eof && page.nextOffset <= offset) {
-            return toolFailure("Project Shared-link pagination did not advance");
-        }
-        offset = page.nextOffset;
-        eof = page.eof;
+        JsonObject item = files.add<JsonObject>();
+        item["name"] = link.path;
+        item["bytes"] = file.size();
+        file.close();
     }
+    document["next_offset"] = page.nextOffset;
+    document["eof"] = page.eof;
     return {true, jsonOutput(document), ""};
 }
 
@@ -622,6 +756,10 @@ WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
         return {false, "", 0, 0, 0, true,
                 "Invalid workspace-relative path"};
     }
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return {false, "", 0, 0, 0, true, textFile.error};
+    }
     if (maximumBytes == 0 || maximumBytes > kMaximumWorkspaceToolChunkBytes) {
         return {false, "", 0, 0, 0, true,
                 "Workspace read size must be between 1 and 12288 bytes"};
@@ -630,19 +768,20 @@ WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
     if (!file) {
         return {false, "", 0, 0, 0, true, "Workspace file does not exist: " + name};
     }
-    const std::size_t totalBytes = file.size();
-    if (totalBytes > kMaximumWorkspaceFileBytes) {
+    const std::size_t totalBytesValue = file.size();
+    if (totalBytesValue > kMaximumWorkspaceFileBytes) {
         file.close();
         return {false, "", 0, 0, 0, true,
-                "Workspace file exceeds the 256 MiB per-file limit"};
+                "Workspace file exceeds the supported 32-bit file range"};
     }
+    const std::uint32_t totalBytes = static_cast<std::uint32_t>(totalBytesValue);
     if (offset > totalBytes || !isFileUtf8Boundary(file, offset, totalBytes) ||
         !file.seek(offset)) {
         file.close();
         return {false, "", 0, 0, 0, true,
                 "Workspace offset is outside the file or not a UTF-8 boundary"};
     }
-    const std::size_t availableBytes = totalBytes - static_cast<std::size_t>(offset);
+    const std::size_t availableBytes = totalBytes - offset;
     const std::size_t requestedBytes = std::min(maximumBytes, availableBytes);
     std::string content(requestedBytes, '\0');
     const std::size_t readBytes = requestedBytes == 0
@@ -661,7 +800,7 @@ WorkspaceChunkResult readWorkspaceFileChunk(const String& name,
                 "Workspace chunk does not contain a complete UTF-8 code point"};
     }
     const std::uint32_t nextOffset = offset + static_cast<std::uint32_t>(content.size());
-    return {true, content, offset, nextOffset, static_cast<std::uint32_t>(totalBytes),
+    return {true, content, offset, nextOffset, totalBytes,
             nextOffset == totalBytes, ""};
 }
 
@@ -672,6 +811,10 @@ WorkspaceFindResult findWorkspaceText(const String& name,
     if (!isValidWorkspaceFilename(name.c_str())) {
         return {false, false, 0, "Invalid workspace filename"};
     }
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return {false, false, 0, textFile.error};
+    }
     if (query.empty() || query.size() > kMaximumSearchBytes || !isValidUtf8(query)) {
         return {false, false, 0, "Search text must be valid UTF-8 between 1 and 128 bytes"};
     }
@@ -679,8 +822,14 @@ WorkspaceFindResult findWorkspaceText(const String& name,
     if (!file) {
         return {false, false, 0, "Workspace file does not exist: " + name};
     }
-    const std::size_t totalBytes = file.size();
-    if (totalBytes > kMaximumWorkspaceFileBytes || startOffset > totalBytes ||
+    const std::size_t totalBytesValue = file.size();
+    if (totalBytesValue > kMaximumWorkspaceFileBytes) {
+        file.close();
+        return {false, false, 0,
+                "Workspace file exceeds the supported 32-bit file range"};
+    }
+    const std::uint32_t totalBytes = static_cast<std::uint32_t>(totalBytesValue);
+    if (startOffset > totalBytes ||
         !isFileUtf8Boundary(file, startOffset, totalBytes) || !file.seek(startOffset)) {
         file.close();
         return {false, false, 0,
@@ -690,8 +839,10 @@ WorkspaceFindResult findWorkspaceText(const String& name,
     window.reserve(kCopyBufferBytes + query.size());
     std::uint32_t windowOffset = startOffset;
     std::uint8_t buffer[kCopyBufferBytes] = {};
-    while (file.available() > 0) {
-        const std::size_t readBytes = file.read(buffer, sizeof(buffer));
+    while (file.position() < totalBytes) {
+        const std::size_t blockBytes = std::min<std::size_t>(
+            sizeof(buffer), totalBytes - file.position());
+        const std::size_t readBytes = file.read(buffer, blockBytes);
         if (readBytes == 0) {
             file.close();
             return {false, false, 0, "Workspace search stopped before end of file"};
@@ -700,10 +851,20 @@ WorkspaceFindResult findWorkspaceText(const String& name,
         const std::size_t match = window.find(query);
         if (match != std::string::npos) {
             file.close();
+            if (match > kMaximumWorkspaceFileBytes - windowOffset) {
+                file.close();
+                return {false, false, 0,
+                        "Workspace search result exceeds the supported 32-bit file range"};
+            }
             return {true, true, windowOffset + static_cast<std::uint32_t>(match), ""};
         }
         const std::size_t overlap = std::min(query.size() - 1, window.size());
         const std::size_t consumed = window.size() - overlap;
+        if (consumed > kMaximumWorkspaceFileBytes - windowOffset) {
+            file.close();
+            return {false, false, 0,
+                    "Workspace search offset exceeds the supported 32-bit file range"};
+        }
         windowOffset += static_cast<std::uint32_t>(consumed);
         window.erase(0, consumed);
     }
@@ -810,45 +971,11 @@ OperationResult validateWorkspaceFileUtf8(const String& name)
     if (!isValidWorkspaceFilename(name.c_str())) {
         return {false, "Invalid workspace filename"};
     }
-    File file = SD.open(workspaceFilePath(name), FILE_READ);
-    if (!file) {
-        return {false, "Workspace file does not exist: " + name};
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return textFile;
     }
-    if (file.size() > kMaximumWorkspaceFileBytes) {
-        file.close();
-        return {false, "Workspace file exceeds the 256 MiB per-file limit"};
-    }
-    constexpr std::size_t blockBytes = 4096;
-    std::vector<std::uint8_t> block(blockBytes);
-    std::string pending;
-    while (file.available()) {
-        const std::size_t readBytes = file.read(block.data(), block.size());
-        if (readBytes == 0) {
-            file.close();
-            return {false, "microSD read stopped while validating UTF-8"};
-        }
-        pending.append(reinterpret_cast<const char*>(block.data()), readBytes);
-        if (!file.available()) {
-            break;
-        }
-        bool prefixValid = false;
-        for (std::size_t retained = 0; retained <= 3 && retained <= pending.size(); ++retained) {
-            const std::size_t prefixBytes = pending.size() - retained;
-            if (isValidUtf8(pending.substr(0, prefixBytes))) {
-                pending = pending.substr(prefixBytes);
-                prefixValid = true;
-                break;
-            }
-        }
-        if (!prefixValid) {
-            file.close();
-            return {false, "Workspace file contains invalid UTF-8"};
-        }
-    }
-    file.close();
-    return isValidUtf8(pending)
-        ? OperationResult{true, ""}
-        : OperationResult{false, "Workspace file contains incomplete or invalid UTF-8"};
+    return validateWorkspaceFileUtf8Path(workspaceFilePath(name));
 }
 
 OperationResult replaceWorkspaceFileRange(const String& name,
@@ -858,6 +985,10 @@ OperationResult replaceWorkspaceFileRange(const String& name,
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
         return {false, "Invalid workspace filename"};
+    }
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return textFile;
     }
     if (!isValidUtf8(replacement)) {
         return {false, "Replacement content must be valid UTF-8 text"};
@@ -871,19 +1002,29 @@ OperationResult replaceWorkspaceFileRange(const String& name,
     if (!source) {
         return {false, "Workspace file does not exist: " + name};
     }
-    const std::size_t totalBytes = source.size();
-    const std::size_t rangeEnd = static_cast<std::size_t>(offset) + originalBytes;
-    if (offset > totalBytes || rangeEnd > totalBytes ||
-        !isFileUtf8Boundary(source, offset, totalBytes) ||
+    const std::size_t totalBytesValue = source.size();
+    if (totalBytesValue > kMaximumWorkspaceFileBytes) {
+        source.close();
+        return {false, "Workspace file exceeds the supported 32-bit file range"};
+    }
+    const std::uint32_t totalBytes = static_cast<std::uint32_t>(totalBytesValue);
+    if (offset > totalBytes || originalBytes > totalBytes - offset) {
+        source.close();
+        return {false, "Edit range is outside the file"};
+    }
+    const std::uint32_t rangeEnd = offset + originalBytes;
+    if (!isFileUtf8Boundary(source, offset, totalBytes) ||
         !isFileUtf8Boundary(source, rangeEnd, totalBytes)) {
         source.close();
         return {false, "Edit range is outside the file or splits a UTF-8 code point"};
     }
-    const std::size_t resultBytes = totalBytes - originalBytes + replacement.size();
-    if (resultBytes > kMaximumWorkspaceFileBytes) {
+    const std::uint32_t retainedBytes = totalBytes - originalBytes;
+    if (replacement.size() > kMaximumWorkspaceFileBytes - retainedBytes) {
         source.close();
-        return {false, "Edited file would exceed the 256 MiB per-file limit"};
+        return {false, "Edited file would exceed the supported 32-bit file range"};
     }
+    const std::uint32_t resultBytes = retainedBytes +
+        static_cast<std::uint32_t>(replacement.size());
     result = checkSdOperationSpace(
         resultBytes, kStorageOperationalFloorBytes);
     if (!result.success) {
@@ -926,33 +1067,34 @@ OperationResult replaceWorkspaceFileRange(const String& name,
 OperationResult replaceWorkspaceFileWithTemporary(const String& name,
                                                    const String& temporaryName)
 {
-    if (!isValidWorkspaceFilename(name.c_str()) ||
-        !isValidWorkspaceFilename(temporaryName.c_str())) {
+    if (!isValidWorkspaceFilename(name.c_str())) {
         return {false, "Invalid workspace filename"};
+    }
+    if (temporaryName != name + ".tmp") {
+        return {false, "Workspace replacement must use the target .tmp path"};
+    }
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return textFile;
     }
     if (name == temporaryName) {
         return {false, "Replacement file must differ from the destination"};
     }
     const String target = workspaceFilePath(name);
     const String temporary = workspaceFilePath(temporaryName);
-    const OperationResult recovered = prepareWorkspaceTarget(target);
-    if (!recovered.success) {
-        return recovered;
-    }
     if (!SD.exists(target)) {
         return {false, "Workspace file does not exist: " + name};
     }
     if (!SD.exists(temporary)) {
         return {false, "Temporary replacement file does not exist"};
     }
-    const OperationResult valid = validateWorkspaceFileUtf8(temporaryName);
+    const OperationResult valid = validateWorkspaceFileUtf8Path(temporary);
     if (!valid.success) {
         return valid;
     }
     const String backup = target + ".bak";
-    const OperationResult prepared = removeIfPresent(backup);
-    if (!prepared.success) {
-        return prepared;
+    if (SD.exists(backup)) {
+        return {false, "Workspace replacement has an unresolved recovery file"};
     }
     const OperationResult committed = commitTemporaryFile(target, temporary, backup);
     if (!committed.success) {
@@ -969,7 +1111,7 @@ OperationResult commitWorkspaceBinaryTemporary(const String& name,
                                                 const String& temporaryName)
 {
     if (!isValidWorkspaceFilename(name.c_str()) ||
-        !isValidWorkspaceFilename(temporaryName.c_str()) || name == temporaryName) {
+        temporaryName != name + ".tmp") {
         return {false, "Workspace binary replacement paths are invalid"};
     }
     const String target = workspaceFilePath(name);
@@ -982,13 +1124,12 @@ OperationResult commitWorkspaceBinaryTemporary(const String& name,
     const std::size_t replacementBytes = file.size();
     file.close();
     if (replacementBytes > kMaximumWorkspaceFileBytes) {
-        return {false, "Workspace binary replacement exceeds the 256 MiB limit"};
-    }
-    const OperationResult recovered = prepareWorkspaceTarget(target);
-    if (!recovered.success) {
-        return recovered;
+        return {false, "Workspace binary replacement exceeds the supported 32-bit file range"};
     }
     const String backup = target + ".bak";
+    if (SD.exists(backup)) {
+        return {false, "Workspace binary replacement has an unresolved recovery file"};
+    }
     return commitTemporaryFile(target, temporary, backup);
 }
 
@@ -1117,7 +1258,11 @@ ToolExecutionResult executeWorkspaceTool(const ToolCall& call)
         return toolFailure("Tool arguments must be a JSON object");
     }
     if (call.name == "list_files") {
-        return listFilesTool();
+        const ListFilesArgumentsResult parsed = parseListFilesArguments(
+            arguments.as<JsonObjectConst>());
+        return parsed.success
+            ? listFilesTool(parsed.offset, parsed.maximumEntries)
+            : toolFailure(parsed.error);
     }
     if (!arguments["name"].is<const char*>()) {
         return toolFailure("Tool arguments are missing required string field 'name'");
@@ -1148,16 +1293,24 @@ ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
     if (!isValidChatId(projectId.c_str())) {
         return toolFailure("Workspace tool requires an active project");
     }
-    if (call.name == "list_files") {
-        return listProjectFilesTool(projectId);
-    }
     JsonDocument arguments;
     const DeserializationError jsonError = deserializeJson(arguments, call.arguments);
-    if (jsonError || !arguments.is<JsonObject>() ||
-        !arguments["name"].is<const char*>()) {
-        return toolFailure(jsonError
-            ? String("Tool arguments must be a JSON object: ") + jsonError.c_str()
-            : String("Tool arguments are missing required string field 'name'"));
+    if (jsonError) {
+        return toolFailure(String("Tool arguments must be a JSON object: ") +
+                           jsonError.c_str());
+    }
+    if (!arguments.is<JsonObject>()) {
+        return toolFailure("Tool arguments must be a JSON object");
+    }
+    if (call.name == "list_files") {
+        const ListFilesArgumentsResult parsed = parseListFilesArguments(
+            arguments.as<JsonObjectConst>());
+        return parsed.success
+            ? listProjectFilesTool(projectId, parsed.offset, parsed.maximumEntries)
+            : toolFailure(parsed.error);
+    }
+    if (!arguments["name"].is<const char*>()) {
+        return toolFailure("Tool arguments are missing required string field 'name'");
     }
     const String name = arguments["name"].as<const char*>();
     if (!isValidWorkspaceFilename(name.c_str())) {

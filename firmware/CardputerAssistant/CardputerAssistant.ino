@@ -16,14 +16,15 @@
 #include "src/crash_journal.h"
 #include "src/document_reader.h"
 #include "src/file_workspace.h"
-#include "src/file_portal.h"
 #include "src/offline_tools.h"
 #include "src/ota_update.h"
 #include "src/provisioning.h"
 #include "src/python_mode.h"
 #include "src/project_chat_storage.h"
 #include "src/project_bundle.h"
+#include "src/instruction_policy.h"
 #include "src/project_storage.h"
+#include "src/sd_storage.h"
 #include "src/stt_client.h"
 #include "src/storage.h"
 #include "src/storage_migration.h"
@@ -42,6 +43,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +58,7 @@ constexpr std::size_t kMaximumWifiPasswordBytes = 63;
 constexpr std::uint8_t kTtsVolumeStep = 64;
 constexpr std::uint32_t kBatteryRefreshIntervalMs = 30000;
 constexpr std::uint32_t kDraftAutosaveIntervalMs = 2000;
+constexpr std::uint32_t kSdStateRefreshIntervalMs = 1000;
 constexpr std::size_t kFileViewerChunkBytes = 2048;
 constexpr std::size_t kFileViewerPageLines = 8;
 constexpr std::size_t kFileEditorMaximumBytes = 4096;
@@ -91,12 +94,14 @@ enum class Screen {
     ProjectActions,
     ProjectModelPicker,
     ProjectInstructions,
+    ProjectRename,
     ChatList,
     ChatActions,
     ArchivedChatViewer,
     SearchSources,
     SearchSourceViewer,
     ChatInstructions,
+    RequestInstructions,
     ClearChatConfirm,
     DeleteChatConfirm,
     WifiPicker,
@@ -112,6 +117,7 @@ enum class FileNameAction {
 enum class WorkspaceListMode {
     Browse,
     ImportChat,
+    ImportProject,
 };
 
 cardputer::Settings settings;
@@ -124,6 +130,8 @@ std::string persistedDraft;
 std::uint32_t lastDraftAutosaveAt = 0;
 std::string activeResponse;
 std::string retryPrompt;
+String retryChatId;
+std::uint32_t retryOutputTokens = 0;
 cardputer::KeyboardLayout keyboardLayout = cardputer::KeyboardLayout::English;
 String statusMessage;
 String transientStatusValue;
@@ -145,8 +153,12 @@ std::uint32_t activeChatArchivedMessageCount = 0;
 bool activeChatSshToolsEnabled = false;
 bool chatStorageReady = false;
 String chatStorageError;
+bool chatStorageInitialized = false;
+String chatStorageInitializationError;
 bool fileWorkspaceReady = false;
 String fileWorkspaceError;
+bool fileWorkspaceInitialized = false;
+String fileWorkspaceInitializationError;
 std::size_t chatListIndex = 0;
 std::uint32_t chatPageOffset = 0;
 std::uint32_t chatNextPageOffset = 0;
@@ -156,6 +168,8 @@ std::size_t projectListIndex = 0;
 std::size_t projectActionsIndex = 0;
 std::string projectInstructionsInput;
 String projectInstructionsStatus;
+std::string projectRenameInput;
+String projectRenameStatus;
 std::uint32_t projectPageOffset = 0;
 std::uint32_t projectNextPageOffset = 0;
 bool projectPageEof = true;
@@ -177,8 +191,17 @@ bool archivedChatEof = true;
 String selectedChatId;
 String selectedChatTitle;
 bool selectedChatSshToolsEnabled = false;
+cardputer::ContextUsage selectedChatContextUsage = {0, 0, 0, 0, 0};
+bool selectedChatContextUsageReady = false;
+String requestOutputOverrideChatId;
+std::uint32_t requestOutputOverrideTokens = 0;
+String requestInstructionsOverrideChatId;
+std::string requestInstructionsOverride;
+std::string retryRequestInstructions;
 std::string instructionsInput;
 String instructionsStatus;
+std::string requestInstructionsInput;
+String requestInstructionsStatus;
 std::string globalInstructionsInput;
 String globalInstructionsStatus;
 String deleteChatId;
@@ -196,7 +219,6 @@ std::size_t workspaceFileIndex = 0;
 std::uint32_t workspacePageOffset = 0;
 std::uint32_t workspaceNextPageOffset = 0;
 bool workspacePageEof = true;
-std::vector<std::uint32_t> workspacePreviousPageOffsets;
 std::size_t fileActionsIndex = 0;
 std::size_t diagnosticsIndex = 0;
 std::size_t controlsHelpIndex = 0;
@@ -237,6 +259,12 @@ std::string wifiPasswordInput;
 String menuStatus;
 bool voiceStorageReady = false;
 String voiceStorageError;
+bool voiceStorageInitialized = false;
+String voiceStorageInitializationError;
+cardputer::SdStorageStatus currentSdStorageStatus = {
+    cardputer::SdStorageState::Missing, 0, 0, "microSD state has not been checked",
+};
+std::uint32_t lastSdStateRefreshAt = 0;
 bool sttCredentialsValidated = false;
 std::size_t carouselIndex = 0;
 Screen modelReturnScreen = Screen::Chat;
@@ -252,8 +280,12 @@ bool startupInProgress = true;
 wl_status_t lastWifiStatus = WL_IDLE_STATUS;
 bool crashJournalReady = false;
 String crashJournalError;
+bool crashJournalInitialized = false;
+String crashJournalInitializationError;
 bool sshStorageReady = false;
 String sshStorageError;
+bool sshStorageInitialized = false;
+String sshStorageInitializationError;
 std::uint32_t lastUserActivityAt = 0;
 bool webConsoleStartupPending = false;
 std::uint32_t webConsoleStartupNotBefore = 0;
@@ -273,12 +305,14 @@ void render();
 void renderCarousel();
 void renderChatActions();
 void renderChatInstructions();
+void renderRequestInstructions();
 void renderSearchSources();
 void renderChatList();
 void renderProjectList();
 void renderProjectActions();
 void renderProjectModelPicker();
 void renderProjectInstructions();
+void renderProjectRename();
 void renderControlsHelp();
 void renderAiMenu();
 void renderGlobalInstructions();
@@ -319,9 +353,19 @@ bool confirmSshFingerprint(const cardputer::SshProfile& profile,
                            const String& fingerprint,
                            bool changed);
 void submitPrompt();
+void executeStoredPromptRequest(const std::string& prompt,
+                                const cardputer::ProjectDocument& project,
+                                const cardputer::ChatDocument& storedChat,
+                                std::string requestInstructions,
+                                cardputer::ResolvedProjectRequestPolicy requestPolicy);
+void executeStoredPromptRequest(const std::string& prompt,
+                                const cardputer::ProjectDocument& project,
+                                const cardputer::ChatDocument& storedChat,
+                                std::uint32_t requestOutputTokens);
 void retryLastRequest();
 void runUiSearchEndToEndTest();
 void updateSerial();
+bool refreshRuntimeSdState();
 void handleKeyboard();
 void handleVoiceInput();
 void speakLastAssistantResponse();
@@ -382,10 +426,21 @@ cardputer::OperationResult refreshChatList()
 
 cardputer::OperationResult saveActiveProjectSelection(const String& projectId)
 {
+    const cardputer::SdStorageStatus storage = cardputer::inspectSdStorage();
+    if (storage.state == cardputer::SdStorageState::Full) {
+        menuStatus = storage.error;
+        return {true, ""};
+    }
+    if (storage.state != cardputer::SdStorageState::Ready) {
+        return {false, storage.error};
+    }
     cardputer::ProjectStorageManifestResult manifest =
         cardputer::loadProjectStorageManifest();
     if (!manifest.success) {
         return {false, manifest.error};
+    }
+    if (manifest.manifest.activeProjectId == projectId) {
+        return {true, ""};
     }
     manifest.manifest.activeProjectId = projectId;
     ++manifest.manifest.revision;
@@ -398,8 +453,11 @@ cardputer::OperationResult saveCurrentChat()
         return {false, chatStorageError.isEmpty() ? String("Persistent chat storage is unavailable")
                                                   : chatStorageError};
     }
-    cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
-        activeProjectId, activeChatId, 1, 1);
+    const cardputer::OperationResult access = cardputer::requireSdWriteAccess(
+        0, cardputer::kStorageOperationalFloorBytes);
+    if (!access.success) return access;
+    cardputer::ChatDocumentResult loaded = cardputer::loadProjectChatMetadata(
+        activeProjectId, activeChatId);
     if (!loaded.success) {
         return {false, loaded.error};
     }
@@ -420,8 +478,48 @@ cardputer::OperationResult saveCurrentChat()
     return result;
 }
 
+void clearChatScopedEphemeralState()
+{
+    requestOutputOverrideChatId.clear();
+    requestOutputOverrideTokens = 0;
+    requestInstructionsOverrideChatId.clear();
+    std::string().swap(requestInstructionsOverride);
+    retryPrompt.clear();
+    retryChatId.clear();
+    retryOutputTokens = 0;
+    std::string().swap(retryRequestInstructions);
+}
+
+cardputer::OperationResult setRequestInstructionsOverride(
+    const String& chatId,
+    const std::string& instructions)
+{
+    if (chatId.isEmpty()) {
+        return {false, "Request instructions require a selected chat"};
+    }
+    if (instructions.size() > cardputer::kMaximumRequestInstructionsBytes ||
+        !cardputer::isValidUtf8(instructions)) {
+        return {false, "Request instructions must be valid UTF-8 up to 2048 bytes"};
+    }
+    requestInstructionsOverrideChatId = instructions.empty() ? String() : chatId;
+    requestInstructionsOverride = instructions;
+    return {true, ""};
+}
+
+std::string consumeRequestInstructionsOverride(const String& chatId)
+{
+    if (requestInstructionsOverrideChatId != chatId) {
+        return {};
+    }
+    requestInstructionsOverrideChatId.clear();
+    std::string result = std::move(requestInstructionsOverride);
+    std::string().swap(requestInstructionsOverride);
+    return result;
+}
+
 cardputer::OperationResult activateChat(const String& id)
 {
+    const bool switchingChat = !activeChatId.isEmpty() && activeChatId != id;
     const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
         activeProjectId, id, 64, 65536);
     if (!loaded.success) {
@@ -431,14 +529,27 @@ cardputer::OperationResult activateChat(const String& id)
     if (!project.success) {
         return {false, project.error};
     }
-    project.project.activeChatId = id;
-    cardputer::OperationResult activeResult = cardputer::saveProject(project.project);
-    if (!activeResult.success) {
-        return activeResult;
+    if (project.project.activeChatId != id) {
+        const cardputer::SdStorageStatus storage = cardputer::inspectSdStorage();
+        if (storage.state == cardputer::SdStorageState::Ready) {
+            project.project.activeChatId = id;
+            const cardputer::OperationResult activeResult =
+                cardputer::saveProject(project.project);
+            if (!activeResult.success) {
+                return activeResult;
+            }
+        } else if (storage.state == cardputer::SdStorageState::Full) {
+            menuStatus = storage.error;
+        } else {
+            return {false, storage.error};
+        }
+    }
+    if (switchingChat) {
+        clearChatScopedEphemeralState();
     }
     activeChatId = loaded.chat.summary.id;
     activeChatTitle = loaded.chat.summary.title;
-    history = loaded.chat.messages;
+    history = cardputer::unsummarizedChatTail(loaded.chat);
     activeChatInstructions = loaded.chat.instructions;
     activeChatPinned = loaded.chat.summary.pinned;
     activeChatArchived = loaded.chat.summary.archived;
@@ -454,11 +565,15 @@ cardputer::OperationResult activateChat(const String& id)
 
 cardputer::OperationResult createAndActivateChat()
 {
+    const cardputer::OperationResult access = cardputer::requireSdWriteAccess(
+        0, cardputer::kStorageOperationalFloorBytes);
+    if (!access.success) return access;
     const cardputer::ChatDocumentResult created = cardputer::createProjectChat(
         activeProjectId, "New chat");
     if (!created.success) {
         return {false, created.error};
     }
+    clearChatScopedEphemeralState();
     activeChatId = created.chat.summary.id;
     activeChatTitle = created.chat.summary.title;
     activeChatInstructions.clear();
@@ -531,9 +646,17 @@ cardputer::OperationResult refreshProjectPage(std::uint32_t offset)
 cardputer::OperationResult activateProject(const String& projectId)
 {
     if (!activeChatId.isEmpty()) {
-        const cardputer::OperationResult saved = saveCurrentChat();
-        if (!saved.success) {
-            return saved;
+        const cardputer::SdStorageStatus storage = cardputer::inspectSdStorage();
+        if (storage.state == cardputer::SdStorageState::Ready) {
+            const cardputer::OperationResult saved = saveCurrentChat();
+            if (!saved.success) {
+                return saved;
+            }
+        } else if (storage.state == cardputer::SdStorageState::Full &&
+                   inputBuffer == persistedDraft) {
+            menuStatus = storage.error;
+        } else {
+            return {false, storage.error};
         }
     }
     const cardputer::ProjectDocumentResult project = cardputer::loadProject(projectId);
@@ -544,6 +667,7 @@ cardputer::OperationResult activateProject(const String& projectId)
     if (!result.success) {
         return result;
     }
+    clearChatScopedEphemeralState();
     activeProjectId = projectId;
     activeProjectTitle = project.project.summary.title;
     activeChatId.clear();
@@ -566,8 +690,8 @@ cardputer::OperationResult activateProject(const String& projectId)
 
 std::vector<String> projectListItems()
 {
-    std::vector<String> items = {"+ New project"};
-    items.reserve(projects.size() + 3);
+    std::vector<String> items = {"+ New project", "Import project bundle"};
+    items.reserve(projects.size() + 4);
     for (const cardputer::ProjectSummary& project : projects) {
         const String marker = project.id == activeProjectId ? "[ON] " :
             (project.pinned ? "[PIN] " : (project.archived ? "[ARC] " : ""));
@@ -607,6 +731,7 @@ std::vector<String> projectActionItems()
         "Context: " + String(project.project.contextByteBudget / 1024) + " KiB",
         "Output: " + String(project.project.maximumOutputTokens) + " tokens",
         String("Auto compact: ") + (project.project.automaticCompaction ? "ON" : "OFF"),
+        "Rename project",
         "Duplicate project",
         project.project.summary.archived ? "Restore project" : "Archive project",
         "Export project bundle",
@@ -636,6 +761,38 @@ void renderProjectInstructions()
         "PROJECT INSTRUCTIONS", projectInstructionsInput, keyboardLayout,
         cardputer::kMaximumProjectInstructionsBytes, projectInstructionsStatus,
         "Applied after global instructions",
+        "ENTER save  FN+DEL clear  ESC back");
+}
+
+bool refreshRuntimeSdState()
+{
+    const cardputer::SdStorageStatus status = cardputer::inspectSdStorage();
+    const bool changed = status.state != currentSdStorageStatus.state ||
+        status.error != currentSdStorageStatus.error;
+    currentSdStorageStatus = status;
+    const bool readable = status.state == cardputer::SdStorageState::Ready ||
+        status.state == cardputer::SdStorageState::Full;
+    const bool writable = status.state == cardputer::SdStorageState::Ready;
+    voiceStorageReady = voiceStorageInitialized && readable;
+    chatStorageReady = chatStorageInitialized && readable;
+    fileWorkspaceReady = fileWorkspaceInitialized && readable;
+    crashJournalReady = crashJournalInitialized && writable;
+    sshStorageReady = sshStorageInitialized && writable;
+    voiceStorageError = readable ? voiceStorageInitializationError : status.error;
+    chatStorageError = readable ? chatStorageInitializationError : status.error;
+    fileWorkspaceError = readable ? fileWorkspaceInitializationError : status.error;
+    crashJournalError = writable ? crashJournalInitializationError : status.error;
+    sshStorageError = writable ? sshStorageInitializationError : status.error;
+    lastSdStateRefreshAt = millis();
+    return changed;
+}
+
+void renderProjectRename()
+{
+    cardputer::showTextEditor(
+        "RENAME PROJECT", projectRenameInput, keyboardLayout,
+        cardputer::kMaximumProjectTitleBytes, projectRenameStatus,
+        "Project storage ID does not change",
         "ENTER save  FN+DEL clear  ESC back");
 }
 
@@ -669,9 +826,10 @@ void openProjectList()
     }
     menuStatus = "";
     currentScreen = Screen::ProjectList;
+    projectListIndex = 0;
     for (std::size_t index = 0; index < projects.size(); ++index) {
         if (projects[index].id == activeProjectId) {
-            projectListIndex = index + 1;
+            projectListIndex = index + 2;
             break;
         }
     }
@@ -720,8 +878,15 @@ std::vector<String> chatActionItems()
         "Open chat",
         "Chat instructions",
         String("LLM SSH access: ") + (selectedChatSshToolsEnabled ? "ON" : "OFF"),
-        "View full history (" + String(selected.messageCount) + ")",
-        selected.id == activeChatId && !retryPrompt.empty()
+        selectedChatContextUsageReady
+            ? "Ctx:" +
+                  String(static_cast<unsigned int>(
+                      selectedChatContextUsage.retainedBytes)) +
+                  "B/" + String(selectedChatContextUsage.retainedMessages) +
+                  "m Sum:" + String(selectedChatContextUsage.summarizedMessages) +
+                  "/" + String(selectedChatContextUsage.totalMessages)
+            : "View full history (" + String(selected.messageCount) + ")",
+        selected.id == retryChatId && !retryPrompt.empty()
             ? String("Retry failed request") : String("Retry unavailable"),
         "Latest search sources",
         selected.pinned ? "Unpin chat" : "Pin chat",
@@ -730,6 +895,13 @@ std::vector<String> chatActionItems()
         "Export Markdown",
         "Export project bundle",
         "Regenerate context summary",
+        selectedChatId == requestOutputOverrideChatId && requestOutputOverrideTokens != 0
+            ? "Next output: " + String(requestOutputOverrideTokens) + " tokens"
+            : String("Next output: project default"),
+        selectedChatId == requestInstructionsOverrideChatId &&
+                !requestInstructionsOverride.empty()
+            ? String("Next instructions: ON")
+            : String("Next instructions: OFF"),
         "Clear messages",
         "Delete chat",
         "Back",
@@ -817,10 +989,20 @@ void openChatActions(const cardputer::ChatSummary& chat)
     selectedChatId = chat.id;
     selectedChatTitle = chat.title;
     const cardputer::ChatDocumentResult loaded = cardputer::loadProjectChat(
-        activeProjectId, chat.id, 1, 1);
+        activeProjectId, chat.id, 64, 65536);
+    const cardputer::ProjectDocumentResult project = cardputer::loadProject(
+        activeProjectId);
     selectedChatSshToolsEnabled = loaded.success && loaded.chat.sshToolsEnabled;
+    selectedChatContextUsageReady = loaded.success && project.success;
+    if (selectedChatContextUsageReady) {
+        selectedChatContextUsage = cardputer::resolveContextUsage(
+            loaded.chat, project.project.contextByteBudget);
+    } else {
+        selectedChatContextUsage = {0, 0, 0, 0, 0};
+    }
     chatActionsIndex = 0;
-    menuStatus = loaded.success ? String("") : loaded.error;
+    menuStatus = !loaded.success ? loaded.error
+        : (!project.success ? project.error : String(""));
     currentScreen = Screen::ChatActions;
     renderChatActions();
 }
@@ -966,6 +1148,9 @@ void render()
     case Screen::ProjectInstructions:
         renderProjectInstructions();
         return;
+    case Screen::ProjectRename:
+        renderProjectRename();
+        return;
     case Screen::ChatList:
         renderChatList();
         return;
@@ -985,6 +1170,9 @@ void render()
         return;
     case Screen::ChatInstructions:
         renderChatInstructions();
+        return;
+    case Screen::RequestInstructions:
+        renderRequestInstructions();
         return;
     case Screen::ClearChatConfirm:
         cardputer::showConfirmation("CLEAR MESSAGES", clearChatTitle,
@@ -1096,77 +1284,54 @@ void beginConfiguredNetwork()
 }
 
 std::string effectiveProjectChatInstructions(const cardputer::ProjectDocument& project,
-                                             const cardputer::ChatDocument& chat)
+                                             const cardputer::ChatDocument& chat,
+                                             const std::string& requestInstructions)
 {
-    std::string result;
-    if (!project.instructions.empty()) {
-        result = "Project instructions supplied by the user:\n" + project.instructions;
-    }
-    if (!chat.instructions.empty()) {
-        if (!result.empty()) {
-            result += "\n\n";
-        }
-        result += "Chat-specific instructions override conflicting project instructions:\n";
-        result += chat.instructions;
-    }
-    if (!chat.contextSummary.empty()) {
-        if (!result.empty()) {
-            result += "\n\n";
-        }
-        result += "Conversation summary for turns omitted from the active context:\n";
-        result += chat.contextSummary;
-    }
-    return result;
+    return cardputer::buildScopedInstructions(
+        project.instructions, chat.instructions, requestInstructions,
+        chat.contextSummary);
 }
 
-cardputer::OperationResult regenerateActiveContextSummary(
+struct ContextSummaryPageResult {
+    bool success;
+    std::string summary;
+    std::uint32_t includedMessages;
+    String error;
+};
+
+ContextSummaryPageResult generateContextSummaryPage(
     const cardputer::ProjectDocument& project,
-    const std::vector<cardputer::Message>& source,
-    std::uint32_t summarizedMessageCount)
+    const std::string& previousSummary,
+    const std::vector<cardputer::Message>& source)
 {
     if (source.empty()) {
-        return {false, "No omitted messages are available to summarize"};
+        return {false, "", 0,
+                "No omitted messages are available to summarize"};
     }
-    const cardputer::ChatDocumentResult current = cardputer::loadProjectChat(
-        activeProjectId, activeChatId, 1, 1);
-    if (!current.success) {
-        return {false, current.error};
+    constexpr std::size_t kCompactionHeapReserve = 16384;
+    const std::size_t largestBlock =
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largestBlock <= kCompactionHeapReserve) {
+        return {false, "", 0,
+                "Context compaction needs a larger contiguous heap block; close SSH and retry"};
     }
-    if (summarizedMessageCount < current.chat.summarizedMessageCount ||
-        summarizedMessageCount > current.chat.summary.messageCount) {
-        return {false, "Context summary message range is invalid"};
-    }
-    std::string transcript;
-    transcript.reserve(std::min<std::size_t>(project.contextByteBudget, 32768));
-    if (!current.chat.contextSummary.empty()) {
-        transcript += "Previous summary:\n";
-        transcript += current.chat.contextSummary;
-        transcript += "\n\nNewly omitted messages:\n";
-    }
-    for (const cardputer::Message& message : source) {
-        const std::string prefix = message.role == "user" ? "You: " : "AI: ";
-        if (transcript.size() + prefix.size() + message.content.size() + 1 > 32768) {
-            break;
-        }
-        transcript += prefix;
-        transcript += message.content;
-        transcript += '\n';
-    }
-    if (transcript.empty()) {
-        return {false, "Messages selected for summary exceed the safe request budget"};
+    cardputer::ContextSummaryPromptResult prompt =
+        cardputer::buildContextSummaryPrompt(
+            previousSummary, source,
+            std::min<std::size_t>(
+                std::min<std::size_t>(project.contextByteBudget, 32768),
+                largestBlock - kCompactionHeapReserve));
+    if (!prompt.success) {
+        return {false, "", 0, prompt.error.c_str()};
     }
     cardputer::Settings summarySettings = settings;
     summarySettings.globalInstructions = "";
     if (!project.model.isEmpty()) {
         summarySettings.model = project.model;
     }
-    const std::vector<cardputer::Message> summaryRequest = {{
-        "user",
-        "Create a compact factual conversation summary. Preserve decisions, names, "
-        "constraints, unresolved questions and file or command references. Do not add "
-        "facts. Return only the summary.\n\n" + transcript,
-    }};
-    const cardputer::ChatResult summary = cardputer::streamChatCompletionWithBudget(
+    std::vector<cardputer::Message> summaryRequest;
+    summaryRequest.push_back({"user", std::move(prompt.prompt)});
+    cardputer::ChatResult summary = cardputer::streamChatCompletionWithBudget(
         summarySettings, summaryRequest,
         "This is a context compaction operation, not a user-facing answer.",
         768, [](const std::string&) {}, []() {
@@ -1174,87 +1339,122 @@ cardputer::OperationResult regenerateActiveContextSummary(
             return cardputerEscapePressed();
         });
     if (!summary.success) {
-        return {false, "Context summary failed: " + summary.error};
+        return {false, "", 0, "Context summary failed: " + summary.error};
     }
-    cardputer::ChatDocumentResult stored = cardputer::loadProjectChat(
-        activeProjectId, activeChatId, 1, 1);
+    if (summary.response.empty() ||
+        summary.response.size() > cardputer::kMaximumProjectChatSummaryBytes) {
+        return {false, "", 0,
+                "Context summary response is empty or exceeds its storage limit"};
+    }
+    return {true, std::move(summary.response), prompt.includedMessages, ""};
+}
+
+cardputer::OperationResult appendActiveContextSummary(
+    const cardputer::ProjectDocument& project,
+    const std::vector<cardputer::Message>& source)
+{
+    const cardputer::ChatDocumentResult current = cardputer::loadProjectChatMetadata(
+        activeProjectId, activeChatId);
+    if (!current.success) {
+        return {false, current.error};
+    }
+    ContextSummaryPageResult summary = generateContextSummaryPage(
+        project, current.chat.contextSummary, source);
+    if (!summary.success) {
+        return {false, summary.error};
+    }
+    cardputer::ChatDocumentResult stored = cardputer::loadProjectChatMetadata(
+        activeProjectId, activeChatId);
     if (!stored.success) {
         return {false, stored.error};
     }
-    stored.chat.contextSummary = summary.response;
-    stored.chat.summarizedMessageCount = summarizedMessageCount;
+    stored.chat.contextSummary = std::move(summary.summary);
+    stored.chat.summarizedMessageCount = std::min(
+        stored.chat.summary.messageCount,
+        stored.chat.summarizedMessageCount + summary.includedMessages);
     return cardputer::saveProjectChatMetadata(stored.chat);
 }
 
-void submitPrompt()
+cardputer::OperationResult regenerateProjectChatContextSummary(
+    const String& projectId,
+    const String& chatId,
+    const cardputer::ProjectDocument& project)
 {
-    if (inputBuffer.empty()) {
-        statusMessage = "Type a message before pressing Enter";
-        render();
-        return;
+    cardputer::OperationResult result = cardputer::requireSdWriteAccess(
+        0, cardputer::kStorageOperationalFloorBytes);
+    if (!result.success) {
+        return result;
+    }
+    std::uint32_t originalMessageCount = 0;
+    {
+        const cardputer::ChatDocumentResult original = cardputer::loadProjectChatMetadata(
+            projectId, chatId);
+        if (!original.success) {
+            return {false, original.error};
+        }
+        originalMessageCount = original.chat.summary.messageCount;
+    }
+    constexpr std::uint32_t kRetainedMessages = 8;
+    const std::uint32_t target = originalMessageCount > kRetainedMessages
+        ? originalMessageCount - kRetainedMessages : 0;
+    if (target == 0) {
+        return {false, "This chat is too short to regenerate its context summary"};
     }
     ensureNetworkReady();
     if (WiFi.status() != WL_CONNECTED || std::time(nullptr) < 1700000000) {
-        render();
-        return;
+        return {false, statusMessage.isEmpty()
+            ? String("Network is not ready for context regeneration") : statusMessage};
     }
-    if (!chatStorageReady) {
-        statusMessage = chatStorageError;
-        render();
-        return;
+    cardputer::showBusyScreen("COMPACTING", "ESC cancels");
+    std::string stagedSummary;
+    std::uint32_t nextMessageIndex = 0;
+    while (nextMessageIndex < target) {
+        const cardputer::IndexedMessagesPageResult page =
+            cardputer::readProjectChatMessagesByIndex(
+                projectId, chatId, nextMessageIndex,
+                std::min<std::uint32_t>(32, target - nextMessageIndex), 32768);
+        if (!page.success || page.messages.empty()) {
+            return {false, page.success
+                ? String("Context regeneration reached an empty raw-history page")
+                : page.error};
+        }
+        ContextSummaryPageResult generated = generateContextSummaryPage(
+            project, stagedSummary, page.messages);
+        if (!generated.success) {
+            return {false, generated.error};
+        }
+        if (generated.includedMessages == 0 ||
+            generated.includedMessages > page.messages.size() ||
+            generated.includedMessages > target - nextMessageIndex) {
+            return {false, "Context regeneration produced an invalid page boundary"};
+        }
+        nextMessageIndex += generated.includedMessages;
+        stagedSummary = std::move(generated.summary);
     }
-    if (!fileWorkspaceReady) {
-        statusMessage = fileWorkspaceError;
-        render();
-        return;
+    cardputer::ChatDocumentResult stored = cardputer::loadProjectChatMetadata(
+        projectId, chatId);
+    if (!stored.success) {
+        return {false, stored.error};
     }
+    if (stored.chat.summary.messageCount != originalMessageCount) {
+        return {false, "Chat history changed while its context summary was regenerating"};
+    }
+    stored.chat.contextSummary = std::move(stagedSummary);
+    stored.chat.summarizedMessageCount = target;
+    return cardputer::saveProjectChatMetadata(stored.chat);
+}
 
-    const std::string prompt = inputBuffer;
-    const bool useWebSearch = cardputer::requestsWebSearch(prompt);
-    if (useWebSearch && !cardputer::webSearchSettingsAreComplete(settings)) {
-        statusMessage = "Web search not configured; Fn+4 > Web setup";
-        render();
-        return;
-    }
-
-    const cardputer::ProjectDocumentResult activeProject =
-        cardputer::loadProject(activeProjectId);
-    const cardputer::ChatDocumentResult storedChat = cardputer::loadProjectChat(
-        activeProjectId, activeChatId, 1, 1);
-    if (!activeProject.success || !storedChat.success) {
-        statusMessage = activeProject.success ? storedChat.error : activeProject.error;
-        render();
-        return;
-    }
+void executeStoredPromptRequest(const std::string& prompt,
+                                const cardputer::ProjectDocument& project,
+                                const cardputer::ChatDocument& storedChat,
+                                std::string requestInstructions,
+                                cardputer::ResolvedProjectRequestPolicy requestPolicy)
+{
     cardputer::Settings requestSettings = settings;
-    if (!activeProject.project.model.isEmpty()) {
-        requestSettings.model = activeProject.project.model;
-    }
+    requestSettings.model = requestPolicy.model;
     const std::string effectiveInstructions = effectiveProjectChatInstructions(
-        activeProject.project, storedChat.chat);
-    std::vector<cardputer::Message> pendingHistory = history;
-    pendingHistory.push_back({"user", prompt});
-    cardputer::ContextWindowResult pendingFit = cardputer::fitMessagesToByteBudget(
-        pendingHistory, activeProject.project.contextByteBudget);
-    const String pendingTitle = history.empty()
-        ? String(cardputer::makeChatTitle(prompt, cardputer::kMaximumChatTitleCells).c_str())
-        : activeChatTitle;
-    const cardputer::OperationResult pendingSave = cardputer::appendProjectChatMessages(
-        activeProjectId, activeChatId, {{"user", prompt}}, currentChatTimestamp());
-    if (!pendingSave.success) {
-        statusMessage = pendingSave.error;
-        render();
-        return;
-    }
-    history = std::move(pendingFit.retained);
-    activeChatTitle = pendingTitle;
-    inputBuffer.clear();
-    const cardputer::OperationResult pendingMetadataSave = saveCurrentChat();
-    if (!pendingMetadataSave.success) {
-        statusMessage = pendingMetadataSave.error;
-        render();
-        return;
-    }
+        project, storedChat, requestInstructions);
+    const bool useWebSearch = cardputer::requestsWebSearch(prompt);
     activeResponse.clear();
     scrollOffset = 0;
     statusMessage = "Streaming...";
@@ -1280,10 +1480,12 @@ void submitPrompt()
         M5Cardputer.update();
         return cardputerEscapePressed();
     };
+    requestOutputOverrideChatId.clear();
+    requestOutputOverrideTokens = 0;
     const cardputer::ChatResult result = useTools
         ? cardputer::streamChatCompletionWithToolsAndBudget(
               requestSettings, history, effectiveInstructions, toolPolicy.sshEnabled,
-              activeProject.project.maximumOutputTokens, onText,
+              requestPolicy.maximumOutputTokens, onText,
               [&toolPolicy, &isCancelled](const cardputer::ToolCall& call) {
                   statusMessage = "Tool: " + String(call.name.c_str());
                   render();
@@ -1292,11 +1494,14 @@ void submitPrompt()
               }, isCancelled)
         : cardputer::streamChatCompletionWithBudget(
               requestSettings, history, effectiveInstructions,
-              activeProject.project.maximumOutputTokens, onText, isCancelled);
+              requestPolicy.maximumOutputTokens, onText, isCancelled);
     cardputer::markOperation("idle");
     if (!result.success) {
         activeResponse = result.response;
         retryPrompt = prompt;
+        retryChatId = activeChatId;
+        retryOutputTokens = requestPolicy.maximumOutputTokens;
+        retryRequestInstructions = std::move(requestInstructions);
         statusMessage = result.error;
         const cardputer::OperationResult listResult = refreshChatList();
         if (!listResult.success) {
@@ -1315,8 +1520,11 @@ void submitPrompt()
     }
     history.push_back({"assistant", result.response});
     retryPrompt.clear();
+    retryChatId.clear();
+    retryOutputTokens = 0;
+    std::string().swap(retryRequestInstructions);
     cardputer::ContextWindowResult finalFit = cardputer::fitMessagesToByteBudget(
-        history, activeProject.project.contextByteBudget);
+        history, requestPolicy.contextByteBudget);
     std::vector<cardputer::Message> compactedMessages;
     if (finalFit.droppedMessages > 0) {
         compactedMessages.assign(history.begin(),
@@ -1324,18 +1532,22 @@ void submitPrompt()
     }
     history = std::move(finalFit.retained);
     activeResponse.clear();
-    cardputer::OperationResult finalSave = cardputer::appendProjectChatMessages(
-        activeProjectId, activeChatId, {{"assistant", result.response}},
-        currentChatTimestamp());
+    cardputer::OperationResult finalSave = cardputer::requireSdWriteAccess(
+        0, cardputer::kStorageOperationalFloorBytes);
+    if (finalSave.success) {
+        finalSave = cardputer::appendProjectChatMessages(
+            activeProjectId, activeChatId, {{"assistant", result.response}},
+            currentChatTimestamp(), settings.projectChatHistoryQuotaBytes);
+    }
     if (finalSave.success) {
         finalSave = saveCurrentChat();
     }
-    if (finalSave.success && activeProject.project.automaticCompaction &&
-        !compactedMessages.empty()) {
-        finalSave = regenerateActiveContextSummary(
-            activeProject.project, compactedMessages,
-            storedChat.chat.summarizedMessageCount +
-                static_cast<std::uint32_t>(compactedMessages.size()));
+    bool automaticSummarySaved = false;
+    if (finalSave.success && cardputer::shouldAutomaticallyCompactRequest(
+            requestPolicy, static_cast<std::uint32_t>(compactedMessages.size()))) {
+        finalSave = appendActiveContextSummary(
+            project, compactedMessages);
+        automaticSummarySaved = finalSave.success;
     }
     if (!finalSave.success) {
         statusMessage = "Response received but chat save failed: " + finalSave.error;
@@ -1343,9 +1555,28 @@ void submitPrompt()
         render();
         return;
     }
+    if (automaticSummarySaved) {
+        const cardputer::ChatDocumentResult summaryState =
+            cardputer::loadProjectChatMetadata(activeProjectId, activeChatId);
+        if (!summaryState.success) {
+            statusMessage = "Response and context summary saved, but summary reload failed: " +
+                summaryState.error;
+            Serial.println(
+                "ERROR event=context_summary source=automatic result=failed error=reload_failed");
+            render();
+            return;
+        }
+        Serial.printf(
+            "INFO event=context_summary source=automatic result=ok summarized=%u total=%u\n",
+            static_cast<unsigned int>(summaryState.chat.summarizedMessageCount),
+            static_cast<unsigned int>(summaryState.chat.summary.messageCount));
+    }
     const cardputer::OperationResult listResult = refreshChatList();
     if (listResult.success) {
-        setTransientStatus("Saved", 1500);
+        setTransientStatus(
+            automaticSummarySaved ? String("Saved + context summarized")
+                                  : String("Saved"),
+            1500);
     } else {
         statusMessage = listResult.error;
     }
@@ -1377,6 +1608,101 @@ void submitPrompt()
         }
     }
     render();
+}
+
+void executeStoredPromptRequest(const std::string& prompt,
+                                const cardputer::ProjectDocument& project,
+                                const cardputer::ChatDocument& storedChat,
+                                std::uint32_t requestOutputTokens)
+{
+    cardputer::ResolvedProjectRequestPolicy requestPolicy =
+        cardputer::resolveProjectRequestPolicy(
+            settings, project, requestOutputTokens);
+    executeStoredPromptRequest(
+        prompt, project, storedChat, std::move(retryRequestInstructions),
+        std::move(requestPolicy));
+}
+
+void submitPrompt()
+{
+    if (inputBuffer.empty()) {
+        statusMessage = "Type a message before pressing Enter";
+        render();
+        return;
+    }
+    ensureNetworkReady();
+    if (WiFi.status() != WL_CONNECTED || std::time(nullptr) < 1700000000) {
+        render();
+        return;
+    }
+    if (!chatStorageReady) {
+        statusMessage = chatStorageError;
+        render();
+        return;
+    }
+    if (!fileWorkspaceReady) {
+        statusMessage = fileWorkspaceError;
+        render();
+        return;
+    }
+    const cardputer::OperationResult writeAccess = cardputer::requireSdWriteAccess(
+        0, cardputer::kStorageOperationalFloorBytes);
+    if (!writeAccess.success) {
+        statusMessage = writeAccess.error;
+        render();
+        return;
+    }
+
+    const std::string prompt = inputBuffer;
+    const bool useWebSearch = cardputer::requestsWebSearch(prompt);
+    if (useWebSearch && !cardputer::webSearchSettingsAreComplete(settings)) {
+        statusMessage = "Web search not configured; Fn+4 > Web setup";
+        render();
+        return;
+    }
+
+    const cardputer::ProjectDocumentResult activeProject =
+        cardputer::loadProject(activeProjectId);
+    const cardputer::ChatDocumentResult storedChat = cardputer::loadProjectChatMetadata(
+        activeProjectId, activeChatId);
+    if (!activeProject.success || !storedChat.success) {
+        statusMessage = activeProject.success ? storedChat.error : activeProject.error;
+        render();
+        return;
+    }
+    const std::uint32_t requestOutputTokens = requestOutputOverrideChatId == activeChatId
+        ? requestOutputOverrideTokens : 0;
+    cardputer::ResolvedProjectRequestPolicy requestPolicy =
+        cardputer::resolveProjectRequestPolicy(
+            settings, activeProject.project, requestOutputTokens);
+    std::vector<cardputer::Message> pendingHistory = history;
+    pendingHistory.push_back({"user", prompt});
+    cardputer::ContextWindowResult pendingFit = cardputer::fitMessagesToByteBudget(
+        pendingHistory, requestPolicy.contextByteBudget);
+    const String pendingTitle = history.empty()
+        ? String(cardputer::makeChatTitle(prompt, cardputer::kMaximumChatTitleCells).c_str())
+        : activeChatTitle;
+    const cardputer::OperationResult pendingSave = cardputer::appendProjectChatMessages(
+        activeProjectId, activeChatId, {{"user", prompt}}, currentChatTimestamp(),
+        settings.projectChatHistoryQuotaBytes);
+    if (!pendingSave.success) {
+        statusMessage = pendingSave.error;
+        render();
+        return;
+    }
+    history = std::move(pendingFit.retained);
+    activeChatTitle = pendingTitle;
+    inputBuffer.clear();
+    const cardputer::OperationResult pendingMetadataSave = saveCurrentChat();
+    if (!pendingMetadataSave.success) {
+        statusMessage = pendingMetadataSave.error;
+        render();
+        return;
+    }
+    std::string requestInstructions = consumeRequestInstructionsOverride(activeChatId);
+    executeStoredPromptRequest(
+        prompt, activeProject.project, storedChat.chat,
+        std::move(requestInstructions), std::move(requestPolicy));
 }
 
 void runUiSearchEndToEndTest()
@@ -1535,8 +1861,11 @@ void setup()
     }
 
     const cardputer::OperationResult voiceStorageResult = cardputer::initializeVoiceStorage();
-    voiceStorageReady = voiceStorageResult.success;
-    voiceStorageError = voiceStorageResult.success ? String() : voiceStorageResult.error;
+    voiceStorageInitialized = voiceStorageResult.success;
+    voiceStorageInitializationError = voiceStorageResult.success
+        ? String() : voiceStorageResult.error;
+    voiceStorageReady = voiceStorageInitialized;
+    voiceStorageError = voiceStorageInitializationError;
     Serial.printf("VOICE_STORAGE result=%s\n", voiceStorageReady ? "ready" : "failed");
     if (voiceStorageReady && pythonHandoff.success) {
         const cardputer::PythonHandoffRequest sdHandoff =
@@ -1554,9 +1883,12 @@ void setup()
         ? cardputer::initializeChatStorage()
         : cardputer::OperationResult{false, voiceStorageError};
 
-    const cardputer::OperationResult workspaceResult = legacyChatResult.success
-        ? cardputer::initializeFileWorkspace()
+    const cardputer::OperationResult diagnosticRecoveryResult = legacyChatResult.success
+        ? cardputer::recoverInterruptedProjectMigrationDiagnostic()
         : cardputer::OperationResult{false, legacyChatResult.error};
+    const cardputer::OperationResult workspaceResult = diagnosticRecoveryResult.success
+        ? cardputer::initializeFileWorkspace()
+        : cardputer::OperationResult{false, diagnosticRecoveryResult.error};
     cardputer::ProjectMigrationResult migrationResult = {
         false, false, "", 0,
         workspaceResult.success ? String() : workspaceResult.error,
@@ -1570,23 +1902,33 @@ void setup()
         : cardputer::OperationResult{false, migrationResult.error};
     chatStorageReady = chatResult.success;
     chatStorageError = chatResult.success ? String() : chatResult.error;
+    chatStorageInitialized = chatResult.success;
+    chatStorageInitializationError = chatResult.success ? String() : chatResult.error;
     Serial.printf("CHAT_STORAGE result=%s count=%u\n",
                   chatStorageReady ? "ready" : "failed",
                   static_cast<unsigned int>(chats.size()));
     fileWorkspaceReady = workspaceResult.success && migrationResult.success &&
         chatStorageReady;
     fileWorkspaceError = fileWorkspaceReady ? String() : migrationResult.error;
+    fileWorkspaceInitialized = fileWorkspaceReady;
+    fileWorkspaceInitializationError = fileWorkspaceError;
+    refreshRuntimeSdState();
     Serial.printf("FILE_WORKSPACE result=%s\n", fileWorkspaceReady ? "ready" : "failed");
     Serial.printf("PROJECT_STORAGE result=%s migrated=%s chats=%u\n",
                   migrationResult.success ? "ready" : "failed",
                   migrationResult.migrated ? "yes" : "no",
                   static_cast<unsigned int>(migrationResult.migratedChats));
 
-    const cardputer::OperationResult journalResult = voiceStorageReady
-        ? cardputer::appendBootJournal(kFirmwareVersion)
+    cardputer::OperationResult journalResult = voiceStorageReady
+        ? cardputer::requireSdWriteAccess(0, cardputer::kStorageOperationalFloorBytes)
         : cardputer::OperationResult{false, voiceStorageError};
+    if (journalResult.success) {
+        journalResult = cardputer::appendBootJournal(kFirmwareVersion);
+    }
     crashJournalReady = journalResult.success;
     crashJournalError = journalResult.success ? String() : journalResult.error;
+    crashJournalInitialized = journalResult.success;
+    crashJournalInitializationError = crashJournalError;
     Serial.printf("CRASH_JOURNAL result=%s\n", crashJournalReady ? "ready" : "failed");
 
     const cardputer::OperationResult sshStorageResult = fileWorkspaceReady
@@ -1594,6 +1936,9 @@ void setup()
         : cardputer::OperationResult{false, fileWorkspaceError};
     sshStorageReady = sshStorageResult.success;
     sshStorageError = sshStorageResult.success ? String() : sshStorageResult.error;
+    sshStorageInitialized = sshStorageResult.success;
+    sshStorageInitializationError = sshStorageError;
+    refreshRuntimeSdState();
     Serial.printf("SSH_STORAGE result=%s\n", sshStorageReady ? "ready" : "failed");
 
     carouselIndex = 0;
@@ -1625,6 +1970,24 @@ void setup()
 void loop()
 {
     M5Cardputer.update();
+    if (millis() - lastSdStateRefreshAt >= kSdStateRefreshIntervalMs) {
+        const bool changed = refreshRuntimeSdState();
+        if (changed) {
+            Serial.printf("SD_STATE state=%s error=%s\n",
+                          cardputer::sdStorageStateName(currentSdStorageStatus.state),
+                          cardputer::sdStorageErrorCode(currentSdStorageStatus.state));
+            if (currentSdStorageStatus.state != cardputer::SdStorageState::Ready) {
+                menuStatus = currentSdStorageStatus.error;
+                statusMessage = currentSdStorageStatus.error;
+            }
+            if (!displaySleeping &&
+                (currentScreen == Screen::MainCarousel ||
+                 currentScreen == Screen::Diagnostics ||
+                 currentScreen == Screen::Chat)) {
+                render();
+            }
+        }
+    }
     if (webConsoleStartupPending &&
         static_cast<std::int32_t>(millis() - webConsoleStartupNotBefore) >= 0 &&
         M5Cardputer.Keyboard.keyList().empty()) {

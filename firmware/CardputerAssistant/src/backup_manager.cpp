@@ -25,7 +25,7 @@ constexpr const char* kOldChatsPath = "/assistant/chats.restore.old";
 constexpr const char* kBookmarksPath = "/assistant/file_bookmarks.json";
 constexpr const char* kRestoreBookmarksPath = "/assistant/file_bookmarks.restore.tmp";
 constexpr const char* kOldBookmarksPath = "/assistant/file_bookmarks.restore.old";
-constexpr std::uint32_t kBackupFormatVersion = 1;
+constexpr std::uint32_t kBackupFormatVersion = 2;
 constexpr std::size_t kCopyBufferBytes = 1024;
 
 OperationResult removeFileIfPresent(const String& path)
@@ -180,6 +180,8 @@ OperationResult writeManifest(const Settings& settings, const String& activeChat
     nonSecret["sleep_minutes"] = settings.screenSleepMinutes;
     nonSecret["keyboard_repeat_ms"] = settings.keyboardRepeatMs;
     nonSecret["power_profile"] = settings.powerProfile;
+    nonSecret["project_chat_history_quota_bytes"] =
+        settings.projectChatHistoryQuotaBytes;
     File file = SD.open(String(kTemporaryPath) + "/manifest.json", FILE_WRITE);
     if (!file) {
         return {false, "Failed to create backup manifest"};
@@ -203,7 +205,8 @@ OperationResult parseManifest(Settings& restored, String& activeChatId, std::uin
     const DeserializationError error = deserializeJson(document, file);
     file.close();
     if (error || !document["format"].is<std::uint32_t>() ||
-        document["format"].as<std::uint32_t>() != kBackupFormatVersion ||
+        document["format"].as<std::uint32_t>() < 1 ||
+        document["format"].as<std::uint32_t>() > kBackupFormatVersion ||
         !document["created_at"].is<std::uint64_t>() ||
         !document["active_chat_id"].is<const char*>() ||
         !document["settings"].is<JsonObject>()) {
@@ -213,6 +216,7 @@ OperationResult parseManifest(Settings& restored, String& activeChatId, std::uin
     if (activeChatId.isEmpty() || !isValidChatId(activeChatId.c_str())) {
         return {false, "Backup manifest contains an invalid active chat id"};
     }
+    const std::uint32_t format = document["format"].as<std::uint32_t>();
     JsonObjectConst value = document["settings"].as<JsonObjectConst>();
     if (!value["api_base_url"].is<const char*>() || !value["model"].is<const char*>() ||
         !value["stt_base_url"].is<const char*>() || !value["stt_model"].is<const char*>() ||
@@ -223,7 +227,9 @@ OperationResult parseManifest(Settings& restored, String& activeChatId, std::uin
         !value["brightness"].is<std::uint8_t>() ||
         !value["sleep_minutes"].is<std::uint16_t>() ||
         !value["keyboard_repeat_ms"].is<std::uint16_t>() ||
-        !value["power_profile"].is<std::uint8_t>()) {
+        !value["power_profile"].is<std::uint8_t>() ||
+        (format >= 2 &&
+         !value["project_chat_history_quota_bytes"].is<std::uint32_t>())) {
         return {false, "Backup manifest is missing required non-secret settings"};
     }
     restored.apiBaseUrl = value["api_base_url"].as<const char*>();
@@ -240,6 +246,13 @@ OperationResult parseManifest(Settings& restored, String& activeChatId, std::uin
     restored.screenSleepMinutes = value["sleep_minutes"].as<std::uint16_t>();
     restored.keyboardRepeatMs = value["keyboard_repeat_ms"].as<std::uint16_t>();
     restored.powerProfile = value["power_profile"].as<std::uint8_t>();
+    if (format >= 2) {
+        restored.projectChatHistoryQuotaBytes =
+            value["project_chat_history_quota_bytes"].as<std::uint32_t>();
+        if (!isValidProjectChatHistoryQuota(restored.projectChatHistoryQuotaBytes)) {
+            return {false, "Backup manifest contains an invalid chat history quota"};
+        }
+    }
     createdAt = document["created_at"].as<std::uint64_t>();
     return {true, ""};
 }

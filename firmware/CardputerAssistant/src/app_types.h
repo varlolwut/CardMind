@@ -39,6 +39,7 @@ struct Settings {
     std::uint16_t screenSleepMinutes;
     std::uint16_t keyboardRepeatMs;
     std::uint8_t powerProfile;
+    std::uint32_t projectChatHistoryQuotaBytes;
 };
 
 struct Message {
@@ -79,12 +80,6 @@ struct WorkspaceFile {
     String name;
     std::uint32_t size;
     bool directory = false;
-};
-
-struct WorkspaceFilesResult {
-    bool success;
-    std::vector<WorkspaceFile> files;
-    String error;
 };
 
 struct WorkspaceChunkResult {

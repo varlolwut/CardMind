@@ -8,8 +8,11 @@ void renderFilesMenu()
 
 void renderWorkspaceFileList()
 {
-    cardputer::showSelectionList(workspaceListMode == WorkspaceListMode::ImportChat
-                                     ? String("IMPORT CHAT") : String("SD WORKSPACE"),
+    const String title = workspaceListMode == WorkspaceListMode::ImportChat
+        ? String("IMPORT CHAT")
+        : (workspaceListMode == WorkspaceListMode::ImportProject
+            ? String("IMPORT PROJECT") : String("SD WORKSPACE"));
+    cardputer::showSelectionList(title,
                                  workspaceFileItems(), workspaceFileIndex,
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
 }
@@ -199,11 +202,43 @@ cardputer::OperationResult refreshWorkspacePage(std::uint32_t offset)
     return {true, ""};
 }
 
+cardputer::OperationResult refreshWorkspaceImportPage(std::uint32_t offset,
+                                                      const String& suffix)
+{
+    const cardputer::WorkspaceFilesPageResult page = cardputer::listWorkspaceFilesPage(
+        offset, 32);
+    if (!page.success) {
+        return {false, page.error};
+    }
+    workspaceFiles.clear();
+    workspaceFiles.reserve(page.files.size());
+    for (const cardputer::WorkspaceFile& file : page.files) {
+        if (!file.directory && file.name.endsWith(suffix)) {
+            workspaceFiles.push_back(file);
+        }
+    }
+    workspacePageOffset = offset;
+    workspaceNextPageOffset = page.nextOffset;
+    workspacePageEof = page.eof;
+    workspaceFileIndex = workspaceFiles.empty() ? 0 : 1;
+    return {true, ""};
+}
+
+cardputer::OperationResult refreshWorkspaceListPage(std::uint32_t offset)
+{
+    if (workspaceListMode == WorkspaceListMode::ImportChat) {
+        return refreshWorkspaceImportPage(offset, ".chat.jsonl");
+    }
+    if (workspaceListMode == WorkspaceListMode::ImportProject) {
+        return refreshWorkspaceImportPage(offset, ".cardmind-project.jsonl");
+    }
+    return refreshWorkspacePage(offset);
+}
+
 void openWorkspaceFileList()
 {
     workspaceListMode = WorkspaceListMode::Browse;
     workspaceListReturnScreen = Screen::FilesMenu;
-    workspacePreviousPageOffsets.clear();
     const cardputer::OperationResult result = refreshWorkspacePage(0);
     if (!result.success) {
         menuStatus = result.error;
@@ -217,30 +252,39 @@ void openWorkspaceFileList()
 
 void openChatImportList()
 {
-    const cardputer::WorkspaceFilesResult result = cardputer::listWorkspaceFiles();
+    workspaceListMode = WorkspaceListMode::ImportChat;
+    workspaceListReturnScreen = Screen::FilesMenu;
+    const cardputer::OperationResult result = refreshWorkspaceListPage(0);
     if (!result.success) {
         menuStatus = result.error;
         renderFilesMenu();
         return;
     }
-    workspaceFiles.clear();
-    for (const auto& file : result.files) {
-        if (file.name.endsWith(".chat.jsonl")) {
-            workspaceFiles.push_back(file);
-        }
-    }
-    workspaceFileIndex = workspaceFiles.empty() ? 0 : 1;
-    workspaceListMode = WorkspaceListMode::ImportChat;
-    workspaceListReturnScreen = Screen::FilesMenu;
     menuStatus = workspaceFiles.empty() ? String("No .chat.jsonl bundles found")
                                         : String("Choose a .chat.jsonl bundle");
     currentScreen = Screen::WorkspaceFileList;
     renderWorkspaceFileList();
 }
 
+void openProjectImportList()
+{
+    workspaceListMode = WorkspaceListMode::ImportProject;
+    workspaceListReturnScreen = Screen::ProjectList;
+    const cardputer::OperationResult result = refreshWorkspaceListPage(0);
+    if (!result.success) {
+        menuStatus = result.error;
+        renderProjectList();
+        return;
+    }
+    menuStatus = workspaceFiles.empty()
+        ? String("No project bundles on this page")
+        : String("Choose a project bundle");
+    currentScreen = Screen::WorkspaceFileList;
+    renderWorkspaceFileList();
+}
+
 cardputer::OperationResult selectWorkspaceFileByName(const String& name)
 {
-    workspacePreviousPageOffsets.clear();
     std::uint32_t offset = 0;
     while (true) {
         const cardputer::OperationResult result = refreshWorkspacePage(offset);
@@ -256,7 +300,6 @@ cardputer::OperationResult selectWorkspaceFileByName(const String& name)
         if (workspacePageEof) {
             break;
         }
-        workspacePreviousPageOffsets.push_back(offset);
         offset = workspaceNextPageOffset;
     }
     return {false, "Workspace file was not found after the operation: " + name};
@@ -316,11 +359,21 @@ void openSelectedWorkspaceFile()
     lastFileFindQuery.clear();
     lastFileFindOffset = 0;
     fileViewerPreviousOffsets.clear();
-    const cardputer::OperationResult result = loadFileViewerChunk(0);
-    if (!result.success) {
-        menuStatus = result.error;
-        renderWorkspaceFileList();
-        return;
+    if (cardputer::isWorkspaceTextFile(std::string(fileViewerName.c_str()))) {
+        const cardputer::OperationResult result = loadFileViewerChunk(0);
+        if (!result.success) {
+            menuStatus = result.error;
+            renderWorkspaceFileList();
+            return;
+        }
+    } else {
+        std::string().swap(fileViewerContent);
+        std::vector<std::string>().swap(fileViewerLines);
+        fileViewerChunkOffset = 0;
+        fileViewerNextOffset = 0;
+        fileViewerTotalBytes = workspaceFiles[workspaceFileIndex - 1].size;
+        fileViewerEof = true;
+        fileViewerFirstLine = 0;
     }
     menuStatus = "";
     fileActionsIndex = 0;
@@ -392,7 +445,13 @@ void beginFileNameEntry(FileNameAction action, const String& sourceName)
 void completeFileNameEntry()
 {
     if (!cardputer::isValidWorkspaceFilename(fileNameInput)) {
-        fileNameStatus = "Use a valid text filename and extension";
+        fileNameStatus = "Use a valid safe nested filename";
+        renderFileNameEntry();
+        return;
+    }
+    if (fileNameAction == FileNameAction::Create &&
+        !cardputer::isWorkspaceTextFile(fileNameInput)) {
+        fileNameStatus = "New editable files require a text extension";
         renderFileNameEntry();
         return;
     }
@@ -419,8 +478,17 @@ void completeFileNameEntry()
     fileReaderMode = cardputer::detectDocumentReaderMode(fileViewerName.c_str());
     fileViewerPreviousOffsets.clear();
     result = selectWorkspaceFileByName(destination);
-    if (result.success) {
+    if (result.success &&
+        cardputer::isWorkspaceTextFile(std::string(destination.c_str()))) {
         result = loadFileViewerChunk(0);
+    } else if (result.success) {
+        std::string().swap(fileViewerContent);
+        std::vector<std::string>().swap(fileViewerLines);
+        fileViewerChunkOffset = 0;
+        fileViewerNextOffset = 0;
+        fileViewerTotalBytes = workspaceFiles[workspaceFileIndex - 1].size;
+        fileViewerEof = true;
+        fileViewerFirstLine = 0;
     }
     if (!result.success) {
         currentScreen = Screen::WorkspaceFileList;

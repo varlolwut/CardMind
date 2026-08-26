@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <ctime>
 #include <string>
+#include <utility>
 
 namespace cardputer {
 namespace {
@@ -21,6 +22,17 @@ constexpr const char* kProjectsRoot = "/assistant/v2/projects";
 constexpr const char* kProjectsIndex = "/assistant/v2/projects/index.jsonl";
 constexpr const char* kManifestPath = "/assistant/v2/manifest.json";
 constexpr const char* kSharedRoot = "/assistant/files";
+constexpr std::size_t kMaximumProjectJsonFieldNameBytes = 64;
+
+bool isProjectJsonWhitespace(int value)
+{
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+}
+
+OperationResult restoreIndexEntry(const String& path,
+                                  const String& keyField,
+                                  const String& keyValue,
+                                  const StorageIndexLookupResult& previous);
 
 const char* migrationStateName(ProjectMigrationState state)
 {
@@ -167,10 +179,30 @@ String serializeChatSummary(const ChatSummary& summary)
     return line;
 }
 
-ProjectDocumentResult parseProjectDocument(File& file)
+ProjectDocumentResult parseProjectDocumentCore(File& file)
 {
+    JsonDocument filter;
+    filter["version"] = true;
+    filter["id"] = true;
+    filter["title"] = true;
+    filter["updated_at"] = true;
+    filter["chat_count"] = true;
+    filter["pinned"] = true;
+    filter["archived"] = true;
+    filter["revision"] = true;
+    filter["active_chat_id"] = true;
+    filter["model"] = true;
+    filter["api_profile"] = true;
+    filter["tool_policy"] = true;
+    filter["ssh_profile"] = true;
+    filter["context_byte_budget"] = true;
+    filter["maximum_output_tokens"] = true;
+    filter["automatic_compaction"] = true;
+    filter["chat_index_revision"] = true;
+    filter["shared_links_revision"] = true;
     JsonDocument document;
-    const DeserializationError error = deserializeJson(document, file);
+    const DeserializationError error = deserializeJson(
+        document, file, DeserializationOption::Filter(filter));
     if (error) {
         return {false, {}, "Failed to parse project JSON: " + String(error.c_str())};
     }
@@ -181,7 +213,6 @@ ProjectDocumentResult parseProjectDocument(File& file)
         !document["chat_count"].is<std::uint32_t>() ||
         !document["pinned"].is<bool>() || !document["archived"].is<bool>() ||
         !document["revision"].is<std::uint32_t>() ||
-        !document["instructions"].is<const char*>() ||
         !document["active_chat_id"].is<const char*>() ||
         !document["model"].is<const char*>() ||
         !document["api_profile"].is<const char*>() ||
@@ -202,7 +233,6 @@ ProjectDocumentResult parseProjectDocument(File& file)
     project.summary.pinned = document["pinned"].as<bool>();
     project.summary.archived = document["archived"].as<bool>();
     project.summary.revision = document["revision"].as<std::uint32_t>();
-    project.instructions = document["instructions"].as<const char*>();
     project.activeChatId = document["active_chat_id"].as<const char*>();
     project.model = document["model"].as<const char*>();
     project.apiProfile = document["api_profile"].as<const char*>();
@@ -214,33 +244,244 @@ ProjectDocumentResult parseProjectDocument(File& file)
     project.chatIndexRevision = document["chat_index_revision"].as<std::uint32_t>();
     project.sharedLinksRevision = document["shared_links_revision"].as<std::uint32_t>();
     const OperationResult validation = validateProjectDocument(project);
-    return validation.success ? ProjectDocumentResult{true, project, ""}
+    return validation.success ? ProjectDocumentResult{true, std::move(project), ""}
                               : ProjectDocumentResult{false, {}, validation.error};
 }
 
-OperationResult writeProjectDocument(const ProjectDocument& project)
+ProjectDocumentResult parseProjectDocument(File& file, const String& path)
+{
+    ProjectDocumentResult result = parseProjectDocumentCore(file);
+    if (!result.success) return result;
+    JsonStringFieldResult instructions = readJsonStringField(
+        path, "instructions", kMaximumProjectInstructionsBytes);
+    if (!instructions.success) return {false, {}, instructions.error};
+    result.project.instructions = std::move(instructions.value);
+    const OperationResult validation = validateProjectDocument(result.project);
+    return validation.success ? ProjectDocumentResult{true, std::move(result.project), ""}
+                              : ProjectDocumentResult{false, {}, validation.error};
+}
+
+OperationResult writeProjectDocumentWithSummary(const ProjectDocument& project,
+                                                const ProjectSummary& summary)
 {
     JsonDocument document;
     document["version"] = kProjectStorageFormatVersion;
-    document["id"] = project.summary.id;
-    document["title"] = project.summary.title;
-    document["updated_at"] = project.summary.updatedAt;
-    document["chat_count"] = project.summary.chatCount;
-    document["pinned"] = project.summary.pinned;
-    document["archived"] = project.summary.archived;
-    document["revision"] = project.summary.revision;
-    document["instructions"] = project.instructions;
-    document["active_chat_id"] = project.activeChatId;
-    document["model"] = project.model;
-    document["api_profile"] = project.apiProfile;
-    document["tool_policy"] = project.toolPolicy;
-    document["ssh_profile"] = project.sshProfile;
+    document["id"] = summary.id;
+    document["title"] = summary.title;
+    document["updated_at"] = summary.updatedAt;
+    document["chat_count"] = summary.chatCount;
+    document["pinned"] = summary.pinned;
+    document["archived"] = summary.archived;
+    document["revision"] = summary.revision;
+    document["instructions"] = project.instructions.c_str();
+    document["active_chat_id"] = project.activeChatId.c_str();
+    document["model"] = project.model.c_str();
+    document["api_profile"] = project.apiProfile.c_str();
+    document["tool_policy"] = project.toolPolicy.c_str();
+    document["ssh_profile"] = project.sshProfile.c_str();
     document["context_byte_budget"] = project.contextByteBudget;
     document["maximum_output_tokens"] = project.maximumOutputTokens;
     document["automatic_compaction"] = project.automaticCompaction;
     document["chat_index_revision"] = project.chatIndexRevision;
     document["shared_links_revision"] = project.sharedLinksRevision;
-    return writeAtomicJsonSdFile(projectMetadataPath(project.summary.id), document);
+    return writeAtomicJsonSdFile(projectMetadataPath(summary.id), document);
+}
+
+OperationResult writeProjectDocument(const ProjectDocument& project)
+{
+    return writeProjectDocumentWithSummary(project, project.summary);
+}
+
+ProjectDocumentResult loadProjectCore(const String& id)
+{
+    File file = SD.open(projectMetadataPath(id), FILE_READ);
+    if (!file) return {false, {}, "Project metadata does not exist for id " + id};
+    ProjectDocumentResult result = parseProjectDocumentCore(file);
+    file.close();
+    if (result.success && result.project.summary.id != id) {
+        return {false, {}, "Project directory id does not match project metadata"};
+    }
+    return result;
+}
+
+struct ProjectCounterPatch {
+    std::uint64_t updatedAt;
+    std::uint32_t chatCount;
+    std::uint32_t revision;
+    std::uint32_t chatIndexRevision;
+};
+
+bool projectCounterReplacement(const String& key,
+                               const ProjectCounterPatch& patch,
+                               String& replacement)
+{
+    if (key == "updated_at") {
+        replacement = String(static_cast<unsigned long long>(patch.updatedAt));
+    } else if (key == "chat_count") {
+        replacement = String(patch.chatCount);
+    } else if (key == "revision") {
+        replacement = String(patch.revision);
+    } else if (key == "chat_index_revision") {
+        replacement = String(patch.chatIndexRevision);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+OperationResult patchProjectCounters(const String& projectId,
+                                     const ProjectCounterPatch& patch)
+{
+    const String path = projectMetadataPath(projectId);
+    OperationResult result = recoverAtomicSdFile(path);
+    if (!result.success) return result;
+    File input = SD.open(path, FILE_READ);
+    if (!input || input.isDirectory()) {
+        if (input) input.close();
+        return {false, "Project metadata cannot be opened for counter update"};
+    }
+    result = checkSdOperationSpace(input.size(), kStorageOperationalFloorBytes);
+    if (!result.success) {
+        input.close();
+        return result;
+    }
+    const String stagedPath = path + ".tmp";
+    File output = SD.open(stagedPath, FILE_WRITE);
+    if (!output) {
+        input.close();
+        return {false, "Failed to create staged project counter update"};
+    }
+    std::uint32_t depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    bool expectingKey = false;
+    bool capturingKey = false;
+    String key;
+    std::uint8_t patchedFields = 0;
+    while (input.available() && result.success) {
+        const int value = input.read();
+        if (value < 0 || output.write(static_cast<std::uint8_t>(value)) != 1) {
+            result = {false, "Failed while streaming staged project counter update"};
+            break;
+        }
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+                if (capturingKey) key = "";
+            } else if (value == '\\') {
+                escaped = true;
+            } else if (value == '"') {
+                inString = false;
+                if (capturingKey) expectingKey = false;
+                capturingKey = false;
+            } else if (capturingKey && key.length() <= kMaximumProjectJsonFieldNameBytes) {
+                key += static_cast<char>(value);
+            }
+            continue;
+        }
+        if (value == '"') {
+            inString = true;
+            capturingKey = depth == 1 && expectingKey;
+            if (capturingKey) key = "";
+            continue;
+        }
+        if (value == '{' || value == '[') {
+            ++depth;
+            if (depth == 1 && value == '{') expectingKey = true;
+            continue;
+        }
+        if (value == '}' || value == ']') {
+            if (depth == 0) {
+                result = {false, "Project JSON contains mismatched brackets"};
+                break;
+            }
+            --depth;
+            continue;
+        }
+        if (depth == 1 && value == ',') {
+            expectingKey = true;
+            continue;
+        }
+        if (depth != 1 || value != ':' || expectingKey) continue;
+        String replacement;
+        if (!projectCounterReplacement(key, patch, replacement)) continue;
+        while (input.available() && isProjectJsonWhitespace(input.peek())) {
+            const int whitespace = input.read();
+            if (output.write(static_cast<std::uint8_t>(whitespace)) != 1) {
+                result = {false, "Failed while copying project counter whitespace"};
+                break;
+            }
+        }
+        if (!result.success) break;
+        if (!input.available() || input.peek() < '0' || input.peek() > '9') {
+            result = {false, "Project counter is not an unsigned JSON number: " + key};
+            break;
+        }
+        while (input.available() && input.peek() >= '0' && input.peek() <= '9') {
+            input.read();
+        }
+        if (output.print(replacement) != replacement.length()) {
+            result = {false, "Failed to write updated project counter: " + key};
+            break;
+        }
+        ++patchedFields;
+    }
+    const std::uint64_t sourceBytes = input.size();
+    input.close();
+    output.flush();
+    output.close();
+    if (result.success && (depth != 0 || inString || patchedFields != 4)) {
+        result = {false, "Project counter update did not patch four complete fields"};
+    }
+    if (result.success) {
+        File validation = SD.open(stagedPath, FILE_READ);
+        if (!validation || validation.size() + 80 < sourceBytes ||
+            validation.size() > sourceBytes + 80) {
+            if (validation) validation.close();
+            result = {false, "Staged project counter update has an invalid size"};
+        } else {
+            ProjectDocumentResult parsed = parseProjectDocumentCore(validation);
+            validation.close();
+            if (!parsed.success || parsed.project.summary.updatedAt != patch.updatedAt ||
+                parsed.project.summary.chatCount != patch.chatCount ||
+                parsed.project.summary.revision != patch.revision ||
+                parsed.project.chatIndexRevision != patch.chatIndexRevision) {
+                result = {false, parsed.success
+                    ? String("Staged project counters do not match requested values")
+                    : parsed.error};
+            }
+        }
+    }
+    if (!result.success) {
+        SD.remove(stagedPath);
+        return result;
+    }
+    return commitStagedSdFile(path, stagedPath);
+}
+
+OperationResult persistProjectCounterUpdate(const ProjectDocument& project)
+{
+    const StorageIndexLookupResult previous = findJsonlSdIndexEntry(
+        kProjectsIndex, "id", project.summary.id);
+    if (!previous.success || !previous.found) {
+        return {false, previous.success
+            ? String("Project index entry is missing for id ") + project.summary.id
+            : previous.error};
+    }
+    OperationResult result = mutateJsonlSdIndex(
+        kProjectsIndex, "id", project.summary.id,
+        serializeProjectSummary(project.summary), false, kStorageOperationalFloorBytes);
+    if (!result.success) return result;
+    result = patchProjectCounters(project.summary.id,
+        {project.summary.updatedAt, project.summary.chatCount,
+         project.summary.revision, project.chatIndexRevision});
+    if (result.success) return result;
+    const OperationResult rollback = restoreIndexEntry(
+        kProjectsIndex, "id", project.summary.id, previous);
+    return rollback.success
+        ? result
+        : OperationResult{false, result.error + "; project index rollback also failed: " +
+                                   rollback.error};
 }
 
 ProjectDocumentResult parseProjectSummaryLine(const String& line)
@@ -264,7 +505,7 @@ ProjectDocumentResult parseProjectSummaryLine(const String& line)
     project.summary.archived = document["archived"].as<bool>();
     project.summary.revision = document["revision"].as<std::uint32_t>();
     const OperationResult validation = validateProjectSummary(project.summary);
-    return validation.success ? ProjectDocumentResult{true, project, ""}
+    return validation.success ? ProjectDocumentResult{true, std::move(project), ""}
                               : ProjectDocumentResult{false, {}, validation.error};
 }
 
@@ -295,7 +536,7 @@ ChatDocumentResult parseChatSummaryLine(const String& line)
         !isValidUtf8(chat.summary.title.c_str())) {
         return {false, {}, "Project chat index summary contains invalid metadata"};
     }
-    return {true, chat, ""};
+    return {true, std::move(chat), ""};
 }
 
 OperationResult createProjectDirectories(const String& id)
@@ -318,6 +559,18 @@ OperationResult createProjectDirectories(const String& id)
     const String links = projectSharedLinksPath(id);
     return SD.exists(links) ? OperationResult{true, ""}
                             : writeEmptyAtomicSdFile(links);
+}
+
+ProjectDocumentResult failedProjectCreation(const String& id, const String& error)
+{
+    if (!SD.exists(projectDirectoryPath(id))) {
+        return {false, {}, error};
+    }
+    const OperationResult cleanup = removeSdDirectoryTree(projectDirectoryPath(id));
+    return cleanup.success
+        ? ProjectDocumentResult{false, {}, error}
+        : ProjectDocumentResult{
+            false, {}, error + "; partial project cleanup also failed: " + cleanup.error};
 }
 
 OperationResult restoreIndexEntry(const String& path,
@@ -492,25 +745,38 @@ ProjectDocumentResult createProject(const String& title)
     if (id.isEmpty()) {
         return {false, {}, "Failed to generate a unique project id after 8 attempts"};
     }
+    return createProjectWithId(title, id);
+}
+
+ProjectDocumentResult createProjectWithId(const String& title, const String& id)
+{
+    if (title.isEmpty() || title.length() > kMaximumProjectTitleBytes ||
+        !isValidUtf8(title.c_str())) {
+        return {false, {}, "Project title must be valid UTF-8 and contain 1 to 120 bytes"};
+    }
+    if (!isValidChatId(id.c_str())) {
+        return {false, {}, "Cannot create a project with an invalid id"};
+    }
+    if (SD.exists(projectDirectoryPath(id))) {
+        return {false, {}, "Project id already exists: " + id};
+    }
     ProjectDocument project;
     project.summary = {id, title, currentTimestamp(), 0, false, false, 1};
     OperationResult result = createProjectDirectories(id);
     if (!result.success) {
-        return {false, {}, result.error};
+        return failedProjectCreation(id, result.error);
     }
     result = writeProjectDocument(project);
     if (!result.success) {
-        removeSdDirectoryTree(projectDirectoryPath(id));
-        return {false, {}, result.error};
+        return failedProjectCreation(id, result.error);
     }
     result = mutateJsonlSdIndex(kProjectsIndex, "id", id,
                                 serializeProjectSummary(project.summary), false,
                                 kStorageOperationalFloorBytes);
     if (!result.success) {
-        removeSdDirectoryTree(projectDirectoryPath(id));
-        return {false, {}, result.error};
+        return failedProjectCreation(id, result.error);
     }
-    return {true, project, ""};
+    return {true, std::move(project), ""};
 }
 
 ProjectDocumentResult loadProject(const String& id)
@@ -522,7 +788,7 @@ ProjectDocumentResult loadProject(const String& id)
     if (!file) {
         return {false, {}, "Project metadata does not exist for id " + id};
     }
-    ProjectDocumentResult result = parseProjectDocument(file);
+    ProjectDocumentResult result = parseProjectDocument(file, projectMetadataPath(id));
     file.close();
     if (result.success && result.project.summary.id != id) {
         return {false, {}, "Project directory id does not match project metadata"};
@@ -532,30 +798,30 @@ ProjectDocumentResult loadProject(const String& id)
 
 OperationResult saveProject(const ProjectDocument& project)
 {
-    ProjectDocument stored = project;
-    const OperationResult validation = validateProjectDocument(stored);
+    const OperationResult validation = validateProjectDocument(project);
     if (!validation.success) {
         return validation;
     }
-    const ProjectDocumentResult previousDocument = loadProject(stored.summary.id);
+    const ProjectDocumentResult previousDocument = loadProject(project.summary.id);
     if (!previousDocument.success) {
         return {false, previousDocument.error};
     }
     const StorageIndexLookupResult previousIndex = findJsonlSdIndexEntry(
-        kProjectsIndex, "id", stored.summary.id);
+        kProjectsIndex, "id", project.summary.id);
     if (!previousIndex.success || !previousIndex.found) {
         return {false, previousIndex.success
-            ? String("Project index entry is missing for id ") + stored.summary.id
+            ? String("Project index entry is missing for id ") + project.summary.id
             : previousIndex.error};
     }
-    stored.summary.updatedAt = currentTimestamp();
-    ++stored.summary.revision;
-    OperationResult result = writeProjectDocument(stored);
+    ProjectSummary updatedSummary = project.summary;
+    updatedSummary.updatedAt = currentTimestamp();
+    ++updatedSummary.revision;
+    OperationResult result = writeProjectDocumentWithSummary(project, updatedSummary);
     if (!result.success) {
         return result;
     }
-    result = mutateJsonlSdIndex(kProjectsIndex, "id", stored.summary.id,
-                                serializeProjectSummary(stored.summary), false,
+    result = mutateJsonlSdIndex(kProjectsIndex, "id", updatedSummary.id,
+                                serializeProjectSummary(updatedSummary), false,
                                 kStorageOperationalFloorBytes);
     if (!result.success) {
         const OperationResult rollback = writeProjectDocument(previousDocument.project);
@@ -722,7 +988,7 @@ OperationResult upsertProjectChatSummary(const String& projectId,
         summary.title.isEmpty() || !isValidUtf8(summary.title.c_str())) {
         return {false, "Cannot index invalid project or chat metadata"};
     }
-    ProjectDocumentResult project = loadProject(projectId);
+    ProjectDocumentResult project = loadProjectCore(projectId);
     if (!project.success) {
         return {false, project.error};
     }
@@ -741,7 +1007,9 @@ OperationResult upsertProjectChatSummary(const String& projectId,
         ++project.project.summary.chatCount;
     }
     ++project.project.chatIndexRevision;
-    result = saveProject(project.project);
+    project.project.summary.updatedAt = currentTimestamp();
+    ++project.project.summary.revision;
+    result = persistProjectCounterUpdate(project.project);
     if (!result.success) {
         const OperationResult rollback = restoreIndexEntry(indexPath, "id", summary.id, previous);
         return rollback.success
@@ -757,7 +1025,7 @@ OperationResult removeProjectChatSummary(const String& projectId, const String& 
     if (!isValidChatId(projectId.c_str()) || !isValidChatId(chatId.c_str())) {
         return {false, "Cannot remove invalid project or chat id from index"};
     }
-    ProjectDocumentResult project = loadProject(projectId);
+    ProjectDocumentResult project = loadProjectCore(projectId);
     if (!project.success) {
         return {false, project.error};
     }
@@ -776,7 +1044,9 @@ OperationResult removeProjectChatSummary(const String& projectId, const String& 
         --project.project.summary.chatCount;
     }
     ++project.project.chatIndexRevision;
-    result = saveProject(project.project);
+    project.project.summary.updatedAt = currentTimestamp();
+    ++project.project.summary.revision;
+    result = persistProjectCounterUpdate(project.project);
     if (!result.success) {
         const OperationResult rollback = restoreIndexEntry(indexPath, "id", chatId, previous);
         return rollback.success
