@@ -3495,6 +3495,146 @@ async function verifyRetryRoundTrip(baseUrl, auth) {
   }
 }
 
+async function verifyWorkspaceToolRefresh(baseUrl, auth) {
+  const original = await activeChatState(baseUrl, auth);
+  const originalProjectId = requireString(original.project_id, 'project_id');
+  const nonce = String(Date.now());
+  const projectTitle = `Workspace tool refresh ${nonce}`;
+  const fileName = `_cardmind_workspace_tool_${nonce}.py`;
+  const marker = `CARDMIND_WORKSPACE_TOOL_${nonce}`;
+  let projectId = '';
+  let fileCreated = false;
+  let evidence = null;
+  let testError = null;
+  const cleanupErrors = [];
+  try {
+    const createdResponse = await request(baseUrl, auth, '/api/project/new', {
+      method: 'POST',
+      body: form({title: projectTitle}),
+    });
+    projectId = requireString((await createdResponse.json()).project_id, 'project_id');
+    const beforeFiles = await (
+      await request(baseUrl, auth, '/api/files?offset=0', {method: 'GET'})
+    ).json();
+    if (!Number.isSafeInteger(beforeFiles.files_revision)) {
+      throw new Error('Workspace endpoint omitted its pre-write revision');
+    }
+    const writeResponse = await longRequest(
+      baseUrl,
+      auth,
+      '/api/prompt/raw',
+      promptRequest(
+        `/file Create ${fileName} with exactly this Python source: print("${marker}")`,
+        '512',
+      ),
+    );
+    const writeEvents = parseSse(await writeResponse.text());
+    const writeError = writeEvents.find((event) => event.type === 'error');
+    if (writeError !== undefined || !writeEvents.some((event) => event.type === 'done')) {
+      throw new Error(
+        `Workspace write stream failed: ${writeError?.error ?? 'missing done event'}`,
+      );
+    }
+    const afterFiles = await (
+      await request(baseUrl, auth, '/api/files?offset=0', {method: 'GET'})
+    ).json();
+    if (!Number.isSafeInteger(afterFiles.files_revision) ||
+        afterFiles.files_revision <= beforeFiles.files_revision) {
+      throw new Error(
+        `Workspace revision did not advance after tool write: ` +
+        `${beforeFiles.files_revision} -> ${afterFiles.files_revision}`,
+      );
+    }
+    fileCreated = (await listAllWorkspaceNames(baseUrl, auth)).includes(fileName);
+    if (!fileCreated) {
+      throw new Error(`Workspace listing omitted model-created file '${fileName}'`);
+    }
+    const file = await (
+      await request(
+        baseUrl,
+        auth,
+        `/api/file?name=${encodeURIComponent(fileName)}&offset=0`,
+        {method: 'GET'},
+      )
+    ).json();
+    if (file.ok !== true || file.eof !== true ||
+        typeof file.content !== 'string' || !file.content.includes(marker)) {
+      throw new Error(`Model-created file content is invalid: ${JSON.stringify(file)}`);
+    }
+    const listResponse = await longRequest(
+      baseUrl,
+      auth,
+      '/api/prompt/raw',
+      promptRequest(`/file List workspace files and confirm whether ${fileName} exists.`, '512'),
+    );
+    const listEvents = parseSse(await listResponse.text());
+    const listError = listEvents.find((event) => event.type === 'error');
+    if (listError !== undefined || !listEvents.some((event) => event.type === 'done')) {
+      throw new Error(
+        `Workspace list stream failed: ${listError?.error ?? 'missing done event'}`,
+      );
+    }
+    evidence = {
+      file: fileName,
+      revision_before: beforeFiles.files_revision,
+      revision_after: afterFiles.files_revision,
+      write_stream: 'pass',
+      list_stream: 'pass',
+    };
+  } catch (error) {
+    testError = error;
+  } finally {
+    try {
+      const ownedProjectIds = new Set();
+      if (projectId) ownedProjectIds.add(projectId);
+      for (const project of await listAllProjects(baseUrl, auth)) {
+        if (project.title === projectTitle) ownedProjectIds.add(project.id);
+      }
+      for (const ownedProjectId of ownedProjectIds) {
+        await request(baseUrl, auth, '/api/project/select', {
+          method: 'POST',
+          body: form({id: ownedProjectId}),
+        });
+        await request(baseUrl, auth, '/api/project/delete', {
+          method: 'POST',
+          body: form({}),
+        });
+      }
+    } catch (error) {
+      cleanupErrors.push(`project cleanup: ${error.message}`);
+    }
+    try {
+      if (fileCreated || (await listAllWorkspaceNames(baseUrl, auth)).includes(fileName)) {
+        await deleteWorkspaceProbe(baseUrl, auth, fileName);
+      }
+    } catch (error) {
+      cleanupErrors.push(`file cleanup: ${error.message}`);
+    }
+    try {
+      await request(baseUrl, auth, '/api/project/select', {
+        method: 'POST',
+        body: form({id: originalProjectId}),
+      });
+      const remainingProjects = await listAllProjects(baseUrl, auth);
+      const remainingFiles = await listAllWorkspaceNames(baseUrl, auth);
+      const restored = await activeChatState(baseUrl, auth);
+      if (remainingProjects.some((project) => project.title === projectTitle) ||
+          remainingFiles.includes(fileName) || restored.project_id !== originalProjectId) {
+        throw new Error('temporary data remained or the original project was not restored');
+      }
+    } catch (error) {
+      cleanupErrors.push(`state restoration: ${error.message}`);
+    }
+  }
+  if (testError !== null || cleanupErrors.length > 0) {
+    throw new Error(
+      `Workspace tool round trip failed; test=${testError?.message ?? 'none'}; ` +
+      `cleanup=${cleanupErrors.length === 0 ? 'none' : cleanupErrors.join('; ')}`,
+    );
+  }
+  return evidence;
+}
+
 async function verifyCompactionRoundTrip(baseUrl, auth) {
   const original = await activeChatState(baseUrl, auth);
   const originalProjectId = requireString(original.project_id, 'project_id');
@@ -5032,6 +5172,7 @@ async function main() {
     'full', 'projects', 'retry', 'compaction', 'limits', 'chat-scale',
     'workspace-scale', 'file-scale', 'unicode-path', 'unicode-path-recover',
     'shared-isolation', 'shared-isolation-recover', 'diagnostics', 'ssh',
+    'workspace-tool',
     'large-stream', 'atomic-failure', 'sd-degraded', 'instructions',
     'version-history',
     'request-settings', 'summary-regeneration', 'context-history',
@@ -5082,6 +5223,11 @@ async function main() {
         });
       }
     }
+    return;
+  }
+  if (suite === 'workspace-tool') {
+    const workspaceTool = await verifyWorkspaceToolRefresh(baseUrl, auth);
+    console.log(JSON.stringify({result: 'pass', suite, workspace_tool: workspaceTool}));
     return;
   }
   if (suite === 'compaction') {
