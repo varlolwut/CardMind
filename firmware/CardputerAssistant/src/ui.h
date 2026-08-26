@@ -72,6 +72,7 @@ void showChat(const std::vector<Message>& history,
               bool wifiConnected,
               int batteryLevel,
               bool batteryCharging);
+void updateChatInput(const std::string& input);
 void showCarousel(const std::vector<CarouselCard>& cards,
                   std::size_t selectedIndex,
                   bool wifiConnected,
