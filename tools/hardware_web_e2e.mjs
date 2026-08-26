@@ -5031,7 +5031,7 @@ async function main() {
   if (![
     'full', 'projects', 'retry', 'compaction', 'limits', 'chat-scale',
     'workspace-scale', 'file-scale', 'unicode-path', 'unicode-path-recover',
-    'shared-isolation', 'shared-isolation-recover', 'diagnostics',
+    'shared-isolation', 'shared-isolation-recover', 'diagnostics', 'ssh',
     'large-stream', 'atomic-failure', 'sd-degraded', 'instructions',
     'version-history',
     'request-settings', 'summary-regeneration', 'context-history',
@@ -5049,6 +5049,39 @@ async function main() {
       (line) => /reset_reason|previous_operation|panic|abort|heap/i.test(line),
     );
     console.log(JSON.stringify({result: 'pass', suite, relevant}));
+    return;
+  }
+  if (suite === 'ssh') {
+    const measurements = [];
+    recordSnapshot(measurements, 'baseline', await state(baseUrl, auth));
+    let connected = false;
+    try {
+      const startedAt = performance.now();
+      const connection = await startSsh(baseUrl, auth);
+      connected = true;
+      recordSnapshot(measurements, 'ssh_open', await state(baseUrl, auth));
+      await verifyInteractiveSsh(baseUrl, auth);
+      await stopSsh(baseUrl, auth);
+      connected = false;
+      recordSnapshot(measurements, 'ssh_closed', await state(baseUrl, auth));
+      console.log(JSON.stringify({
+        result: 'pass',
+        suite,
+        ssh_connect_ms: Math.round(performance.now() - startedAt),
+        ssh_device_connect_ms: connection.ssh_connect_ms,
+        ssh_device_authenticate_ms: connection.ssh_authenticate_ms,
+        ssh_device_open_ms: connection.ssh_open_ms,
+        ssh_worker_stack_free: connection.ssh_worker_stack_free,
+        interactive_ssh: 'pass',
+        measurements,
+      }));
+    } finally {
+      if (connected) {
+        await stopSsh(baseUrl, auth).catch((error) => {
+          console.error(`SSH cleanup failed: ${error.message}`);
+        });
+      }
+    }
     return;
   }
   if (suite === 'compaction') {
