@@ -94,6 +94,18 @@ std::size_t visibleTranscriptLineCount(const String& status)
         : kCompactTranscriptLines;
 }
 
+template <typename Display>
+void drawChatInputLine(Display& display, const std::string& input)
+{
+    display.fillRect(0, 104, 240, 17, TFT_BLACK);
+    display.drawFastHLine(0, 104, 240, TFT_DARKGREY);
+    display.setFont(&fonts::efontCN_12);
+    display.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
+    display.setCursor(3, 106);
+    const auto inputLines = wrapUtf8Text("> " + input + "_", kTranscriptCells);
+    display.print(inputLines.back().c_str());
+}
+
 void drawToolbarItem(int x, const std::uint8_t* icon, const char* label)
 {
     canvas->drawBitmap(x + 2, 125, icon, 8, 8, TFT_WHITE);
@@ -542,11 +554,7 @@ void showChat(const std::vector<Message>& history,
         }
     }
 
-    canvas->drawFastHLine(0, 104, 240, TFT_DARKGREY);
-    canvas->setTextColor(TFT_GREENYELLOW, TFT_BLACK);
-    canvas->setCursor(3, 106);
-    const auto inputLines = wrapUtf8Text("> " + input + "_", kTranscriptCells);
-    canvas->print(inputLines.back().c_str());
+    drawChatInputLine(*canvas, input);
 
     canvas->fillRect(0, 121, 240, 14, TFT_DARKGREY);
     canvas->drawFastVLine(47, 121, 14, TFT_BLACK);
@@ -562,6 +570,12 @@ void showChat(const std::vector<Message>& history,
                     layout == KeyboardLayout::English ? "F3 RU" : "F3 EN");
     drawToolbarItem(192, kSettingsIcon, "F4 MENU");
     canvas->pushSprite(0, 0);
+}
+
+void updateChatInput(const std::string& input)
+{
+    drawChatInputLine(*canvas, input);
+    drawChatInputLine(M5Cardputer.Display, input);
 }
 
 void showCarousel(const std::vector<CarouselCard>& cards,

@@ -186,6 +186,43 @@ SdStorageStatus faultStatus(SdStorageState state)
     return {SdStorageState::Removed, 0, 0, "microSD state is invalid"};
 }
 
+OperationResult requireExistingSdVolumeAccess()
+{
+    if (sdFaultOverrideEnabled) {
+        const SdStorageStatus status = faultStatus(sdFaultOverrideState);
+        return status.state == SdStorageState::Ready || status.state == SdStorageState::Full
+            ? OperationResult{true, ""}
+            : OperationResult{false, status.error};
+    }
+    if (sdRestartRequired) {
+        return {false,
+                "microSD replacement confirmed; restart CardMind to initialize the workspace"};
+    }
+    if (SD.cardType() == CARD_NONE) {
+        return {false, faultStatus(sdWasReady ? SdStorageState::Removed
+                                              : SdStorageState::Missing).error};
+    }
+    File root = SD.open("/", FILE_READ);
+    if (!root || !root.isDirectory()) {
+        if (root) root.close();
+        return {false, faultStatus(sdWasReady ? SdStorageState::Removed
+                                              : SdStorageState::Missing).error};
+    }
+    root.close();
+    const OperationResult expected = loadExpectedSdVolumeIdentity();
+    if (!expected.success) return expected;
+    const SdVolumeIdentityResult marker = readSdVolumeIdentity(kSdVolumeIdentityPath);
+    if (!marker.success) {
+        return {false, marker.error + "; confirm this workspace before writing"};
+    }
+    if (!marker.found || expectedSdVolumeIdentity.isEmpty() ||
+        marker.identity != expectedSdVolumeIdentity) {
+        return {false, faultStatus(SdStorageState::Replaced).error};
+    }
+    sdWasReady = true;
+    return {true, ""};
+}
+
 bool isJsonWhitespace(int value)
 {
     return value == ' ' || value == '\t' || value == '\r' || value == '\n';
@@ -829,18 +866,12 @@ const char* sdStorageErrorCode(SdStorageState state)
 
 OperationResult requireSdReadAccess()
 {
-    const SdStorageStatus status = inspectSdStorage();
-    return status.state == SdStorageState::Ready || status.state == SdStorageState::Full
-        ? OperationResult{true, ""}
-        : OperationResult{false, status.error};
+    return requireExistingSdVolumeAccess();
 }
 
 OperationResult requireSdCleanupAccess()
 {
-    const SdStorageStatus status = inspectSdStorage();
-    return status.state == SdStorageState::Ready || status.state == SdStorageState::Full
-        ? OperationResult{true, ""}
-        : OperationResult{false, status.error};
+    return requireExistingSdVolumeAccess();
 }
 
 OperationResult requireSdWriteAccess(std::uint64_t requiredBytes,

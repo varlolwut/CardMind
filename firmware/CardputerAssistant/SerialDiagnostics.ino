@@ -237,6 +237,102 @@ void runStorageTest()
                   fileVerified && fileCleanup ? "pass" : "failed");
 }
 
+void runHotfixNavigationLatencyTest()
+{
+    constexpr std::uint32_t kIterations = 8;
+    if (!chatStorageReady || activeProjectId.isEmpty()) {
+        Serial.println("HOTFIXNAVTEST result=failed error=active_project_unavailable");
+        return;
+    }
+    cardputer::OperationResult result = {true, ""};
+    const std::uint32_t projectsStartedAt = millis();
+    for (std::uint32_t index = 0; index < kIterations && result.success; ++index) {
+        const cardputer::ProjectsPageResult page = cardputer::listProjectsPage(
+            0, cardputer::kMaximumProjectPageEntries);
+        if (!page.success) result = {false, page.error};
+    }
+    const std::uint32_t projectsElapsedMs = millis() - projectsStartedAt;
+    const std::uint32_t chatsStartedAt = millis();
+    for (std::uint32_t index = 0; index < kIterations && result.success; ++index) {
+        const cardputer::ProjectChatsPageResult page = cardputer::listProjectChatsPage(
+            activeProjectId, 0, cardputer::kMaximumProjectPageEntries);
+        if (!page.success) result = {false, page.error};
+    }
+    const std::uint32_t chatsElapsedMs = millis() - chatsStartedAt;
+    const bool responsive = result.success && projectsElapsedMs <= 1600 &&
+        chatsElapsedMs <= 1600;
+    Serial.printf("HOTFIXNAVTEST result=%s iterations=%u projects_ms=%u chats_ms=%u average_ms=%u error=%s\n",
+                  responsive ? "pass" : "failed",
+                  static_cast<unsigned int>(kIterations),
+                  static_cast<unsigned int>(projectsElapsedMs),
+                  static_cast<unsigned int>(chatsElapsedMs),
+                  static_cast<unsigned int>(
+                      (projectsElapsedMs + chatsElapsedMs) / (kIterations * 2U)),
+                  result.success ? (responsive ? "none" : "latency_budget_exceeded")
+                                 : result.error.c_str());
+}
+
+void runHotfixInputLatencyTest()
+{
+    constexpr std::uint32_t kFullIterations = 4;
+    constexpr std::uint32_t kInputIterations = 32;
+    std::vector<cardputer::Message> benchmarkHistory;
+    benchmarkHistory.reserve(32);
+    const std::string payload(240, 'x');
+    for (std::uint32_t index = 0; index < 32; ++index) {
+        benchmarkHistory.push_back({index % 2 == 0 ? "user" : "assistant", payload});
+    }
+    const std::uint32_t fullStartedAt = micros();
+    for (std::uint32_t index = 0; index < kFullIterations; ++index) {
+        cardputer::showChat(
+            benchmarkHistory, "", inputBuffer, keyboardLayout, activeChatTitle,
+            statusMessage, 0, WiFi.status() == WL_CONNECTED, batteryLevel,
+            batteryCharging);
+    }
+    const std::uint32_t fullElapsedUs = micros() - fullStartedAt;
+    const std::uint32_t inputStartedAt = micros();
+    for (std::uint32_t index = 0; index < kInputIterations; ++index) {
+        cardputer::updateChatInput(inputBuffer + std::to_string(index));
+    }
+    const std::uint32_t inputElapsedUs = micros() - inputStartedAt;
+    const std::uint32_t fullAverageUs = fullElapsedUs / kFullIterations;
+    const std::uint32_t inputAverageUs = inputElapsedUs / kInputIterations;
+    const bool responsive = inputAverageUs <= 50000U && inputAverageUs < fullAverageUs;
+    render();
+    Serial.printf(
+        "HOTFIXINPUTTEST result=%s full_average_us=%u input_average_us=%u error=%s\n",
+        responsive ? "pass" : "failed",
+        static_cast<unsigned int>(fullAverageUs),
+        static_cast<unsigned int>(inputAverageUs),
+        responsive ? "none" : "input_render_budget_exceeded");
+}
+
+void runHotfixSdAccessSafetyTest()
+{
+    if (activeProjectId.isEmpty()) {
+        Serial.println("HOTFIXSDTEST result=failed removed=failed replaced=failed nonmutation=failed error=active_project_unavailable");
+        return;
+    }
+    const String target = cardputer::projectDirectoryPath(activeProjectId) + "/project.json";
+    const bool targetBefore = SD.exists(target);
+    const bool temporaryBefore = SD.exists(target + ".tmp");
+    const bool recoveryBefore = SD.exists(target + ".bak");
+    cardputer::setSdStorageFaultOverrideForDiagnostics(cardputer::SdStorageState::Removed);
+    const cardputer::OperationResult removed = cardputer::recoverAtomicSdFile(target);
+    cardputer::setSdStorageFaultOverrideForDiagnostics(cardputer::SdStorageState::Replaced);
+    const cardputer::OperationResult replaced = cardputer::recoverAtomicSdFile(target);
+    cardputer::clearSdStorageFaultOverrideForDiagnostics();
+    const bool nonmutation = targetBefore == SD.exists(target) &&
+        temporaryBefore == SD.exists(target + ".tmp") &&
+        recoveryBefore == SD.exists(target + ".bak");
+    const bool passed = !removed.success && !replaced.success && nonmutation;
+    Serial.printf(
+        "HOTFIXSDTEST result=%s removed=%s replaced=%s nonmutation=%s error=%s\n",
+        passed ? "pass" : "failed", !removed.success ? "pass" : "failed",
+        !replaced.success ? "pass" : "failed", nonmutation ? "pass" : "failed",
+        passed ? "none" : "sd_access_guard_failed");
+}
+
 struct P2UnicodeFileDigestResult {
     bool success;
     std::uint32_t bytes;
@@ -5213,6 +5309,18 @@ void handleSerialCommand(const String& command)
     }
     if (command == "STORAGETEST") {
         runStorageTest();
+        return;
+    }
+    if (command == "HOTFIXNAVTEST") {
+        runHotfixNavigationLatencyTest();
+        return;
+    }
+    if (command == "HOTFIXINPUTTEST") {
+        runHotfixInputLatencyTest();
+        return;
+    }
+    if (command == "HOTFIXSDTEST") {
+        runHotfixSdAccessSafetyTest();
         return;
     }
     if (command == "PROJECTSCHEMATEST") {
