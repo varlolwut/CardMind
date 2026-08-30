@@ -3,6 +3,7 @@
 #include "app_types.h"
 #include "chat_storage.h"
 #include "ssh_client.h"
+#include "tool_policy.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -23,11 +24,14 @@ void buildWebConsoleStatusState(const WebConsoleRuntimeState& runtime,
 void buildWebConsoleChatsState(const std::vector<ChatSummary>& chats,
                                std::uint32_t revision,
                                JsonDocument& document);
-void buildWebConsoleChatState(const Settings& settings,
-                              const ChatDocument& activeChat,
-                              std::size_t maximumContextBytes,
-                              std::uint32_t revision,
-                              JsonDocument& document);
+OperationResult buildWebConsoleChatState(
+    const Settings& settings,
+    const ProjectDocument& activeProject,
+    const ChatDocument& activeChat,
+    const ToolPolicyResolutionResult& toolPermissions,
+    std::size_t maximumContextBytes,
+    std::uint32_t revision,
+    JsonDocument& document);
 void buildWebConsoleFilesState(const std::vector<WorkspaceFile>& files,
                                std::uint64_t totalBytes,
                                std::uint64_t usedBytes,
@@ -39,9 +43,10 @@ void buildWebConsoleSshState(const std::vector<SshProfile>& profiles,
                              const WebConsoleRuntimeState& runtime,
                              std::uint32_t revision,
                              JsonDocument& document);
-void buildWebConsoleSettingsState(const Settings& settings,
-                                  const WebConsoleRuntimeState& runtime,
-                                  std::uint32_t revision,
-                                  JsonDocument& document);
+OperationResult buildWebConsoleSettingsState(
+    const Settings& settings,
+    const WebConsoleRuntimeState& runtime,
+    std::uint32_t revision,
+    JsonDocument& document);
 
 }  // namespace cardputer

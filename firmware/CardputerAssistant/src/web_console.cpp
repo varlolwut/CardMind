@@ -9,6 +9,7 @@
 #include "python_mode.h"
 #include "project_bundle.h"
 #include "instruction_policy.h"
+#include "pending_tool_call.h"
 #include "project_chat_storage.h"
 #include "project_storage.h"
 #include "sd_storage.h"
@@ -17,6 +18,7 @@
 #include "ssh_tool.h"
 #include "text_utils.h"
 #include "tool_router.h"
+#include "tool_activity.h"
 #include "ui.h"
 #include "web_console_routes.h"
 #include "web_console_metrics.h"
@@ -53,6 +55,8 @@ constexpr std::size_t kMaximumPromptFrameBytes =
     kPromptFramePrefixBytes + kMaximumRequestInstructionsBytes + kMaximumPromptBytes;
 constexpr const char* kPromptFrameContentType =
     "application/vnd.cardmind.prompt-v1";
+constexpr const char* kToolIntentHeader = "X-CardMind-Tool-Intent";
+constexpr const char* kToolPolicyHeader = "X-CardMind-Tool-Policy";
 constexpr std::size_t kMaximumWebFileChunkBytes = 12288;
 
 struct RawTextRequestState {
@@ -74,6 +78,7 @@ struct WebPromptRequest {
     bool success;
     std::string prompt;
     std::string requestInstructions;
+    ToolMessageIntent intent;
     int errorStatus;
     String error;
 };
@@ -89,6 +94,26 @@ struct DecodedHeaderResult {
     bool success;
     std::string value;
     int errorStatus;
+    String error;
+};
+
+struct WebPendingContinuationContext {
+    bool present = false;
+    String pendingId;
+    String projectId;
+    String chatId;
+    ResolvedProjectRequestPolicy requestPolicy = {"", 0, 0, false};
+    String globalInstructions;
+    std::string requestInstructions;
+    ToolMessageIntent intent = {ToolMessageIntentMode::Auto, 0};
+};
+
+struct WebPendingContinuationInputs {
+    bool success = false;
+    String pendingId;
+    PendingToolConfirmationReason reason =
+        PendingToolConfirmationReason::PolicyAsk;
+    ToolRequestPlan plan = {};
     String error;
 };
 
@@ -136,6 +161,9 @@ RawTextRequestState rawTextRequest;
 std::string failedWebRequestInstructions;
 String failedWebRequestInstructionsChatId;
 std::uint32_t failedWebRequestOutputTokens = 0;
+ToolMessageIntent failedWebRequestIntent = {
+    ToolMessageIntentMode::Auto, 0};
+WebPendingContinuationContext webPendingContext;
 File sshKeyUploadFile;
 String sshKeyUploadError;
 std::size_t sshKeyUploadBytes = 0;
@@ -264,6 +292,18 @@ String normalizedBaseUrl(String value)
     return value;
 }
 
+void clearWebPendingContext()
+{
+    webPendingContext.present = false;
+    webPendingContext.pendingId = "";
+    webPendingContext.projectId = "";
+    webPendingContext.chatId = "";
+    webPendingContext.requestPolicy = {"", 0, 0, false};
+    webPendingContext.globalInstructions = "";
+    std::string().swap(webPendingContext.requestInstructions);
+    webPendingContext.intent = {ToolMessageIntentMode::Auto, 0};
+}
+
 void releaseConsoleSessionState()
 {
     closeWebSshConnection();
@@ -327,6 +367,8 @@ void releaseConsoleSessionState()
     std::string().swap(failedWebRequestInstructions);
     failedWebRequestInstructionsChatId = String();
     failedWebRequestOutputTokens = 0;
+    failedWebRequestIntent = {ToolMessageIntentMode::Auto, 0};
+    clearWebPendingContext();
 }
 
 void releaseActiveDocuments()
@@ -424,6 +466,7 @@ enum class WebStorageAccess {
     None,
     Read,
     Write,
+    Cleanup,
 };
 
 WebStorageAccess webStorageAccessForRoute(WebConsoleRouteHandler route)
@@ -433,11 +476,12 @@ WebStorageAccess webStorageAccessForRoute(WebConsoleRouteHandler route)
             const String path = server.uri();
             return path == "/api/projects" || path == "/api/chats" ||
                    path == "/api/chat" || path == "/api/files" ||
-                   path == "/api/ssh/state"
+                   path == "/api/ssh/state" || path == "/api/activity"
                 ? WebStorageAccess::Read
                 : WebStorageAccess::None;
         }
         case WebConsoleRouteHandler::ProjectLinks:
+        case WebConsoleRouteHandler::Pending:
         case WebConsoleRouteHandler::ArchivedMessages:
         case WebConsoleRouteHandler::SftpUpload:
         case WebConsoleRouteHandler::QrFile:
@@ -456,10 +500,14 @@ WebStorageAccess webStorageAccessForRoute(WebConsoleRouteHandler route)
         case WebConsoleRouteHandler::Prompt:
         case WebConsoleRouteHandler::PromptRawComplete:
         case WebConsoleRouteHandler::PromptRetry:
+        case WebConsoleRouteHandler::PendingAllowOnce:
+        case WebConsoleRouteHandler::PendingAllowChat:
+        case WebConsoleRouteHandler::PendingDeny:
         case WebConsoleRouteHandler::SelectChat:
         case WebConsoleRouteHandler::NewChat:
         case WebConsoleRouteHandler::Instructions:
         case WebConsoleRouteHandler::InstructionsRawComplete:
+        case WebConsoleRouteHandler::ChatSettings:
         case WebConsoleRouteHandler::ChatCompact:
         case WebConsoleRouteHandler::ChatPermissions:
         case WebConsoleRouteHandler::RenameChat:
@@ -483,6 +531,8 @@ WebStorageAccess webStorageAccessForRoute(WebConsoleRouteHandler route)
         case WebConsoleRouteHandler::FileDelete:
         case WebConsoleRouteHandler::FileUploadComplete:
             return WebStorageAccess::Write;
+        case WebConsoleRouteHandler::PendingAcknowledge:
+            return WebStorageAccess::Cleanup;
         default:
             return WebStorageAccess::None;
     }
@@ -506,12 +556,16 @@ bool allowWebStorageRoute(WebConsoleRouteHandler route)
     if (access == WebStorageAccess::None || !sessionIsActive()) {
         return true;
     }
-    if (access == WebStorageAccess::Write && !requestHasValidCsrf()) {
+    if ((access == WebStorageAccess::Write ||
+         access == WebStorageAccess::Cleanup) &&
+        !requestHasValidCsrf()) {
         return true;
     }
     const OperationResult result = access == WebStorageAccess::Read
         ? requireSdReadAccess()
-        : requireSdWriteAccess(0, kStorageOperationalFloorBytes);
+        : (access == WebStorageAccess::Cleanup
+            ? requireSdCleanupAccess()
+            : requireSdWriteAccess(0, kStorageOperationalFloorBytes));
     if (result.success) {
         return true;
     }
@@ -689,15 +743,29 @@ WebPromptRequest parseWebPromptRequest(RawTextRequestResult request,
 {
     if (!request.success) {
         return {
-            false, {}, {}, request.errorStatus, request.error};
+            false, {}, {}, {ToolMessageIntentMode::Auto, 0},
+            request.errorStatus, request.error};
+    }
+    DecodedToolMessageIntent decodedIntent = {
+        {ToolMessageIntentMode::Auto, 0},
+        ToolMessageIntentCodecError::None};
+    if (server.hasHeader(kToolIntentHeader)) {
+        const String encodedIntent = server.header(kToolIntentHeader);
+        decodedIntent = decodeToolMessageIntent(
+            encodedIntent.c_str(), encodedIntent.length());
+    }
+    if (decodedIntent.error != ToolMessageIntentCodecError::None) {
+        return {
+            false, {}, {}, {ToolMessageIntentMode::Auto, 0}, 400,
+            "Tool intent must be exactly auto, none, or required:[1-9a-f]"};
     }
     if (!framed) {
         return {
-            true, std::move(request.body), {}, 200, ""};
+            true, std::move(request.body), {}, decodedIntent.intent, 200, ""};
     }
     if (request.body.size() < kPromptFramePrefixBytes) {
         return {
-            false, {}, {}, 400,
+            false, {}, {}, decodedIntent.intent, 400,
             "Framed prompt is missing its four-byte instruction length"};
     }
     const auto* prefix = reinterpret_cast<const unsigned char*>(
@@ -711,18 +779,18 @@ WebPromptRequest parseWebPromptRequest(RawTextRequestResult request,
         request.body.size() - kPromptFramePrefixBytes;
     if (instructionBytes > kMaximumRequestInstructionsBytes) {
         return {
-            false, {}, {}, 400,
+            false, {}, {}, decodedIntent.intent, 400,
             "Request instructions must not exceed 2048 bytes"};
     }
     if (instructionBytes > payloadBytes) {
         return {
-            false, {}, {}, 400,
+            false, {}, {}, decodedIntent.intent, 400,
             "Framed prompt instruction length exceeds the received body"};
     }
     const std::size_t promptBytes = payloadBytes - instructionBytes;
     if (promptBytes == 0 || promptBytes > kMaximumPromptBytes) {
         return {
-            false, {}, {}, 400,
+            false, {}, {}, decodedIntent.intent, 400,
             "Framed prompt must contain between 1 and 16384 bytes"};
     }
     std::string requestInstructions;
@@ -731,17 +799,18 @@ WebPromptRequest parseWebPromptRequest(RawTextRequestResult request,
             kPromptFramePrefixBytes, instructionBytes);
     } catch (const std::bad_alloc&) {
         return {
-            false, {}, {}, 503,
+            false, {}, {}, decodedIntent.intent, 503,
             "Not enough contiguous memory to parse request instructions"};
     }
     request.body.erase(0, kPromptFramePrefixBytes + instructionBytes);
     if (!isValidUtf8(requestInstructions) || !isValidUtf8(request.body)) {
         return {
-            false, {}, {}, 400,
+            false, {}, {}, decodedIntent.intent, 400,
             "Prompt and request instructions must contain valid UTF-8"};
     }
     return {
-        true, std::move(request.body), std::move(requestInstructions), 200, ""};
+        true, std::move(request.body), std::move(requestInstructions),
+        decodedIntent.intent, 200, ""};
 }
 
 void clearFailedWebRequestInstructions()
@@ -749,6 +818,124 @@ void clearFailedWebRequestInstructions()
     std::string().swap(failedWebRequestInstructions);
     failedWebRequestInstructionsChatId = "";
     failedWebRequestOutputTokens = 0;
+    failedWebRequestIntent = {ToolMessageIntentMode::Auto, 0};
+}
+
+String webToolRequestPlanError(const ToolRequestPlan& plan)
+{
+    if (plan.error != ToolPolicyContractError::None) {
+        return "Selected tool intent is invalid";
+    }
+    if (plan.missingRequiredGroups != 0) {
+        return "A required capability is denied or unavailable";
+    }
+    return "";
+}
+
+bool webPendingContextMatches(const PendingToolCall& pending)
+{
+    return webPendingContext.present &&
+        webPendingContext.pendingId == pending.pendingId &&
+        webPendingContext.projectId == pending.projectId &&
+        webPendingContext.chatId == pending.chatId;
+}
+
+OperationResult captureWebPendingContext(
+    const String& projectId,
+    const String& chatId,
+    const ResolvedProjectRequestPolicy& requestPolicy,
+    const String& globalInstructions,
+    std::string requestInstructions,
+    const ToolMessageIntent& intent)
+{
+    PendingToolCallResult pending = loadPendingToolCall();
+    if (!pending.success || !pending.found ||
+        pending.pending.state != PendingToolCallState::Awaiting ||
+        pending.pending.projectId != projectId ||
+        pending.pending.chatId != chatId ||
+        !pendingToolCallIsResumableThisBoot(pending.pending.pendingId)) {
+        const String error = pending.success && pending.found
+            ? String("Pending confirmation does not match this request")
+            : (pending.success ? String("Pending confirmation was not saved")
+                               : pending.error);
+        if (pending.success && pending.found) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+        }
+        return {false, error};
+    }
+    const String pendingId = pending.pending.pendingId;
+    std::string().swap(pending.pending.continuation.call.arguments);
+    clearWebPendingContext();
+    webPendingContext.present = true;
+    webPendingContext.pendingId = pendingId;
+    webPendingContext.projectId = projectId;
+    webPendingContext.chatId = chatId;
+    webPendingContext.requestPolicy = requestPolicy;
+    webPendingContext.globalInstructions = globalInstructions;
+    webPendingContext.requestInstructions = std::move(requestInstructions);
+    webPendingContext.intent = intent;
+    return {true, ""};
+}
+
+WebPendingContinuationInputs loadWebPendingContinuationInputs()
+{
+    WebPendingContinuationInputs result;
+    if (!webPendingContext.present) {
+        result.error = "This request was interrupted and cannot be resumed";
+        return result;
+    }
+    PendingToolCallResult pending = loadPendingToolCall();
+    if (!pending.success || !pending.found ||
+        pending.pending.state != PendingToolCallState::Awaiting ||
+        !webPendingContextMatches(pending.pending) ||
+        !pendingToolCallIsResumableThisBoot(pending.pending.pendingId)) {
+        result.error = pending.success
+            ? String("Pending request is no longer resumable") : pending.error;
+        if (pending.success && pending.found) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+        }
+        return result;
+    }
+    result.pendingId = pending.pending.pendingId;
+    result.reason = pending.pending.reason;
+    const ToolCatalogEntry* entry = toolCatalogEntryForName(
+        pending.pending.continuation.call.name);
+    std::string().swap(pending.pending.continuation.call.arguments);
+    const PendingToolPreviewResult preview = loadPendingToolPreview(
+        pending.pending.pendingId);
+    if (!preview.success) {
+        result.success = true;
+        result.error = "Pending request is no longer resumable";
+        return result;
+    }
+    const ProjectDocumentResult project = loadProject(pending.pending.projectId);
+    const ChatDocumentResult chat = loadProjectChatMetadata(
+        pending.pending.projectId, pending.pending.chatId);
+    if (!project.success || !chat.success) {
+        result.error = project.success ? chat.error : project.error;
+        return result;
+    }
+    if (project.project.summary.revision != pending.pending.projectRevision ||
+        chat.chat.summary.revision != pending.pending.chatRevision ||
+        chat.chat.summary.messageCount != pending.pending.chatMessageCount) {
+        result.error = "Pending request is no longer resumable";
+        return result;
+    }
+    const SdStorageStatus storage = inspectSdStorage();
+    const bool readable = storage.state == SdStorageState::Ready ||
+                          storage.state == SdStorageState::Full;
+    const bool writable = storage.state == SdStorageState::Ready;
+    result.plan = resolveChatToolRequestPlan(
+        consoleSettings, project.project, chat.chat, webPendingContext.intent,
+        readable, writable, writable, sshToolIsAvailable());
+    result.error = webToolRequestPlanError(result.plan);
+    if (result.error.isEmpty() &&
+        (entry == nullptr ||
+         !toolRequestPlanIncludesSchema(result.plan, entry->schema))) {
+        result.error = "Current policy no longer permits the pending tool";
+    }
+    result.success = true;
+    return result;
 }
 
 std::uint8_t percentEncodedNibble(char value)
@@ -939,18 +1126,12 @@ OperationResult saveActiveChatSelection(const String& chatId)
 
 OperationResult selectActiveProject(const String& id)
 {
-    if (activeProject.summary.id != id) {
-        const auto project = std::find_if(
-            consoleProjects.begin(), consoleProjects.end(),
-            [&id](const ProjectSummary& summary) { return summary.id == id; });
-        if (project == consoleProjects.end()) {
-            return {false, "Requested project is absent from the project index"};
-        }
-        releaseActiveDocuments();
-    }
     ProjectDocumentResult loaded = loadProject(id);
     if (!loaded.success) {
         return {false, loaded.error};
+    }
+    if (activeProject.summary.id != id) {
+        releaseActiveDocuments();
     }
     ProjectStorageManifestResult manifest = loadProjectStorageManifest();
     if (!manifest.success) {
@@ -976,7 +1157,8 @@ OperationResult selectActiveProject(const String& id)
     } else if (!consoleChats.empty()) {
         result = loadActiveChat(consoleChats.front().id);
     } else {
-        ChatDocumentResult created = createProjectChat(id, "New chat");
+        ChatDocumentResult created = createProjectChat(
+            id, "New chat", consoleSettings.newChatToolPolicy);
         if (!created.success) {
             return {false, created.error};
         }
@@ -1069,7 +1251,8 @@ WebContextSummaryResult generateWebContextSummary(
     const std::uint32_t includedMessages = prompt.includedMessages;
     Settings summarySettings = consoleSettings;
     summarySettings.globalInstructions = "";
-    if (!activeProject.model.isEmpty()) summarySettings.model = activeProject.model;
+    summarySettings.model = resolveProjectRequestPolicy(
+        consoleSettings, activeProject, activeChat, 0).model;
     std::vector<Message> request;
     request.push_back({"user", std::move(prompt.prompt)});
     ChatResult summary = streamChatCompletionWithBudget(
@@ -1264,6 +1447,104 @@ void handleStorageConfirm()
     exitRequested = true;
 }
 
+const char* webPendingStateName(PendingToolCallState state)
+{
+    switch (state) {
+        case PendingToolCallState::Awaiting: return "awaiting";
+        case PendingToolCallState::ClaimedApprove: return "claimed_approve";
+        case PendingToolCallState::Denied: return "denied";
+    }
+    return "";
+}
+
+const char* webPendingReasonName(PendingToolConfirmationReason reason)
+{
+    return reason == PendingToolConfirmationReason::Mandatory
+        ? "mandatory" : "policy_ask";
+}
+
+const char* webPendingPreviewKindName(PendingToolPreviewKind kind)
+{
+    switch (kind) {
+        case PendingToolPreviewKind::Generic: return "generic";
+        case PendingToolPreviewKind::FileReplacement: return "file_replacement";
+        case PendingToolPreviewKind::SshCommand: return "ssh_command";
+    }
+    return "generic";
+}
+
+void handlePending()
+{
+    if (!sessionIsActive()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    PendingToolCallResult pending = loadPendingToolCall();
+    if (!pending.success) {
+        sendWebJsonError(server, 500, pending.error);
+        return;
+    }
+    JsonDocument document;
+    document["present"] = pending.found;
+    document["pending_id"] = "";
+    document["state"] = "";
+    document["reason"] = "";
+    document["kind"] = "generic";
+    document["tool"] = "";
+    document["target"] = "";
+    document["current_bytes"] = 0;
+    document["proposed_bytes"] = 0;
+    document["body"] = "";
+    document["truncated"] = false;
+    document["can_allow_once"] = false;
+    document["can_allow_chat"] = false;
+    document["can_deny"] = false;
+    document["can_acknowledge"] = false;
+    document["message"] = pending.found
+        ? String("") : String("No pending tool request");
+    if (!pending.found) {
+        sendWebJson(server, 200, document);
+        return;
+    }
+    document["pending_id"] = pending.pending.pendingId;
+    document["state"] = webPendingStateName(pending.pending.state);
+    document["reason"] = webPendingReasonName(pending.pending.reason);
+    document["tool"] = pending.pending.continuation.call.name;
+    std::string().swap(pending.pending.continuation.call.arguments);
+    if (pending.pending.state == PendingToolCallState::Awaiting) {
+        const WebPendingContinuationInputs inputs =
+            loadWebPendingContinuationInputs();
+        const PendingToolPreviewResult preview = loadPendingToolPreview(
+            pending.pending.pendingId);
+        const bool resumable = preview.success && inputs.success &&
+                               inputs.error.isEmpty();
+        if (preview.success) {
+            document["kind"] = webPendingPreviewKindName(preview.preview.kind);
+            document["tool"] = preview.preview.toolName;
+            document["target"] = preview.preview.targetName;
+            document["current_bytes"] = preview.preview.currentBytes;
+            document["proposed_bytes"] = preview.preview.proposedBytes;
+            document["body"] = preview.preview.body;
+            document["truncated"] = preview.preview.truncated;
+        }
+        document["can_allow_once"] = resumable;
+        document["can_allow_chat"] = resumable &&
+            pending.pending.reason == PendingToolConfirmationReason::PolicyAsk;
+        document["can_deny"] = resumable;
+        document["can_acknowledge"] = !resumable;
+        document["message"] = resumable
+            ? String("Confirmation required")
+            : String("Request interrupted; execution is disabled");
+    } else {
+        document["can_acknowledge"] = true;
+        document["message"] = pending.pending.state ==
+                PendingToolCallState::ClaimedApprove
+            ? String("Tool outcome is unknown; acknowledge to clear")
+            : String("Response continuation was interrupted; acknowledge to clear");
+    }
+    sendWebJson(server, 200, document);
+}
+
 void handleState()
 {
     if (!sessionIsActive()) {
@@ -1285,6 +1566,7 @@ void handleState()
     else if (path == "/api/files") view = "files";
     else if (path == "/api/ssh/state") view = "ssh";
     else if (path == "/api/settings") view = "settings";
+    else if (path == "/api/activity") view = "activity";
     if (view == "status") {
         buildWebConsoleStatusState(runtime, webDiagnosticsEnabled(), document);
     } else if (view == "projects") {
@@ -1303,6 +1585,7 @@ void handleState()
         document["ok"] = true;
         document["projects_revision"] = projectsRevision;
         document["active_project_id"] = activeProject.summary.id;
+        document["active_project_title"] = activeProject.summary.title;
         document["next_offset"] = page.nextOffset;
         document["eof"] = page.eof;
         JsonArray projects = document["projects"].to<JsonArray>();
@@ -1328,14 +1611,30 @@ void handleState()
         }
         buildWebConsoleChatsState(page.chats, chatsRevision, document);
         document["project_id"] = activeProject.summary.id;
+        document["active_chat_id"] = activeChat.summary.id;
+        document["active_chat_title"] = activeChat.summary.title;
         document["next_offset"] = page.nextOffset;
         document["eof"] = page.eof;
     } else if (view == "chat") {
         Settings requestSettings = consoleSettings;
-        if (!activeProject.model.isEmpty()) requestSettings.model = activeProject.model;
-        buildWebConsoleChatState(
-            requestSettings, activeChat, activeProject.contextByteBudget,
-            chatRevision, document);
+        requestSettings.model = resolveProjectRequestPolicy(
+            consoleSettings, activeProject, activeChat, 0).model;
+        const SdStorageStatus storage = inspectSdStorage();
+        const bool readable = storage.state == SdStorageState::Ready ||
+                              storage.state == SdStorageState::Full;
+        const bool writable = storage.state == SdStorageState::Ready;
+        const ToolPolicyResolutionResult toolPermissions =
+            resolveChatToolPermissions(
+                consoleSettings, activeProject, activeChat,
+                {ToolMessageIntentMode::Auto, 0}, readable, writable,
+                writable, sshToolIsAvailable());
+        const OperationResult built = buildWebConsoleChatState(
+            requestSettings, activeProject, activeChat, toolPermissions,
+            activeProject.contextByteBudget, chatRevision, document);
+        if (!built.success) {
+            sendWebJsonError(server, 500, built.error);
+            return;
+        }
         document["project_id"] = activeProject.summary.id;
         document["project_title"] = activeProject.summary.title;
         document["project_archived"] = activeProject.summary.archived;
@@ -1412,8 +1711,33 @@ void handleState()
         document["ssh_open_ms"] = openMs;
         document["ssh_worker_stack_free"] = workerStackFree;
     } else if (view == "settings") {
-        buildWebConsoleSettingsState(consoleSettings, runtime, settingsRevision,
-                                     document);
+        const OperationResult built = buildWebConsoleSettingsState(
+            consoleSettings, runtime, settingsRevision, document);
+        if (!built.success) {
+            sendWebJsonError(server, 500, built.error);
+            return;
+        }
+    } else if (view == "activity") {
+        const ToolActivitiesResult loaded = loadRecentToolActivities();
+        if (!loaded.success) {
+            sendWebJsonError(server, 500, loaded.error);
+            return;
+        }
+        document["ok"] = true;
+        JsonArray activities = document["activities"].to<JsonArray>();
+        for (const ToolActivityRecord& activity : loaded.activities) {
+            JsonObject item = activities.add<JsonObject>();
+            item["tool"] = activity.tool;
+            item["target"] = toolActivityTargetName(activity.target);
+            item["status"] = toolActivityStatusName(activity.status);
+            item["duration_ms"] = activity.durationMs;
+            item["output_bytes"] = activity.outputBytes;
+            if (activity.exitStatus.present) {
+                item["exit_status"] = activity.exitStatus.value;
+            } else {
+                item["exit_status"] = nullptr;
+            }
+        }
     } else {
         sendWebJsonError(server, 400, "Use a specialized state endpoint");
         return;
@@ -1424,10 +1748,11 @@ void handleState()
 void streamStoredWebPrompt(const ChatDocument& storedChat,
                            std::vector<Message> requestMessages,
                            std::uint32_t requestOutputTokens,
-                           const std::string& requestInstructions)
+                           const std::string& requestInstructions,
+                           const ToolRequestPlan& toolPlan)
 {
     const ResolvedProjectRequestPolicy requestPolicy = resolveProjectRequestPolicy(
-        consoleSettings, activeProject, requestOutputTokens);
+        consoleSettings, activeProject, storedChat, requestOutputTokens);
     ContextWindowResult requestFit = fitOwnedMessagesToByteBudget(
         std::move(requestMessages), requestPolicy.contextByteBudget);
     if (requestFit.retained.empty() ||
@@ -1435,7 +1760,6 @@ void streamStoredWebPrompt(const ChatDocument& storedChat,
         sendWebJsonError(server, 500, "Prompt request context lost its user message");
         return;
     }
-    const std::string& prompt = requestFit.retained.back().content;
     const bool sshWasOpen = webSshTerminalOpen || webSshAwaitingTrust;
     if (sshWasOpen) {
         closeWebSshConnection();
@@ -1461,8 +1785,7 @@ void streamStoredWebPrompt(const ChatDocument& storedChat,
     failedWebRequestInstructions = requestInstructions;
     failedWebRequestInstructionsChatId = activeChat.summary.id;
     failedWebRequestOutputTokens = requestPolicy.maximumOutputTokens;
-    const ChatToolPolicy toolPolicy = resolveChatToolPolicy(
-        consoleSettings, prompt, storedChat.sshToolsEnabled, sshToolIsAvailable());
+    failedWebRequestIntent = toolPlan.intent;
     const CancelCallback isCancelled = []() {
         M5Cardputer.update();
         if (consoleEscapePressed()) {
@@ -1471,23 +1794,30 @@ void streamStoredWebPrompt(const ChatDocument& storedChat,
         }
         return !server.client().connected();
     };
-    markOperation(chatToolPolicyIsEnabled(toolPolicy)
+    markOperation(toolPlan.schemas != 0
         ? "web_console_tools" : "web_console_chat");
     bool workspaceFilesChanged = false;
-    const ChatResult result = chatToolPolicyIsEnabled(toolPolicy)
+    const String requestProjectId = activeProject.summary.id;
+    const String requestChatId = activeChat.summary.id;
+    const ChatResult result = toolPlan.schemas != 0
         ? streamChatCompletionWithToolsAndBudget(
               requestSettings, requestFit.retained, effectiveInstructions,
-              toolPolicy.sshEnabled, requestPolicy.maximumOutputTokens, onText,
-              [&toolPolicy, &isCancelled,
+              toolPlan, requestPolicy.maximumOutputTokens, onText,
+              [&toolPlan, &isCancelled, requestProjectId,
                &workspaceFilesChanged](const ToolCall& call) {
                   ToolExecutionResult executed = routeProjectToolCall(
-                      consoleSettings, toolPolicy, activeProject.summary.id, call,
+                      consoleSettings, toolPlan, requestProjectId, call,
                       isCancelled);
                   if (executed.success &&
                       (call.name == "write_file" || call.name == "append_file")) {
                       workspaceFilesChanged = true;
                   }
                   return executed;
+              },
+              [&toolPlan, requestProjectId, requestChatId](
+                  const PendingToolContinuation& continuation) {
+                  return savePendingToolCall(
+                      toolPlan, requestProjectId, requestChatId, continuation);
               }, isCancelled)
         : streamChatCompletionWithBudget(
               requestSettings, requestFit.retained, effectiveInstructions,
@@ -1496,6 +1826,22 @@ void streamStoredWebPrompt(const ChatDocument& storedChat,
     if (workspaceFilesChanged) {
         filesIndexReady = false;
         ++filesRevision;
+    }
+    if (result.outcome == ChatCompletionOutcome::AwaitingConfirmation) {
+        const OperationResult captured = captureWebPendingContext(
+            requestProjectId, requestChatId, requestPolicy,
+            consoleSettings.globalInstructions, requestInstructions,
+            toolPlan.intent);
+        clearFailedWebRequestInstructions();
+        activeResponse.clear();
+        consoleStatus = captured.success
+            ? String("Waiting for confirmation: ") + result.error
+            : captured.error;
+        sendWebSse(
+            server, captured.success ? "pending" : "error", "",
+            consoleStatus);
+        renderConsoleScreen();
+        return;
     }
     if (!result.success) {
         consoleStatus = result.error;
@@ -1593,7 +1939,8 @@ RequestOutputBudgetResult resolveRawWebRequestOutputBudget(
 
 void processWebPrompt(std::string prompt,
                       std::string requestInstructions,
-                      const String& outputTokenValue)
+                      const String& outputTokenValue,
+                      const ToolMessageIntent& intent)
 {
     if (webSshTaskIsRunning()) {
         sendWebJsonError(
@@ -1611,11 +1958,44 @@ void processWebPrompt(std::string prompt,
         sendWebJsonError(server, 400, outputBudget.error);
         return;
     }
+    PendingToolCallResult existingPending = loadPendingToolCall();
+    if (!existingPending.success) {
+        sendWebJsonError(server, 500, existingPending.error);
+        return;
+    }
+    if (existingPending.found) {
+        std::string().swap(
+            existingPending.pending.continuation.call.arguments);
+        sendWebJsonError(
+            server, 409,
+            "Resolve or acknowledge the pending tool request before sending a new prompt");
+        return;
+    }
     ChatDocumentResult storedChat = loadProjectChat(
         activeProject.summary.id, activeChat.summary.id, 96,
         activeProjectTailByteBudget());
     if (!storedChat.success) {
         sendWebJsonError(server, 500, storedChat.error);
+        return;
+    }
+    const SdStorageStatus toolStorage = inspectSdStorage();
+    const bool toolStorageReadable =
+        toolStorage.state == SdStorageState::Ready ||
+        toolStorage.state == SdStorageState::Full;
+    const bool toolStorageWritable =
+        toolStorage.state == SdStorageState::Ready;
+    const ToolRequestPlan toolPlan = resolveChatToolRequestPlan(
+        consoleSettings, activeProject, storedChat.chat, intent,
+        toolStorageReadable, toolStorageWritable, toolStorageWritable,
+        sshToolIsAvailable());
+    if (toolPlan.error != ToolPolicyContractError::None) {
+        sendWebJsonError(server, 500, "Tool permission policy could not be resolved");
+        return;
+    }
+    if (toolPlan.missingRequiredGroups != 0) {
+        sendWebJsonError(
+            server, 409,
+            "A required tool capability is denied or unavailable");
         return;
     }
     std::vector<Message> submittedMessages;
@@ -1634,10 +2014,11 @@ void processWebPrompt(std::string prompt,
         return;
     }
     const ResolvedProjectRequestPolicy submittedPolicy = resolveProjectRequestPolicy(
-        consoleSettings, activeProject, outputBudget.tokens);
+        consoleSettings, activeProject, activeChat, outputBudget.tokens);
     failedWebRequestInstructions = std::move(requestInstructions);
     failedWebRequestInstructionsChatId = activeChat.summary.id;
     failedWebRequestOutputTokens = submittedPolicy.maximumOutputTokens;
+    failedWebRequestIntent = intent;
     const std::string& submittedPrompt = submittedMessages.front().content;
     if (previousMessageCount == 0) {
         activeChat.summary.messageCount = 1;
@@ -1647,7 +2028,10 @@ void processWebPrompt(std::string prompt,
         saved = saveProjectChatMetadata(activeChat);
         if (!saved.success) {
             loadActiveChat(activeChat.summary.id);
-            sendWebJsonError(server, 500, saved.error);
+            server.sendHeader("Cache-Control", "no-store");
+            server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+            server.send(200, "text/event-stream; charset=utf-8", "");
+            sendWebSse(server, "error", "", saved.error);
             return;
         }
     }
@@ -1655,7 +2039,7 @@ void processWebPrompt(std::string prompt,
     requestMessages.push_back(std::move(submittedMessages.front()));
     streamStoredWebPrompt(
         activeChat, std::move(requestMessages), outputBudget.tokens,
-        failedWebRequestInstructions);
+        failedWebRequestInstructions, toolPlan);
 }
 
 void handlePromptRawData()
@@ -1673,7 +2057,7 @@ void handlePromptRawComplete()
     }
     processWebPrompt(
         std::move(request.prompt), std::move(request.requestInstructions),
-        server.header("X-CardMind-Output-Tokens"));
+        server.header("X-CardMind-Output-Tokens"), request.intent);
 }
 
 void handlePromptRetry()
@@ -1701,6 +2085,19 @@ void handlePromptRetry()
         sendWebJsonError(server, 400, outputBudget.error);
         return;
     }
+    PendingToolCallResult existingPending = loadPendingToolCall();
+    if (!existingPending.success) {
+        sendWebJsonError(server, 500, existingPending.error);
+        return;
+    }
+    if (existingPending.found) {
+        std::string().swap(
+            existingPending.pending.continuation.call.arguments);
+        sendWebJsonError(
+            server, 409,
+            "Resolve or acknowledge the pending tool request before retrying");
+        return;
+    }
     const ChatDocumentResult stored = loadProjectChat(
         activeProject.summary.id, activeChat.summary.id, 96,
         activeProjectTailByteBudget());
@@ -1708,8 +2105,31 @@ void handlePromptRetry()
         sendWebJsonError(server, 500, stored.error);
         return;
     }
+    const ToolMessageIntent retryIntent = retryMatchesFailedRequest
+        ? failedWebRequestIntent
+        : ToolMessageIntent{ToolMessageIntentMode::Auto, 0};
+    const SdStorageStatus toolStorage = inspectSdStorage();
+    const bool toolStorageReadable =
+        toolStorage.state == SdStorageState::Ready ||
+        toolStorage.state == SdStorageState::Full;
+    const bool toolStorageWritable =
+        toolStorage.state == SdStorageState::Ready;
+    const ToolRequestPlan toolPlan = resolveChatToolRequestPlan(
+        consoleSettings, activeProject, stored.chat, retryIntent,
+        toolStorageReadable, toolStorageWritable, toolStorageWritable,
+        sshToolIsAvailable());
+    if (toolPlan.error != ToolPolicyContractError::None) {
+        sendWebJsonError(server, 500, "Tool permission policy could not be resolved");
+        return;
+    }
+    if (toolPlan.missingRequiredGroups != 0) {
+        sendWebJsonError(
+            server, 409,
+            "A required tool capability is denied or unavailable");
+        return;
+    }
     const ResolvedProjectRequestPolicy requestPolicy = resolveProjectRequestPolicy(
-        consoleSettings, activeProject, outputBudget.tokens);
+        consoleSettings, activeProject, stored.chat, outputBudget.tokens);
     RetryRequestResult retry = prepareRetryRequest(
         unsummarizedChatTail(stored.chat), requestPolicy.contextByteBudget);
     if (!retry.success) {
@@ -1721,7 +2141,389 @@ void handlePromptRetry()
         ? failedWebRequestInstructions : emptyRequestInstructions;
     streamStoredWebPrompt(
         stored.chat, std::move(retry.messages), outputBudget.tokens,
-        requestInstructions);
+        requestInstructions, toolPlan);
+}
+
+bool validatePendingActionRequest(String& pendingId)
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return false;
+    }
+    pendingId = server.arg("pending_id");
+    if (pendingId.isEmpty() ||
+        pendingId.length() > kMaximumPendingToolCallIdBytes) {
+        sendWebJsonError(server, 400, "A valid pending_id is required");
+        return false;
+    }
+    return true;
+}
+
+void continueWebPendingDecision(
+    PendingToolDecisionResult decision,
+    const ToolRequestPlan& continuationPlan,
+    const String& warning)
+{
+    const String oldPendingId = decision.pending.pendingId;
+    const PendingToolCallState terminalState = decision.pending.state;
+    const String projectId = decision.pending.projectId;
+    const String chatId = decision.pending.chatId;
+    const bool ownerIsActive = projectId == activeProject.summary.id &&
+                               chatId == activeChat.summary.id;
+    const std::uint32_t contextBudget =
+        webPendingContext.requestPolicy.contextByteBudget;
+    ProjectDocumentResult project = loadProject(projectId);
+    ChatDocumentResult stored = project.success
+        ? loadProjectChat(
+              projectId, chatId, 64,
+              std::min<std::size_t>(contextBudget, 65536))
+        : ChatDocumentResult{false, {}, project.error};
+    String historyError;
+    std::vector<Message> continuationMessages;
+    std::string scopedInstructions;
+    if (!stored.success) {
+        historyError = stored.error;
+    } else if (stored.chat.summary.messageCount !=
+               decision.pending.chatMessageCount) {
+        historyError = "Pending continuation chat history changed";
+    } else {
+        scopedInstructions = effectiveProjectChatInstructions(
+            project.project, stored.chat,
+            webPendingContext.requestInstructions);
+        ContextWindowResult fitted = fitOwnedMessagesToByteBudget(
+            takeUnsummarizedChatTail(std::move(stored.chat)), contextBudget);
+        if (fitted.retained.empty() ||
+            fitted.retained.back().role != "user") {
+            historyError = "Pending continuation lost its final user message";
+        } else {
+            continuationMessages = std::move(fitted.retained);
+        }
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/event-stream; charset=utf-8", "");
+    if (!warning.isEmpty()) {
+        sendWebSse(server, "notice", "", warning);
+    }
+    if (!historyError.isEmpty()) {
+        std::string().swap(decision.pending.continuation.call.arguments);
+        clearWebPendingContext();
+        activeResponse.clear();
+        consoleStatus = "Tool decision recorded; response was not continued: " +
+                        historyError;
+        sendWebSse(server, "error", "", consoleStatus);
+        renderConsoleScreen();
+        return;
+    }
+    Settings requestSettings = consoleSettings;
+    requestSettings.model = webPendingContext.requestPolicy.model;
+    requestSettings.globalInstructions = webPendingContext.globalInstructions;
+    activeResponse.clear();
+    consoleStatus = "Continuing response...";
+    renderConsoleScreen();
+    const ChatTextCallback onText = [ownerIsActive](const std::string& text) {
+        if (ownerIsActive) {
+            activeResponse += text;
+        }
+        sendWebSse(server, "delta", text, "");
+    };
+    const CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        if (consoleEscapePressed()) {
+            consoleEscapeConsumed = true;
+            return true;
+        }
+        return !server.client().connected();
+    };
+    bool workspaceFilesChanged = decision.toolResult.success &&
+        (decision.pending.continuation.call.name == "write_file" ||
+         decision.pending.continuation.call.name == "append_file");
+    markOperation("web_console_tools");
+    const ChatResult result = continueChatCompletionAfterPendingToolResult(
+        requestSettings, continuationMessages, scopedInstructions,
+        continuationPlan,
+        webPendingContext.requestPolicy.maximumOutputTokens,
+        std::move(decision.pending.continuation),
+        std::move(decision.toolResult), onText,
+        [&continuationPlan, &isCancelled, projectId,
+         &workspaceFilesChanged](const ToolCall& call) {
+            ToolExecutionResult executed = routeProjectToolCall(
+                consoleSettings, continuationPlan, projectId, call,
+                isCancelled);
+            if (executed.success &&
+                (call.name == "write_file" || call.name == "append_file")) {
+                workspaceFilesChanged = true;
+            }
+            return executed;
+        },
+        [&continuationPlan, oldPendingId, terminalState, projectId, chatId](
+            const PendingToolContinuation& continuation) {
+            return replaceTerminalPendingToolCall(
+                oldPendingId, terminalState, continuationPlan, projectId,
+                chatId, continuation);
+        },
+        isCancelled);
+    markOperation("idle");
+    if (workspaceFilesChanged) {
+        filesIndexReady = false;
+        ++filesRevision;
+    }
+    if (result.outcome == ChatCompletionOutcome::AwaitingConfirmation) {
+        PendingToolCallResult next = loadPendingToolCall();
+        if (!next.success || !next.found ||
+            next.pending.state != PendingToolCallState::Awaiting ||
+            next.pending.projectId != projectId ||
+            next.pending.chatId != chatId ||
+            !pendingToolCallIsResumableThisBoot(next.pending.pendingId)) {
+            clearWebPendingContext();
+            consoleStatus = next.success
+                ? String("Next confirmation could not be recovered")
+                : next.error;
+            if (next.success && next.found) {
+                std::string().swap(
+                    next.pending.continuation.call.arguments);
+            }
+            sendWebSse(server, "error", "", consoleStatus);
+            renderConsoleScreen();
+            return;
+        }
+        webPendingContext.pendingId = next.pending.pendingId;
+        std::string().swap(next.pending.continuation.call.arguments);
+        activeResponse.clear();
+        consoleStatus = "Waiting for confirmation: " + result.error;
+        sendWebSse(server, "pending", "", consoleStatus);
+        renderConsoleScreen();
+        return;
+    }
+    if (!result.success) {
+        clearWebPendingContext();
+        activeResponse = ownerIsActive ? result.response : std::string();
+        consoleStatus = result.error;
+        sendWebSse(server, "error", "", result.error);
+        renderConsoleScreen();
+        return;
+    }
+    OperationResult saved = appendProjectChatMessages(
+        projectId, chatId, {{"assistant", result.response}},
+        currentTimestamp(), consoleSettings.projectChatHistoryQuotaBytes);
+    if (!saved.success) {
+        clearWebPendingContext();
+        activeResponse = ownerIsActive ? result.response : std::string();
+        consoleStatus = "Response received but chat save failed: " + saved.error;
+        sendWebSse(server, "error", "", consoleStatus);
+        renderConsoleScreen();
+        return;
+    }
+    const OperationResult cleared = clearPendingToolCall(
+        oldPendingId, terminalState);
+    clearWebPendingContext();
+    activeResponse.clear();
+    OperationResult refreshed = {true, ""};
+    if (ownerIsActive) {
+        refreshed = loadActiveChat(chatId);
+        if (refreshed.success) {
+            refreshed = refreshChats();
+        }
+    }
+    consoleStatus = "Saved";
+    if (!cleared.success) {
+        consoleStatus = "Response saved; pending cleanup failed: " +
+                        cleared.error;
+        sendWebSse(server, "notice", "", consoleStatus);
+    }
+    if (!refreshed.success) {
+        consoleStatus = "Response saved; chat refresh failed: " +
+                        refreshed.error;
+        sendWebSse(server, "notice", "", consoleStatus);
+    }
+    sendWebSse(server, "done", "", "");
+    renderConsoleScreen();
+}
+
+void handlePendingAllowOnce()
+{
+    String requestedId;
+    if (!validatePendingActionRequest(requestedId)) return;
+    const WebPendingContinuationInputs inputs =
+        loadWebPendingContinuationInputs();
+    if (!inputs.success || !inputs.error.isEmpty() ||
+        inputs.pendingId != requestedId) {
+        sendWebJsonError(
+            server, 409,
+            inputs.error.isEmpty()
+                ? String("Pending request is no longer resumable")
+                : inputs.error);
+        return;
+    }
+    const CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        return consoleEscapePressed() || !server.client().connected();
+    };
+    PendingToolDecisionResult decision = approvePendingProjectToolCall(
+        consoleSettings, inputs.plan, inputs.pendingId, isCancelled);
+    if (!decision.success) {
+        sendWebJsonError(server, 409, decision.error);
+        return;
+    }
+    const ToolRequestPlan continuationPlan = inputs.plan;
+    continueWebPendingDecision(
+        std::move(decision), continuationPlan, "");
+}
+
+void handlePendingAllowChat()
+{
+    String requestedId;
+    if (!validatePendingActionRequest(requestedId)) return;
+    const WebPendingContinuationInputs inputs =
+        loadWebPendingContinuationInputs();
+    if (!inputs.success || !inputs.error.isEmpty() ||
+        inputs.pendingId != requestedId) {
+        sendWebJsonError(
+            server, 409,
+            inputs.error.isEmpty()
+                ? String("Pending request is no longer resumable")
+                : inputs.error);
+        return;
+    }
+    if (inputs.reason != PendingToolConfirmationReason::PolicyAsk) {
+        sendWebJsonError(
+            server, 409,
+            "Mandatory confirmation cannot be saved for chat");
+        return;
+    }
+    const CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        return consoleEscapePressed() || !server.client().connected();
+    };
+    PendingToolDecisionResult decision = approvePendingProjectToolCall(
+        consoleSettings, inputs.plan, inputs.pendingId, isCancelled);
+    if (!decision.success) {
+        sendWebJsonError(server, 409, decision.error);
+        return;
+    }
+    ToolRequestPlan continuationPlan = inputs.plan;
+    String warning;
+    const ToolCatalogEntry* entry = toolCatalogEntryForName(
+        decision.pending.continuation.call.name);
+    ChatDocumentResult chat = loadProjectChatMetadata(
+        decision.pending.projectId, decision.pending.chatId);
+    if (entry == nullptr || !chat.success) {
+        warning = entry == nullptr
+            ? String("Tool ran, but its chat permission was not saved")
+            : "Tool ran, but chat permission save failed: " + chat.error;
+    } else {
+        chat.chat.toolPolicy[static_cast<std::size_t>(entry->capability)] =
+            ScopedToolPermission::Allow;
+        chat.chat.summary.updatedAt = currentTimestamp();
+        const OperationResult saved = saveProjectChatMetadata(chat.chat);
+        if (!saved.success) {
+            warning = "Tool ran, but chat permission save failed: " + saved.error;
+        } else {
+            if (decision.pending.projectId == activeProject.summary.id &&
+                decision.pending.chatId == activeChat.summary.id) {
+                activeChat.toolPolicy = chat.chat.toolPolicy;
+                ++chatRevision;
+            }
+            const ProjectDocumentResult project = loadProject(
+                decision.pending.projectId);
+            const ChatDocumentResult updatedChat = loadProjectChatMetadata(
+                decision.pending.projectId, decision.pending.chatId);
+            if (!project.success || !updatedChat.success) {
+                warning = "Tool ran; saved permission could not be reloaded";
+            } else {
+                const SdStorageStatus storage = inspectSdStorage();
+                const bool readable = storage.state == SdStorageState::Ready ||
+                                      storage.state == SdStorageState::Full;
+                const bool writable = storage.state == SdStorageState::Ready;
+                const ToolRequestPlan updatedPlan = resolveChatToolRequestPlan(
+                    consoleSettings, project.project, updatedChat.chat,
+                    webPendingContext.intent, readable, writable, writable,
+                    sshToolIsAvailable());
+                if (webToolRequestPlanError(updatedPlan).isEmpty() &&
+                    entry != nullptr &&
+                    toolRequestPlanIncludesSchema(updatedPlan, entry->schema)) {
+                    continuationPlan = updatedPlan;
+                } else {
+                    warning =
+                        "Tool ran; continuing with the original bounded policy";
+                }
+            }
+        }
+    }
+    continueWebPendingDecision(
+        std::move(decision), continuationPlan, warning);
+}
+
+void handlePendingDeny()
+{
+    String requestedId;
+    if (!validatePendingActionRequest(requestedId)) return;
+    const WebPendingContinuationInputs inputs =
+        loadWebPendingContinuationInputs();
+    if (!inputs.success || !inputs.error.isEmpty() ||
+        inputs.pendingId != requestedId) {
+        sendWebJsonError(
+            server, 409,
+            inputs.error.isEmpty()
+                ? String("Pending request is no longer resumable")
+                : inputs.error);
+        return;
+    }
+    PendingToolDecisionResult decision = denyPendingProjectToolCall(
+        inputs.pendingId);
+    if (!decision.success) {
+        sendWebJsonError(server, 409, decision.error);
+        return;
+    }
+    const ToolRequestPlan continuationPlan = inputs.plan;
+    continueWebPendingDecision(
+        std::move(decision), continuationPlan, "");
+}
+
+void handlePendingAcknowledge()
+{
+    String requestedId;
+    if (!validatePendingActionRequest(requestedId)) return;
+    PendingToolCallResult pending = loadPendingToolCall();
+    if (!pending.success) {
+        sendWebJsonError(server, 500, pending.error);
+        return;
+    }
+    if (!pending.found || pending.pending.pendingId != requestedId) {
+        if (pending.found) {
+            std::string().swap(
+                pending.pending.continuation.call.arguments);
+        }
+        sendWebJsonError(server, 409, "Pending request no longer matches");
+        return;
+    }
+    const bool contextMatches = webPendingContextMatches(pending.pending);
+    const PendingToolCallState state = pending.pending.state;
+    const String pendingId = pending.pending.pendingId;
+    std::string().swap(pending.pending.continuation.call.arguments);
+    bool resumable = false;
+    if (state == PendingToolCallState::Awaiting) {
+        const WebPendingContinuationInputs inputs =
+            loadWebPendingContinuationInputs();
+        resumable = inputs.success && inputs.error.isEmpty();
+    }
+    if (resumable) {
+        sendWebJsonError(
+            server, 409,
+            "A resumable request must be allowed or denied, not acknowledged");
+        return;
+    }
+    const OperationResult cleared = clearPendingToolCall(pendingId, state);
+    if (!cleared.success) {
+        sendWebJsonError(server, 409, cleared.error);
+        return;
+    }
+    if (contextMatches) {
+        clearWebPendingContext();
+    }
+    JsonDocument document;
+    document["ok"] = true;
+    sendWebJson(server, 200, document);
 }
 
 void handleSelectProject()
@@ -1805,6 +2607,18 @@ void handleProjectSettingsRawComplete()
     }
     String model = decodedModel.value.c_str();
     model.trim();
+    const String encodedToolPolicy = server.header(kToolPolicyHeader);
+    const bool toolPolicyProvided = server.hasHeader(kToolPolicyHeader);
+    const ScopedToolPermissionPolicyDecodeResult decodedToolPolicy =
+        toolPolicyProvided
+        ? decodeScopedToolPermissionPolicy(
+              encodedToolPolicy.c_str(), encodedToolPolicy.length())
+        : ScopedToolPermissionPolicyDecodeResult{
+              activeProject.toolPolicy, ToolPolicyCodecError::None};
+    if (decodedToolPolicy.error != ToolPolicyCodecError::None) {
+        sendWebJsonError(server, 400, "Project tool policy is invalid");
+        return;
+    }
     std::uint32_t contextBytes = 0;
     std::uint32_t outputTokens = 0;
     const String automaticCompaction = server.header("X-CardMind-Auto-Compact");
@@ -1824,11 +2638,14 @@ void handleProjectSettingsRawComplete()
     const std::uint32_t previousContextBytes = activeProject.contextByteBudget;
     const std::uint32_t previousOutputTokens = activeProject.maximumOutputTokens;
     const bool previousAutomaticCompaction = activeProject.automaticCompaction;
+    const ScopedToolPermissionPolicy previousToolPolicy =
+        activeProject.toolPolicy;
     activeProject.instructions = std::move(request.body);
     activeProject.model = model;
     activeProject.contextByteBudget = contextBytes;
     activeProject.maximumOutputTokens = outputTokens;
     activeProject.automaticCompaction = automaticCompaction == "1";
+    activeProject.toolPolicy = decodedToolPolicy.policy;
     OperationResult result = saveProject(activeProject);
     if (!result.success) {
         activeProject.instructions = std::move(previousInstructions);
@@ -1836,6 +2653,7 @@ void handleProjectSettingsRawComplete()
         activeProject.contextByteBudget = previousContextBytes;
         activeProject.maximumOutputTokens = previousOutputTokens;
         activeProject.automaticCompaction = previousAutomaticCompaction;
+        activeProject.toolPolicy = previousToolPolicy;
         sendWebJsonError(server, 500, result.error);
         return;
     }
@@ -1845,6 +2663,7 @@ void handleProjectSettingsRawComplete()
         return;
     }
     ++projectRevision;
+    ++chatRevision;
     consoleStatus = "Project settings saved";
     JsonDocument document;
     document["ok"] = true;
@@ -1900,6 +2719,7 @@ void handleDuplicateProject()
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     JsonDocument document;
     document["ok"] = true;
     document["project_id"] = activeProject.summary.id;
@@ -1951,6 +2771,7 @@ void handleDeleteProject()
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     JsonDocument document;
     document["ok"] = true;
     document["project_id"] = activeProject.summary.id;
@@ -2038,7 +2859,7 @@ void handleNewChat()
     }
     const std::uint32_t startedAt = millis();
     ChatDocumentResult created = createProjectChat(
-        activeProject.summary.id, "New chat");
+        activeProject.summary.id, "New chat", consoleSettings.newChatToolPolicy);
     recordWebSdWrite(millis() - startedAt);
     if (!created.success) {
         sendWebJsonError(server, 400, created.error);
@@ -2199,6 +3020,57 @@ void handleChatCompact()
     sendWebJson(server, 200, document);
 }
 
+void handleChatSettings()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    if (!server.hasArg("tool_policy") || !server.hasArg("model")) {
+        sendWebJsonError(
+            server, 400, "Chat tool policy and model are required");
+        return;
+    }
+    const String encodedToolPolicy = server.arg("tool_policy");
+    const ScopedToolPermissionPolicyDecodeResult decodedToolPolicy =
+        decodeScopedToolPermissionPolicy(
+            encodedToolPolicy.c_str(), encodedToolPolicy.length());
+    String model = server.arg("model");
+    model.trim();
+    const std::string modelUtf8 = model.c_str();
+    if (decodedToolPolicy.error != ToolPolicyCodecError::None ||
+        modelUtf8.size() > 240 || !isValidUtf8(modelUtf8)) {
+        sendWebJsonError(
+            server, 400,
+            "Chat settings require a valid tool policy and UTF-8 model up to 240 bytes");
+        return;
+    }
+    ChatDocumentResult updated = loadProjectChatMetadata(
+        activeProject.summary.id, activeChat.summary.id);
+    if (!updated.success) {
+        sendWebJsonError(server, 500, updated.error);
+        return;
+    }
+    updated.chat.toolPolicy = decodedToolPolicy.policy;
+    updated.chat.model = model;
+    updated.chat.summary.updatedAt = currentTimestamp();
+    OperationResult result = saveProjectChatMetadata(updated.chat);
+    if (result.success) {
+        result = loadActiveChat(activeChat.summary.id);
+    }
+    if (result.success) {
+        result = refreshChats();
+    }
+    if (!result.success) {
+        sendWebJsonError(server, 500, result.error);
+        return;
+    }
+    consoleStatus = "Chat settings saved";
+    JsonDocument document;
+    document["ok"] = true;
+    sendWebJson(server, 200, document);
+}
+
 void handleChatPermissions()
 {
     if (!requestHasValidCsrf()) {
@@ -2227,7 +3099,8 @@ void handleChatPermissions()
             return;
         }
     }
-    activeChat.sshToolsEnabled = requested == "1";
+    activeChat.toolPolicy = setLegacySshToolsEnabled(
+        activeChat.toolPolicy, requested == "1");
     activeChat.summary.updatedAt = currentTimestamp();
     const OperationResult saved = saveActiveChat();
     if (!saved.success) {
@@ -2239,7 +3112,7 @@ void handleChatPermissions()
         sendWebJsonError(server, 500, refreshed.error);
         return;
     }
-    consoleStatus = activeChat.sshToolsEnabled
+    consoleStatus = legacySshToolsEnabled(activeChat.toolPolicy)
         ? String("Model SSH access enabled for this chat")
         : String("Model SSH access disabled for this chat");
     JsonDocument document;
@@ -2352,6 +3225,7 @@ void handleDuplicateChat()
         sendWebJsonError(server, 500, refreshed.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     consoleStatus = "Chat duplicated";
     renderConsoleScreen();
     JsonDocument document;
@@ -2439,6 +3313,7 @@ void handleImportChatBundle()
         sendWebJsonError(server, 500, refreshed.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     consoleStatus = "Project imported";
     renderConsoleScreen();
     JsonDocument document;
@@ -2466,7 +3341,8 @@ void handleDeleteChat()
     }
     if (consoleChats.empty()) {
         ChatDocumentResult created = createProjectChat(
-            activeProject.summary.id, "New chat");
+            activeProject.summary.id, "New chat",
+            consoleSettings.newChatToolPolicy);
         if (!created.success) {
             sendWebJsonError(server, 500, created.error);
             return;
@@ -2493,6 +3369,7 @@ void handleDeleteChat()
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    clearFailedWebRequestInstructions();
     ++projectRevision;
     consoleStatus = "Chat deleted";
     renderConsoleScreen();
@@ -2505,6 +3382,33 @@ void handleSettings()
 {
     if (!requestHasValidCsrf()) {
         sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    const bool hasMasterToolPolicy = server.hasArg("master_tool_policy");
+    const bool hasNewChatToolPolicy = server.hasArg("new_chat_tool_policy");
+    if (hasMasterToolPolicy != hasNewChatToolPolicy) {
+        sendWebJsonError(
+            server, 400,
+            "Master and new-chat tool policies must be submitted together");
+        return;
+    }
+    const String masterToolPolicy = server.arg("master_tool_policy");
+    const String newChatToolPolicy = server.arg("new_chat_tool_policy");
+    const ToolPermissionPolicyDecodeResult decodedMasterToolPolicy =
+        hasMasterToolPolicy
+        ? decodeToolPermissionPolicy(
+              masterToolPolicy.c_str(), masterToolPolicy.length())
+        : ToolPermissionPolicyDecodeResult{
+              consoleSettings.masterToolPolicy, ToolPolicyCodecError::None};
+    const ScopedToolPermissionPolicyDecodeResult decodedNewChatToolPolicy =
+        hasNewChatToolPolicy
+        ? decodeScopedToolPermissionPolicy(
+              newChatToolPolicy.c_str(), newChatToolPolicy.length())
+        : ScopedToolPermissionPolicyDecodeResult{
+              consoleSettings.newChatToolPolicy, ToolPolicyCodecError::None};
+    if (decodedMasterToolPolicy.error != ToolPolicyCodecError::None ||
+        decodedNewChatToolPolicy.error != ToolPolicyCodecError::None) {
+        sendWebJsonError(server, 400, "Tool permission policy is invalid");
         return;
     }
     Settings updated = consoleSettings;
@@ -2596,6 +3500,8 @@ void handleSettings()
     updated.keyboardRepeatMs = static_cast<std::uint16_t>(repeatMs);
     updated.powerProfile = static_cast<std::uint8_t>(powerProfile);
     updated.projectChatHistoryQuotaBytes = historyQuotaMiB * 1024U * 1024U;
+    updated.masterToolPolicy = decodedMasterToolPolicy.policy;
+    updated.newChatToolPolicy = decodedNewChatToolPolicy.policy;
     const OperationResult result = saveSettings(updated);
     if (!result.success) {
         sendWebJsonError(server, 400, result.error);
@@ -2603,6 +3509,7 @@ void handleSettings()
     }
     consoleSettings = updated;
     ++settingsRevision;
+    ++chatRevision;
     consoleStatus = "Settings saved; Wi-Fi changes apply after closing the console";
     JsonDocument document;
     document["ok"] = true;
@@ -3908,6 +4815,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleSession,
             handleCloseConsole,
             handleState,
+            handlePending,
             handleStorageConfirm,
             handleSelectProject,
             handleNewProject,
@@ -3924,11 +4832,16 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handlePromptRawComplete,
             handlePromptRawData,
             handlePromptRetry,
+            handlePendingAllowOnce,
+            handlePendingAllowChat,
+            handlePendingDeny,
+            handlePendingAcknowledge,
             handleSelectChat,
             handleNewChat,
             handleInstructions,
             handleInstructionsRawComplete,
             handleInstructionsRawData,
+            handleChatSettings,
             handleChatCompact,
             handleChatPermissions,
             handleRenameChat,

@@ -1,5 +1,6 @@
 #include <M5Cardputer.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <SD.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -11,7 +12,6 @@
 #include "src/adv_audio_power.h"
 #include "src/app_types.h"
 #include "src/audio_utils.h"
-#include "src/backup_manager.h"
 #include "src/chat_storage.h"
 #include "src/crash_journal.h"
 #include "src/document_reader.h"
@@ -33,6 +33,7 @@
 #include "src/ssh_tool.h"
 #include "src/text_utils.h"
 #include "src/tool_router.h"
+#include "src/tool_activity.h"
 #include "src/tts_client.h"
 #include "src/ui.h"
 #include "src/voice_input.h"
@@ -63,6 +64,10 @@ constexpr std::uint32_t kSdStateRefreshIntervalMs = 1000;
 constexpr std::size_t kFileViewerChunkBytes = 2048;
 constexpr std::size_t kFileViewerPageLines = 8;
 constexpr std::size_t kFileEditorMaximumBytes = 4096;
+constexpr cardputer::ToolMessageIntent kAutomaticToolMessageIntent = {
+    cardputer::ToolMessageIntentMode::Auto,
+    0,
+};
 
 enum class Screen {
     Chat,
@@ -75,7 +80,6 @@ enum class Screen {
     Calculator,
     QrEntry,
     QrDisplay,
-    RestoreBackupConfirm,
     FirmwareUpdateConfirm,
     FilesMenu,
     WorkspaceFileList,
@@ -89,15 +93,25 @@ enum class Screen {
     Diagnostics,
     ControlsHelp,
     AiMenu,
+    ToolActivity,
     ModelPicker,
     GlobalInstructions,
+    GlobalMasterPolicy,
+    NewChatDefaultsPolicy,
     ProjectList,
     ProjectActions,
     ProjectModelPicker,
+    ProjectToolPolicy,
     ProjectInstructions,
     ProjectRename,
     ChatList,
     ChatActions,
+    ChatModelPicker,
+    ChatToolPolicy,
+    ChatCapabilityStatus,
+    ComposerCapabilities,
+    PendingToolPreview,
+    PendingToolActions,
     ArchivedChatViewer,
     SearchSources,
     SearchSourceViewer,
@@ -117,7 +131,6 @@ enum class FileNameAction {
 
 enum class WorkspaceListMode {
     Browse,
-    ImportChat,
     ImportProject,
 };
 
@@ -135,6 +148,7 @@ std::string activeResponse;
 std::string retryPrompt;
 String retryChatId;
 std::uint32_t retryOutputTokens = 0;
+cardputer::ToolMessageIntent retryToolIntent = kAutomaticToolMessageIntent;
 cardputer::KeyboardLayout keyboardLayout = cardputer::KeyboardLayout::English;
 String statusMessage;
 String transientStatusValue;
@@ -149,11 +163,14 @@ String activeChatId;
 String activeProjectId;
 String activeProjectTitle;
 String activeChatTitle = "New chat";
+String activeChatModel;
 std::string activeChatInstructions;
 bool activeChatPinned = false;
 bool activeChatArchived = false;
 std::uint32_t activeChatArchivedMessageCount = 0;
-bool activeChatSshToolsEnabled = false;
+cardputer::ScopedToolPermissionPolicy activeChatToolPolicy =
+    cardputer::defaultNewChatToolPermissionPolicy();
+cardputer::ProjectDocument activeProjectDocument;
 bool chatStorageReady = false;
 String chatStorageError;
 bool chatStorageInitialized = false;
@@ -193,7 +210,7 @@ std::uint32_t archivedChatNextOffset = 0;
 bool archivedChatEof = true;
 String selectedChatId;
 String selectedChatTitle;
-bool selectedChatSshToolsEnabled = false;
+String selectedChatModel;
 cardputer::ContextUsage selectedChatContextUsage = {0, 0, 0, 0, 0};
 bool selectedChatContextUsageReady = false;
 String requestOutputOverrideChatId;
@@ -201,6 +218,7 @@ std::uint32_t requestOutputOverrideTokens = 0;
 String requestInstructionsOverrideChatId;
 std::string requestInstructionsOverride;
 std::string retryRequestInstructions;
+cardputer::ToolMessageIntent composerToolIntent = kAutomaticToolMessageIntent;
 std::string instructionsInput;
 String instructionsStatus;
 std::string requestInstructionsInput;
@@ -227,6 +245,30 @@ std::size_t diagnosticsIndex = 0;
 std::size_t controlsHelpIndex = 0;
 std::size_t aiMenuIndex = 0;
 std::size_t modelPickerIndex = 0;
+std::size_t capabilityPolicyIndex = 0;
+std::size_t composerCapabilitiesIndex = 0;
+Screen composerCapabilitiesReturnScreen = Screen::Chat;
+std::size_t chatCapabilityStatusFirstLine = 0;
+std::size_t chatCapabilityStatusLineCount = 0;
+std::size_t pendingToolActionsIndex = 0;
+std::size_t pendingToolPreviewFirstLine = 0;
+std::size_t pendingToolPreviewLineCount = 0;
+std::vector<std::string> pendingToolPreviewLines;
+bool pendingToolPreviewActionable = false;
+Screen pendingToolReturnScreen = Screen::AiMenu;
+
+struct DevicePendingContinuationContext {
+    bool present = false;
+    String pendingId;
+    String projectId;
+    String chatId;
+    cardputer::ResolvedProjectRequestPolicy requestPolicy = {"", 0, 0, false};
+    String globalInstructions;
+    std::string scopedInstructions;
+    cardputer::ToolMessageIntent intent = kAutomaticToolMessageIntent;
+};
+
+DevicePendingContinuationContext devicePendingContext;
 std::size_t wifiPickerIndex = 0;
 std::vector<cardputer::WifiNetwork> scannedWifiNetworks;
 std::vector<cardputer::WorkspaceFile> workspaceFiles;
@@ -236,6 +278,8 @@ std::vector<std::string> fileViewerLines;
 std::vector<std::uint32_t> fileViewerPreviousOffsets;
 cardputer::DocumentReaderMode fileReaderMode = cardputer::DocumentReaderMode::Text;
 std::size_t fileViewerFirstLine = 0;
+std::vector<std::string> toolActivityLines;
+std::size_t toolActivityFirstLine = 0;
 std::uint32_t fileViewerChunkOffset = 0;
 std::uint32_t fileViewerNextOffset = 0;
 std::uint32_t fileViewerTotalBytes = 0;
@@ -286,6 +330,7 @@ String crashJournalError;
 bool crashJournalInitialized = false;
 String crashJournalInitializationError;
 bool sshStorageReady = false;
+bool cachedSshToolAvailable = false;
 String sshStorageError;
 bool sshStorageInitialized = false;
 String sshStorageInitializationError;
@@ -314,11 +359,23 @@ void renderChatList();
 void renderProjectList();
 void renderProjectActions();
 void renderProjectModelPicker();
+void renderProjectToolPolicy();
 void renderProjectInstructions();
 void renderProjectRename();
 void renderControlsHelp();
 void renderAiMenu();
+void renderToolActivity();
 void renderGlobalInstructions();
+void renderGlobalMasterPolicy();
+void renderNewChatDefaultsPolicy();
+void renderChatModelPicker();
+void renderChatToolPolicy();
+void renderChatCapabilityStatus();
+cardputer::ChatCapabilityStates activeChatCapabilityStates();
+void renderComposerCapabilities();
+void renderPendingToolPreview();
+void renderPendingToolActions();
+String composerCapabilitiesLabel();
 void renderWebConsoleMenu();
 void renderDeviceMenu();
 void renderUtilitiesMenu();
@@ -341,6 +398,20 @@ void renderWorkspaceFileList();
 void openSelectedWorkspaceFile();
 void openProjectList();
 void openAiMenu();
+void openToolActivity();
+void openPendingToolPreview();
+void allowPendingToolOnce();
+void allowPendingToolForChat();
+void denyPendingTool();
+void acknowledgeInterruptedPendingTool();
+void clearDevicePendingContext();
+cardputer::OperationResult captureDevicePendingContext(
+    const String& projectId,
+    const String& chatId,
+    const cardputer::ResolvedProjectRequestPolicy& requestPolicy,
+    const String& globalInstructions,
+    std::string scopedInstructions,
+    const cardputer::ToolMessageIntent& intent);
 void openWebConsole(Screen returnScreen);
 cardputer::OperationResult runSshTerminal();
 cardputer::OperationResult runSshTool();
@@ -360,11 +431,9 @@ void executeStoredPromptRequest(const std::string& prompt,
                                 const cardputer::ProjectDocument& project,
                                 const cardputer::ChatDocument& storedChat,
                                 std::string requestInstructions,
-                                cardputer::ResolvedProjectRequestPolicy requestPolicy);
-void executeStoredPromptRequest(const std::string& prompt,
-                                const cardputer::ProjectDocument& project,
-                                const cardputer::ChatDocument& storedChat,
-                                std::uint32_t requestOutputTokens);
+                                cardputer::ResolvedProjectRequestPolicy requestPolicy,
+                                const cardputer::ToolMessageIntent requestIntent,
+                                const cardputer::ToolRequestPlan requestPlan);
 void retryLastRequest();
 void runUiSearchEndToEndTest();
 void updateSerial();
@@ -473,7 +542,8 @@ cardputer::OperationResult saveCurrentChat()
     loaded.chat.summary.archived = activeChatArchived;
     loaded.chat.instructions = activeChatInstructions;
     loaded.chat.draft = inputBuffer;
-    loaded.chat.sshToolsEnabled = activeChatSshToolsEnabled;
+    loaded.chat.toolPolicy = activeChatToolPolicy;
+    loaded.chat.model = activeChatModel;
     const cardputer::OperationResult result = cardputer::saveProjectChatMetadata(loaded.chat);
     if (result.success) {
         persistedDraft = inputBuffer;
@@ -482,16 +552,172 @@ cardputer::OperationResult saveCurrentChat()
     return result;
 }
 
+void clearRetryRequestState()
+{
+    retryPrompt.clear();
+    retryChatId.clear();
+    retryOutputTokens = 0;
+    std::string().swap(retryRequestInstructions);
+    retryToolIntent = kAutomaticToolMessageIntent;
+}
+
+void captureRetryRequestState(const std::string& prompt,
+                              const String& chatId,
+                              std::uint32_t outputTokens,
+                              const std::string& requestInstructions,
+                              const cardputer::ToolMessageIntent& intent)
+{
+    retryPrompt = prompt;
+    retryChatId = chatId;
+    retryOutputTokens = outputTokens;
+    retryRequestInstructions = requestInstructions;
+    retryToolIntent = intent;
+}
+
+cardputer::ToolMessageIntent consumeComposerToolIntent()
+{
+    const cardputer::ToolMessageIntent intent = composerToolIntent;
+    composerToolIntent = kAutomaticToolMessageIntent;
+    return intent;
+}
+
+String toolRequestPlanError(const cardputer::ToolRequestPlan& plan)
+{
+    if (plan.error != cardputer::ToolPolicyContractError::None) {
+        return "Selected tool intent is invalid";
+    }
+    if (plan.missingRequiredGroups != 0) {
+        return "A required capability is denied or unavailable";
+    }
+    return "";
+}
+
+const char* capabilityLabel(std::size_t index)
+{
+    static constexpr const char* labels[cardputer::kToolCapabilityCount] = {
+        "Web search",
+        "Web fetch",
+        "Files read",
+        "Files write/delete",
+        "SSH read",
+        "SSH mutate",
+        "SFTP read/write",
+        "Python write/run",
+    };
+    return index < cardputer::kToolCapabilityCount ? labels[index] : "Invalid";
+}
+
+const char* toolPermissionLabel(cardputer::ToolPermission permission)
+{
+    switch (permission) {
+        case cardputer::ToolPermission::Off: return "Off";
+        case cardputer::ToolPermission::Ask: return "Ask";
+        case cardputer::ToolPermission::Allow: return "Allow";
+        case cardputer::ToolPermission::Count: break;
+    }
+    return "Invalid";
+}
+
+const char* scopedToolPermissionLabel(cardputer::ScopedToolPermission permission)
+{
+    switch (permission) {
+        case cardputer::ScopedToolPermission::Inherit: return "Inherit";
+        case cardputer::ScopedToolPermission::Off: return "Off";
+        case cardputer::ScopedToolPermission::Ask: return "Ask";
+        case cardputer::ScopedToolPermission::Allow: return "Allow";
+        case cardputer::ScopedToolPermission::Count: break;
+    }
+    return "Invalid";
+}
+
+const char* toolPermissionDecisionLabel(cardputer::ToolPermissionDecision decision)
+{
+    switch (decision) {
+        case cardputer::ToolPermissionDecision::Deny: return "Off";
+        case cardputer::ToolPermissionDecision::Ask: return "Ask";
+        case cardputer::ToolPermissionDecision::Allow: return "Allow";
+        case cardputer::ToolPermissionDecision::Unavailable: return "Unavailable";
+    }
+    return "Invalid";
+}
+
+const char* toolPermissionSourceLabel(cardputer::ToolPermissionSource source)
+{
+    switch (source) {
+        case cardputer::ToolPermissionSource::None: return "None";
+        case cardputer::ToolPermissionSource::BuiltIn: return "Built-in";
+        case cardputer::ToolPermissionSource::Global: return "Global";
+        case cardputer::ToolPermissionSource::Project: return "Project";
+        case cardputer::ToolPermissionSource::Chat: return "Chat";
+        case cardputer::ToolPermissionSource::Message: return "Message";
+        case cardputer::ToolPermissionSource::Availability: return "Unavailable";
+    }
+    return "Invalid";
+}
+
+cardputer::ToolPermission nextToolPermission(cardputer::ToolPermission permission)
+{
+    switch (permission) {
+        case cardputer::ToolPermission::Off: return cardputer::ToolPermission::Ask;
+        case cardputer::ToolPermission::Ask: return cardputer::ToolPermission::Allow;
+        case cardputer::ToolPermission::Allow: return cardputer::ToolPermission::Off;
+        case cardputer::ToolPermission::Count: break;
+    }
+    return cardputer::ToolPermission::Off;
+}
+
+cardputer::ScopedToolPermission nextScopedToolPermission(
+    cardputer::ScopedToolPermission permission)
+{
+    switch (permission) {
+        case cardputer::ScopedToolPermission::Inherit:
+            return cardputer::ScopedToolPermission::Off;
+        case cardputer::ScopedToolPermission::Off:
+            return cardputer::ScopedToolPermission::Ask;
+        case cardputer::ScopedToolPermission::Ask:
+            return cardputer::ScopedToolPermission::Allow;
+        case cardputer::ScopedToolPermission::Allow:
+            return cardputer::ScopedToolPermission::Inherit;
+        case cardputer::ScopedToolPermission::Count:
+            break;
+    }
+    return cardputer::ScopedToolPermission::Inherit;
+}
+
+std::vector<String> capabilityPolicyItems(
+    const cardputer::ToolPermissionPolicy& policy)
+{
+    std::vector<String> items;
+    items.reserve(cardputer::kToolCapabilityCount + 1);
+    for (std::size_t index = 0; index < cardputer::kToolCapabilityCount; ++index) {
+        items.push_back(String(capabilityLabel(index)) + ": " +
+                        toolPermissionLabel(policy[index]));
+    }
+    items.push_back("Back");
+    return items;
+}
+
+std::vector<String> capabilityPolicyItems(
+    const cardputer::ScopedToolPermissionPolicy& policy)
+{
+    std::vector<String> items;
+    items.reserve(cardputer::kToolCapabilityCount + 1);
+    for (std::size_t index = 0; index < cardputer::kToolCapabilityCount; ++index) {
+        items.push_back(String(capabilityLabel(index)) + ": " +
+                        scopedToolPermissionLabel(policy[index]));
+    }
+    items.push_back("Back");
+    return items;
+}
+
 void clearChatScopedEphemeralState()
 {
     requestOutputOverrideChatId.clear();
     requestOutputOverrideTokens = 0;
     requestInstructionsOverrideChatId.clear();
     std::string().swap(requestInstructionsOverride);
-    retryPrompt.clear();
-    retryChatId.clear();
-    retryOutputTokens = 0;
-    std::string().swap(retryRequestInstructions);
+    composerToolIntent = kAutomaticToolMessageIntent;
+    clearRetryRequestState();
 }
 
 cardputer::OperationResult setRequestInstructionsOverride(
@@ -553,12 +779,14 @@ cardputer::OperationResult activateChat(const String& id)
     }
     activeChatId = loaded.chat.summary.id;
     activeChatTitle = loaded.chat.summary.title;
+    activeChatModel = loaded.chat.model;
     history = cardputer::unsummarizedChatTail(loaded.chat);
     activeChatInstructions = loaded.chat.instructions;
     activeChatPinned = loaded.chat.summary.pinned;
     activeChatArchived = loaded.chat.summary.archived;
     activeChatArchivedMessageCount = 0;
-    activeChatSshToolsEnabled = loaded.chat.sshToolsEnabled;
+    activeChatToolPolicy = loaded.chat.toolPolicy;
+    activeProjectDocument = project.project;
     activeResponse.clear();
     inputBuffer = loaded.chat.draft;
     persistedDraft = inputBuffer;
@@ -575,18 +803,19 @@ cardputer::OperationResult createAndActivateChat()
         0, cardputer::kStorageOperationalFloorBytes);
     if (!access.success) return access;
     const cardputer::ChatDocumentResult created = cardputer::createProjectChat(
-        activeProjectId, "New chat");
+        activeProjectId, "New chat", settings.newChatToolPolicy);
     if (!created.success) {
         return {false, created.error};
     }
     clearChatScopedEphemeralState();
     activeChatId = created.chat.summary.id;
     activeChatTitle = created.chat.summary.title;
+    activeChatModel = created.chat.model;
     activeChatInstructions.clear();
     activeChatPinned = false;
     activeChatArchived = false;
     activeChatArchivedMessageCount = 0;
-    activeChatSshToolsEnabled = false;
+    activeChatToolPolicy = created.chat.toolPolicy;
     history.clear();
     activeResponse.clear();
     inputBuffer.clear();
@@ -599,6 +828,7 @@ cardputer::OperationResult createAndActivateChat()
     if (!project.success) {
         return {false, project.error};
     }
+    activeProjectDocument = project.project;
     project.project.activeChatId = activeChatId;
     const cardputer::OperationResult saved = cardputer::saveProject(project.project);
     return saved.success ? refreshChatList() : saved;
@@ -626,12 +856,7 @@ cardputer::OperationResult initializeChats()
     }
     const String storedId = project.project.activeChatId;
     if (!storedId.isEmpty()) {
-        for (const auto& chat : chats) {
-            if (chat.id == storedId) {
-                return activateChat(storedId);
-            }
-        }
-        Serial.println("WARN event=active_chat reason=stored_id_not_found");
+        return activateChat(storedId);
     }
     return activateChat(chats.front().id);
 }
@@ -678,6 +903,7 @@ cardputer::OperationResult activateProject(const String& projectId)
     clearChatScopedEphemeralState();
     activeProjectId = projectId;
     activeProjectTitle = project.project.summary.title;
+    activeProjectDocument = project.project;
     activeChatId.clear();
     result = refreshChatList();
     if (!result.success) {
@@ -687,11 +913,7 @@ cardputer::OperationResult activateProject(const String& projectId)
         return createAndActivateChat();
     }
     if (!project.project.activeChatId.isEmpty()) {
-        for (const cardputer::ChatSummary& chat : chats) {
-            if (chat.id == project.project.activeChatId) {
-                return activateChat(chat.id);
-            }
-        }
+        return activateChat(project.project.activeChatId);
     }
     return activateChat(chats.front().id);
 }
@@ -743,6 +965,7 @@ std::vector<String> projectActionItems()
         "Duplicate project",
         project.project.summary.archived ? "Restore project" : "Archive project",
         "Export project bundle",
+        "Capability policies",
         "Back",
     };
 }
@@ -885,7 +1108,9 @@ std::vector<String> chatActionItems()
     return {
         "Open chat",
         "Chat instructions",
-        String("LLM SSH access: ") + (selectedChatSshToolsEnabled ? "ON" : "OFF"),
+        selectedChatModel.isEmpty()
+            ? String("Chat model: Project default")
+            : String("Chat model: ") + selectedChatModel,
         selectedChatContextUsageReady
             ? "Ctx:" +
                   String(static_cast<unsigned int>(
@@ -910,6 +1135,9 @@ std::vector<String> chatActionItems()
                 !requestInstructionsOverride.empty()
             ? String("Next instructions: ON")
             : String("Next instructions: OFF"),
+        "Capability policies",
+        "Capability status",
+        "Next capabilities: " + composerCapabilitiesLabel(),
         "Clear messages",
         "Delete chat",
         "Back",
@@ -1000,7 +1228,7 @@ void openChatActions(const cardputer::ChatSummary& chat)
         activeProjectId, chat.id, 64, 65536);
     const cardputer::ProjectDocumentResult project = cardputer::loadProject(
         activeProjectId);
-    selectedChatSshToolsEnabled = loaded.success && loaded.chat.sshToolsEnabled;
+    selectedChatModel = loaded.success ? loaded.chat.model : String();
     selectedChatContextUsageReady = loaded.success && project.success;
     if (selectedChatContextUsageReady) {
         selectedChatContextUsage = cardputer::resolveContextUsage(
@@ -1062,6 +1290,7 @@ void render()
     case Screen::Chat:
         cardputer::showChat(history, activeResponse, inputBuffer, keyboardLayout,
                             activeChatTitle, statusMessage, scrollOffset,
+                            activeChatCapabilityStates(),
                             WiFi.status() == WL_CONNECTED, batteryLevel, batteryCharging);
         return;
     case Screen::MainCarousel:
@@ -1090,10 +1319,6 @@ void render()
         return;
     case Screen::QrDisplay:
         cardputer::showQrCode("QR CODE", String(qrInput.c_str()), "ESC back");
-        return;
-    case Screen::RestoreBackupConfirm:
-        cardputer::showConfirmation("RESTORE BACKUP", "Replace chats and non-secret settings?",
-                                    "ENTER restore  ESC cancel");
         return;
     case Screen::FirmwareUpdateConfirm:
         cardputer::showConfirmation(
@@ -1138,11 +1363,20 @@ void render()
     case Screen::AiMenu:
         renderAiMenu();
         return;
+    case Screen::ToolActivity:
+        renderToolActivity();
+        return;
     case Screen::ModelPicker:
         renderModelPicker();
         return;
     case Screen::GlobalInstructions:
         renderGlobalInstructions();
+        return;
+    case Screen::GlobalMasterPolicy:
+        renderGlobalMasterPolicy();
+        return;
+    case Screen::NewChatDefaultsPolicy:
+        renderNewChatDefaultsPolicy();
         return;
     case Screen::ProjectList:
         renderProjectList();
@@ -1152,6 +1386,9 @@ void render()
         return;
     case Screen::ProjectModelPicker:
         renderProjectModelPicker();
+        return;
+    case Screen::ProjectToolPolicy:
+        renderProjectToolPolicy();
         return;
     case Screen::ProjectInstructions:
         renderProjectInstructions();
@@ -1164,6 +1401,24 @@ void render()
         return;
     case Screen::ChatActions:
         renderChatActions();
+        return;
+    case Screen::ChatModelPicker:
+        renderChatModelPicker();
+        return;
+    case Screen::ChatToolPolicy:
+        renderChatToolPolicy();
+        return;
+    case Screen::ChatCapabilityStatus:
+        renderChatCapabilityStatus();
+        return;
+    case Screen::ComposerCapabilities:
+        renderComposerCapabilities();
+        return;
+    case Screen::PendingToolPreview:
+        renderPendingToolPreview();
+        return;
+    case Screen::PendingToolActions:
+        renderPendingToolActions();
         return;
     case Screen::ArchivedChatViewer:
         renderArchivedChatViewer();
@@ -1309,6 +1564,7 @@ struct ContextSummaryPageResult {
 
 ContextSummaryPageResult generateContextSummaryPage(
     const cardputer::ProjectDocument& project,
+    const cardputer::ChatDocument& chat,
     const std::string& previousSummary,
     const std::vector<cardputer::Message>& source)
 {
@@ -1334,9 +1590,8 @@ ContextSummaryPageResult generateContextSummaryPage(
     }
     cardputer::Settings summarySettings = settings;
     summarySettings.globalInstructions = "";
-    if (!project.model.isEmpty()) {
-        summarySettings.model = project.model;
-    }
+    summarySettings.model = cardputer::resolveProjectRequestPolicy(
+        settings, project, chat, 0).model;
     std::vector<cardputer::Message> summaryRequest;
     summaryRequest.push_back({"user", std::move(prompt.prompt)});
     cardputer::ChatResult summary = cardputer::streamChatCompletionWithBudget(
@@ -1367,7 +1622,7 @@ cardputer::OperationResult appendActiveContextSummary(
         return {false, current.error};
     }
     ContextSummaryPageResult summary = generateContextSummaryPage(
-        project, current.chat.contextSummary, source);
+        project, current.chat, current.chat.contextSummary, source);
     if (!summary.success) {
         return {false, summary.error};
     }
@@ -1394,6 +1649,7 @@ cardputer::OperationResult regenerateProjectChatContextSummary(
         return result;
     }
     std::uint32_t originalMessageCount = 0;
+    cardputer::ChatDocument chatConfiguration;
     {
         const cardputer::ChatDocumentResult original = cardputer::loadProjectChatMetadata(
             projectId, chatId);
@@ -1401,6 +1657,7 @@ cardputer::OperationResult regenerateProjectChatContextSummary(
             return {false, original.error};
         }
         originalMessageCount = original.chat.summary.messageCount;
+        chatConfiguration = original.chat;
     }
     constexpr std::uint32_t kRetainedMessages = 8;
     const std::uint32_t target = originalMessageCount > kRetainedMessages
@@ -1427,7 +1684,7 @@ cardputer::OperationResult regenerateProjectChatContextSummary(
                 : page.error};
         }
         ContextSummaryPageResult generated = generateContextSummaryPage(
-            project, stagedSummary, page.messages);
+            project, chatConfiguration, stagedSummary, page.messages);
         if (!generated.success) {
             return {false, generated.error};
         }
@@ -1456,13 +1713,15 @@ void executeStoredPromptRequest(const std::string& prompt,
                                 const cardputer::ProjectDocument& project,
                                 const cardputer::ChatDocument& storedChat,
                                 std::string requestInstructions,
-                                cardputer::ResolvedProjectRequestPolicy requestPolicy)
+                                cardputer::ResolvedProjectRequestPolicy requestPolicy,
+                                const cardputer::ToolMessageIntent requestIntent,
+                                const cardputer::ToolRequestPlan requestPlan)
 {
     cardputer::Settings requestSettings = settings;
     requestSettings.model = requestPolicy.model;
-    const std::string effectiveInstructions = effectiveProjectChatInstructions(
+    std::string effectiveInstructions = effectiveProjectChatInstructions(
         project, storedChat, requestInstructions);
-    const bool useWebSearch = cardputer::requestsWebSearch(prompt);
+    clearDevicePendingContext();
     activeResponse.clear();
     scrollOffset = 0;
     statusMessage = "Streaming...";
@@ -1476,40 +1735,70 @@ void executeStoredPromptRequest(const std::string& prompt,
             lastStreamRenderAt = now;
         }
     };
-    const cardputer::ChatToolPolicy toolPolicy = cardputer::resolveChatToolPolicy(
-        settings, prompt, activeChatSshToolsEnabled, cardputer::sshToolIsAvailable());
-    const bool useTools = cardputer::chatToolPolicyIsEnabled(toolPolicy);
-    Serial.printf("INFO event=chat_route workspace_tools=%s web_search_available=%s web_search_intent=%s\n",
-                  toolPolicy.workspaceEnabled ? "enabled" : "disabled",
-                  toolPolicy.webSearchEnabled ? "yes" : "no",
-                  useWebSearch ? "enabled" : "disabled");
+    const std::uint8_t filesGroup = static_cast<std::uint8_t>(
+        1U << static_cast<std::uint8_t>(cardputer::ToolCapabilityGroup::Files));
+    const std::uint8_t webGroup = static_cast<std::uint8_t>(
+        1U << static_cast<std::uint8_t>(cardputer::ToolCapabilityGroup::Web));
+    const std::uint8_t sshGroup = static_cast<std::uint8_t>(
+        1U << static_cast<std::uint8_t>(cardputer::ToolCapabilityGroup::Ssh));
+    const bool useTools = requestPlan.schemas != 0;
+    Serial.printf("INFO event=chat_route workspace_tools=%s web_tools=%s ssh_tools=%s required_groups=%u\n",
+                  (requestPlan.includedGroups & filesGroup) != 0 ? "enabled" : "disabled",
+                  (requestPlan.includedGroups & webGroup) != 0 ? "yes" : "no",
+                  (requestPlan.includedGroups & sshGroup) != 0 ? "yes" : "no",
+                  static_cast<unsigned int>(requestPlan.intent.requiredGroups));
     cardputer::markOperation(useTools ? "chat_tools" : "chat_stream");
+    const String requestProjectId = activeProjectId;
+    const String requestChatId = activeChatId;
     const cardputer::CancelCallback isCancelled = []() {
         M5Cardputer.update();
         return cardputerEscapePressed();
     };
-    requestOutputOverrideChatId.clear();
-    requestOutputOverrideTokens = 0;
     const cardputer::ChatResult result = useTools
         ? cardputer::streamChatCompletionWithToolsAndBudget(
-              requestSettings, history, effectiveInstructions, toolPolicy.sshEnabled,
+              requestSettings, history, effectiveInstructions, requestPlan,
               requestPolicy.maximumOutputTokens, onText,
-              [&toolPolicy, &isCancelled](const cardputer::ToolCall& call) {
-                  statusMessage = "Tool: " + String(call.name.c_str());
+              [&requestPlan, &isCancelled,
+               requestProjectId](const cardputer::ToolCall& call) {
+                  statusMessage = "Tool: " + String(call.name.c_str()) +
+                      " · ESC cancels";
                   render();
                   return cardputer::routeProjectToolCall(
-                      settings, toolPolicy, activeProjectId, call, isCancelled);
+                      settings, requestPlan, requestProjectId, call, isCancelled);
+              },
+              [&requestPlan, requestProjectId, requestChatId](
+                  const cardputer::PendingToolContinuation& continuation) {
+                  return cardputer::savePendingToolCall(
+                      requestPlan, requestProjectId, requestChatId,
+                      continuation);
               }, isCancelled)
         : cardputer::streamChatCompletionWithBudget(
               requestSettings, history, effectiveInstructions,
               requestPolicy.maximumOutputTokens, onText, isCancelled);
     cardputer::markOperation("idle");
+    if (result.outcome ==
+        cardputer::ChatCompletionOutcome::AwaitingConfirmation) {
+        activeResponse.clear();
+        clearRetryRequestState();
+        const cardputer::OperationResult captured = captureDevicePendingContext(
+            requestProjectId, requestChatId, requestPolicy,
+            requestSettings.globalInstructions, std::move(effectiveInstructions),
+            requestIntent);
+        if (!captured.success) {
+            statusMessage = "Pending confirmation unavailable: " + captured.error;
+            render();
+            return;
+        }
+        statusMessage = "Waiting for confirmation: " + result.error;
+        pendingToolReturnScreen = Screen::Chat;
+        openPendingToolPreview();
+        return;
+    }
     if (!result.success) {
         activeResponse = result.response;
-        retryPrompt = prompt;
-        retryChatId = activeChatId;
-        retryOutputTokens = requestPolicy.maximumOutputTokens;
-        retryRequestInstructions = std::move(requestInstructions);
+        captureRetryRequestState(
+            prompt, activeChatId, requestPolicy.maximumOutputTokens,
+            requestInstructions, requestIntent);
         statusMessage = result.error;
         const cardputer::OperationResult listResult = refreshChatList();
         if (!listResult.success) {
@@ -1527,10 +1816,7 @@ void executeStoredPromptRequest(const std::string& prompt,
         return;
     }
     history.push_back({"assistant", result.response});
-    retryPrompt.clear();
-    retryChatId.clear();
-    retryOutputTokens = 0;
-    std::string().swap(retryRequestInstructions);
+    clearRetryRequestState();
     cardputer::ContextWindowResult finalFit = cardputer::fitMessagesToByteBudget(
         history, requestPolicy.contextByteBudget);
     std::vector<cardputer::Message> compactedMessages;
@@ -1618,25 +1904,25 @@ void executeStoredPromptRequest(const std::string& prompt,
     render();
 }
 
-void executeStoredPromptRequest(const std::string& prompt,
-                                const cardputer::ProjectDocument& project,
-                                const cardputer::ChatDocument& storedChat,
-                                std::uint32_t requestOutputTokens)
-{
-    cardputer::ResolvedProjectRequestPolicy requestPolicy =
-        cardputer::resolveProjectRequestPolicy(
-            settings, project, requestOutputTokens);
-    executeStoredPromptRequest(
-        prompt, project, storedChat, std::move(retryRequestInstructions),
-        std::move(requestPolicy));
-}
-
 void submitPrompt()
 {
     const std::uint32_t submitStartedAt = millis();
     if (inputBuffer.empty()) {
         statusMessage = "Type a message before pressing Enter";
         render();
+        return;
+    }
+    cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success || pending.found) {
+        if (!pending.success) {
+            statusMessage = pending.error;
+            render();
+            return;
+        }
+        pendingToolReturnScreen = Screen::Chat;
+        statusMessage = "Resolve the pending tool request before sending another message";
+        std::string().swap(pending.pending.continuation.call.arguments);
+        openPendingToolPreview();
         return;
     }
     ensureNetworkReady();
@@ -1667,13 +1953,6 @@ void submitPrompt()
     }
 
     const std::string prompt = inputBuffer;
-    const bool useWebSearch = cardputer::requestsWebSearch(prompt);
-    if (useWebSearch && !cardputer::webSearchSettingsAreComplete(settings)) {
-        statusMessage = "Web search not configured; Fn+4 > Web setup";
-        render();
-        return;
-    }
-
     const cardputer::ProjectDocumentResult activeProject =
         cardputer::loadProject(activeProjectId);
     const cardputer::ChatDocumentResult storedChat = cardputer::loadProjectChatMetadata(
@@ -1684,11 +1963,26 @@ void submitPrompt()
         render();
         return;
     }
+    const cardputer::ToolMessageIntent requestIntent = composerToolIntent;
+    const cardputer::ToolRequestPlan requestPlan =
+        cardputer::resolveChatToolRequestPlan(
+            settings, activeProject.project, storedChat.chat, requestIntent,
+            fileWorkspaceReady,
+            fileWorkspaceReady &&
+                currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+            currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+            cardputer::sshToolIsAvailable());
+    const String planError = toolRequestPlanError(requestPlan);
+    if (!planError.isEmpty()) {
+        statusMessage = planError;
+        render();
+        return;
+    }
     const std::uint32_t requestOutputTokens = requestOutputOverrideChatId == activeChatId
         ? requestOutputOverrideTokens : 0;
     cardputer::ResolvedProjectRequestPolicy requestPolicy =
         cardputer::resolveProjectRequestPolicy(
-            settings, activeProject.project, requestOutputTokens);
+            settings, activeProject.project, storedChat.chat, requestOutputTokens);
     std::vector<cardputer::Message> pendingHistory = history;
     pendingHistory.push_back({"user", prompt});
     cardputer::ContextWindowResult pendingFit = cardputer::fitMessagesToByteBudget(
@@ -1709,6 +2003,13 @@ void submitPrompt()
     history = std::move(pendingFit.retained);
     activeChatTitle = pendingTitle;
     inputBuffer.clear();
+    std::string requestInstructions = consumeRequestInstructionsOverride(activeChatId);
+    const cardputer::ToolMessageIntent submittedIntent = consumeComposerToolIntent();
+    captureRetryRequestState(
+        prompt, activeChatId, requestPolicy.maximumOutputTokens,
+        requestInstructions, submittedIntent);
+    requestOutputOverrideChatId.clear();
+    requestOutputOverrideTokens = 0;
     const cardputer::OperationResult pendingMetadataSave = saveCurrentChat();
     const std::uint32_t metadataSavedAt = millis();
     if (!pendingMetadataSave.success) {
@@ -1725,10 +2026,861 @@ void submitPrompt()
         static_cast<unsigned int>(promptSavedAt - contextReadyAt),
         static_cast<unsigned int>(metadataSavedAt - promptSavedAt),
         static_cast<unsigned int>(metadataSavedAt - submitStartedAt));
-    std::string requestInstructions = consumeRequestInstructionsOverride(activeChatId);
     executeStoredPromptRequest(
         prompt, activeProject.project, storedChat.chat,
-        std::move(requestInstructions), std::move(requestPolicy));
+        std::move(requestInstructions), std::move(requestPolicy),
+        submittedIntent, requestPlan);
+}
+
+std::vector<String> chatModelItems()
+{
+    std::vector<String> items = {"Use project default"};
+    items.reserve(availableModels.size() + 1);
+    items.insert(items.end(), availableModels.begin(), availableModels.end());
+    return items;
+}
+
+void renderChatModelPicker()
+{
+    cardputer::showSelectionList(
+        "CHAT MODEL", chatModelItems(), modelPickerIndex,
+        menuStatus.isEmpty() ? String("UP/DOWN  ENTER  ESC chat") : menuStatus);
+}
+
+void renderChatToolPolicy()
+{
+    const cardputer::ChatDocumentResult chat =
+        cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
+    const std::vector<String> items = chat.success
+        ? capabilityPolicyItems(chat.chat.toolPolicy)
+        : std::vector<String>{"Back"};
+    cardputer::showSelectionList(
+        "CHAT CAPABILITIES", items, capabilityPolicyIndex,
+        !chat.success ? chat.error :
+            (menuStatus.isEmpty() ? String("ENTER change  ESC chat") : menuStatus));
+}
+
+String composerCapabilitiesLabel()
+{
+    if (composerToolIntent.mode == cardputer::ToolMessageIntentMode::Auto) {
+        return "Auto";
+    }
+    if (composerToolIntent.mode == cardputer::ToolMessageIntentMode::NoTools) {
+        return "No tools";
+    }
+    String label;
+    static constexpr const char* names[cardputer::kToolCapabilityGroupCount] = {
+        "W", "F", "S", "P",
+    };
+    for (std::size_t index = 0; index < cardputer::kToolCapabilityGroupCount; ++index) {
+        const std::uint8_t bit = static_cast<std::uint8_t>(1U << index);
+        if ((composerToolIntent.requiredGroups & bit) != 0) {
+            if (!label.isEmpty()) label += "/";
+            label += names[index];
+        }
+    }
+    return label.isEmpty() ? String("Auto") : label;
+}
+
+std::vector<String> composerCapabilitiesItems()
+{
+    std::vector<String> items = {
+        composerToolIntent.mode == cardputer::ToolMessageIntentMode::Auto
+            ? String("[ON] Auto") : String("Auto"),
+        composerToolIntent.mode == cardputer::ToolMessageIntentMode::NoTools
+            ? String("[ON] No tools") : String("No tools"),
+    };
+    static constexpr const char* names[cardputer::kToolCapabilityGroupCount] = {
+        "Web", "Files", "SSH", "Python",
+    };
+    for (std::size_t index = 0; index < cardputer::kToolCapabilityGroupCount; ++index) {
+        const std::uint8_t bit = static_cast<std::uint8_t>(1U << index);
+        const bool enabled = composerToolIntent.mode ==
+                cardputer::ToolMessageIntentMode::Required &&
+            (composerToolIntent.requiredGroups & bit) != 0;
+        items.push_back(String(enabled ? "[ON] " : "[OFF] ") + names[index]);
+    }
+    items.push_back("Back");
+    return items;
+}
+
+void renderComposerCapabilities()
+{
+    cardputer::showSelectionList(
+        "NEXT CAPABILITIES", composerCapabilitiesItems(),
+        composerCapabilitiesIndex,
+        menuStatus.isEmpty()
+            ? String("ENTER select  Sends once  ESC") : menuStatus);
+}
+
+cardputer::ToolPolicyResolutionResult activeChatToolPermissionResolution()
+{
+    cardputer::ChatDocument chat;
+    chat.toolPolicy = activeChatToolPolicy;
+    return cardputer::resolveChatToolPermissions(
+        settings, activeProjectDocument, chat, composerToolIntent,
+        fileWorkspaceReady,
+        fileWorkspaceReady &&
+            currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+        currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+        cachedSshToolAvailable);
+}
+
+cardputer::ChatCapabilityState chatCapabilityGroupState(
+    std::size_t groupIndex,
+    const cardputer::ScopedToolPermissionPolicy& chatPolicy,
+    const cardputer::ToolMessageIntent& intent,
+    const cardputer::ToolPolicyResolutionResult& resolution)
+{
+    const std::uint8_t groupBit = static_cast<std::uint8_t>(1U << groupIndex);
+    if (intent.mode == cardputer::ToolMessageIntentMode::NoTools) {
+        return cardputer::ChatCapabilityState::Off;
+    }
+    if (intent.mode == cardputer::ToolMessageIntentMode::Required &&
+        (intent.requiredGroups & groupBit) != 0) {
+        return cardputer::ChatCapabilityState::Required;
+    }
+    bool allInherit = true;
+    bool anyAsk = false;
+    for (std::size_t index = 0; index < cardputer::kToolCapabilityCount; ++index) {
+        const cardputer::ToolCapabilityGroupMaskResult group =
+            cardputer::toolCapabilityGroupMask(
+                static_cast<cardputer::ToolCapability>(index));
+        if (group.error != cardputer::ToolPolicyContractError::None ||
+            group.mask != groupBit) {
+            continue;
+        }
+        allInherit = allInherit &&
+            chatPolicy[index] == cardputer::ScopedToolPermission::Inherit;
+        const cardputer::ToolPermissionDecision decision =
+            resolution.permissions[index].decision;
+        if (decision == cardputer::ToolPermissionDecision::Deny ||
+            decision == cardputer::ToolPermissionDecision::Unavailable) {
+            return cardputer::ChatCapabilityState::Off;
+        }
+        anyAsk = anyAsk || decision == cardputer::ToolPermissionDecision::Ask;
+    }
+    if (allInherit) return cardputer::ChatCapabilityState::Inherit;
+    return anyAsk ? cardputer::ChatCapabilityState::Ask
+                  : cardputer::ChatCapabilityState::Allow;
+}
+
+cardputer::ChatCapabilityStates activeChatCapabilityStates()
+{
+    const cardputer::ToolPolicyResolutionResult resolution =
+        activeChatToolPermissionResolution();
+    cardputer::ChatCapabilityStates states = {
+        cardputer::ChatCapabilityState::Off,
+        cardputer::ChatCapabilityState::Off,
+        cardputer::ChatCapabilityState::Off,
+        cardputer::ChatCapabilityState::Off,
+    };
+    if (resolution.error != cardputer::ToolPolicyContractError::None) {
+        return states;
+    }
+    for (std::size_t index = 0; index < states.size(); ++index) {
+        states[index] = chatCapabilityGroupState(
+            index, activeChatToolPolicy, composerToolIntent, resolution);
+    }
+    return states;
+}
+
+void renderChatCapabilityStatus()
+{
+    const cardputer::ProjectDocumentResult project =
+        cardputer::loadProject(activeProjectId);
+    const cardputer::ChatDocumentResult chat =
+        cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
+    std::vector<std::string> lines;
+    if (!project.success || !chat.success) {
+        lines.push_back(std::string(
+            (project.success ? chat.error : project.error).c_str()));
+    } else {
+        const cardputer::ToolMessageIntent intent = selectedChatId == activeChatId
+            ? composerToolIntent : kAutomaticToolMessageIntent;
+        const cardputer::ToolPolicyResolutionResult resolution =
+            cardputer::resolveChatToolPermissions(
+                settings, project.project, chat.chat, intent,
+                fileWorkspaceReady,
+                fileWorkspaceReady &&
+                    currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+                currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+                cachedSshToolAvailable);
+        if (resolution.error != cardputer::ToolPolicyContractError::None) {
+            lines.push_back("Invalid capability policy");
+        } else {
+            lines.reserve(cardputer::kToolCapabilityCount * 2);
+            for (std::size_t index = 0; index < cardputer::kToolCapabilityCount; ++index) {
+                const cardputer::ResolvedToolPermission& effective =
+                    resolution.permissions[index];
+                const cardputer::ToolCapabilityGroupMaskResult group =
+                    cardputer::toolCapabilityGroupMask(
+                        static_cast<cardputer::ToolCapability>(index));
+                const bool required =
+                    intent.mode == cardputer::ToolMessageIntentMode::Required &&
+                    group.error == cardputer::ToolPolicyContractError::None &&
+                    (intent.requiredGroups & group.mask) != 0;
+                lines.push_back(
+                    std::string(capabilityLabel(index)) + ": " +
+                    scopedToolPermissionLabel(chat.chat.toolPolicy[index]));
+                std::string effectiveLine = "  > ";
+                if (required) effectiveLine += "Required/";
+                effectiveLine +=
+                    std::string(toolPermissionDecisionLabel(effective.decision)) +
+                    " (" + toolPermissionSourceLabel(effective.source) + ")";
+                lines.push_back(std::move(effectiveLine));
+            }
+        }
+    }
+    const String position = lines.empty()
+        ? String("0/0")
+        : String(chatCapabilityStatusFirstLine + 1) + "/" + String(lines.size());
+    chatCapabilityStatusLineCount = lines.size();
+    cardputer::showReadOnlyTextViewer(
+        "CAPABILITY STATUS", lines, chatCapabilityStatusFirstLine, position);
+}
+
+bool devicePendingContextMatches(const cardputer::PendingToolCall& pending)
+{
+    return devicePendingContext.present &&
+        devicePendingContext.pendingId == pending.pendingId &&
+        devicePendingContext.projectId == pending.projectId &&
+        devicePendingContext.chatId == pending.chatId;
+}
+
+bool pendingIdentityMatchesCurrent(const cardputer::PendingToolCall& pending)
+{
+    const cardputer::ProjectDocumentResult project =
+        cardputer::loadProject(pending.projectId);
+    const cardputer::ChatDocumentResult chat =
+        cardputer::loadProjectChatMetadata(pending.projectId, pending.chatId);
+    return project.success && chat.success &&
+        project.project.summary.revision == pending.projectRevision &&
+        chat.chat.summary.revision == pending.chatRevision &&
+        chat.chat.summary.messageCount == pending.chatMessageCount;
+}
+
+void clearDevicePendingContext()
+{
+    devicePendingContext.present = false;
+    devicePendingContext.pendingId.clear();
+    devicePendingContext.projectId.clear();
+    devicePendingContext.chatId.clear();
+    devicePendingContext.requestPolicy = {"", 0, 0, false};
+    devicePendingContext.globalInstructions.clear();
+    std::string().swap(devicePendingContext.scopedInstructions);
+    devicePendingContext.intent = kAutomaticToolMessageIntent;
+}
+
+cardputer::OperationResult captureDevicePendingContext(
+    const String& projectId,
+    const String& chatId,
+    const cardputer::ResolvedProjectRequestPolicy& requestPolicy,
+    const String& globalInstructions,
+    std::string scopedInstructions,
+    const cardputer::ToolMessageIntent& intent)
+{
+    const cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success || !pending.found ||
+        pending.pending.state != cardputer::PendingToolCallState::Awaiting ||
+        pending.pending.projectId != projectId || pending.pending.chatId != chatId ||
+        !cardputer::pendingToolCallIsResumableThisBoot(pending.pending.pendingId)) {
+        return {
+            false,
+            pending.success && pending.found
+                ? String("Pending confirmation does not match this request")
+                : (pending.success ? String("Pending confirmation was not saved")
+                                   : pending.error),
+        };
+    }
+    clearDevicePendingContext();
+    devicePendingContext.present = true;
+    devicePendingContext.pendingId = pending.pending.pendingId;
+    devicePendingContext.projectId = projectId;
+    devicePendingContext.chatId = chatId;
+    devicePendingContext.requestPolicy = requestPolicy;
+    devicePendingContext.globalInstructions = globalInstructions;
+    devicePendingContext.scopedInstructions = std::move(scopedInstructions);
+    devicePendingContext.intent = intent;
+    return {true, ""};
+}
+
+std::vector<std::string> splitPendingPreviewDisplayLines(
+    const std::string& value,
+    std::size_t maximumLineBytes)
+{
+    std::vector<std::string> lines;
+    if (value.empty() || maximumLineBytes == 0) return lines;
+    std::size_t offset = 0;
+    while (offset < value.size()) {
+        const std::size_t newline = value.find('\n', offset);
+        const std::size_t logicalEnd = newline == std::string::npos
+            ? value.size() : newline;
+        if (offset == logicalEnd) lines.emplace_back();
+        while (offset < logicalEnd) {
+            std::size_t end = std::min(offset + maximumLineBytes, logicalEnd);
+            while (end > offset && end < logicalEnd &&
+                   (static_cast<unsigned char>(value[end]) & 0xC0U) == 0x80U) {
+                --end;
+            }
+            if (end == offset) {
+                end = offset + 1;
+                while (end < logicalEnd &&
+                       (static_cast<unsigned char>(value[end]) & 0xC0U) == 0x80U) {
+                    ++end;
+                }
+            }
+            lines.push_back(value.substr(offset, end - offset));
+            offset = end;
+        }
+        if (newline == std::string::npos) break;
+        offset = logicalEnd + 1;
+        if (offset == value.size()) lines.emplace_back();
+    }
+    return lines;
+}
+
+void clearPendingToolPreviewCache()
+{
+    std::vector<std::string>().swap(pendingToolPreviewLines);
+    pendingToolPreviewLineCount = 0;
+    pendingToolPreviewActionable = false;
+}
+
+void cachePendingToolPreview(const cardputer::PendingToolCall& pending)
+{
+    clearPendingToolPreviewCache();
+    const cardputer::PendingToolPreviewResult preview =
+        cardputer::loadPendingToolPreview(pending.pendingId);
+    pendingToolPreviewActionable = preview.success &&
+        pending.state == cardputer::PendingToolCallState::Awaiting &&
+        devicePendingContextMatches(pending) &&
+        pendingIdentityMatchesCurrent(pending) &&
+        cardputer::pendingToolCallIsResumableThisBoot(pending.pendingId);
+    if (!preview.success) {
+        pendingToolPreviewLines.push_back(std::string(preview.error.c_str()));
+    } else {
+        pendingToolPreviewLines.push_back(
+            "Tool: " + std::string(preview.preview.toolName.c_str()));
+        pendingToolPreviewLines.push_back(
+            preview.preview.reason == cardputer::PendingToolConfirmationReason::Mandatory
+                ? "Reason: mandatory confirmation"
+                : "Reason: policy asks");
+        if (!preview.preview.targetName.isEmpty()) {
+            const std::vector<std::string> target = splitPendingPreviewDisplayLines(
+                "Target: " + std::string(preview.preview.targetName.c_str()), 38);
+            pendingToolPreviewLines.insert(
+                pendingToolPreviewLines.end(), target.begin(), target.end());
+        }
+        const std::vector<std::string> body = splitPendingPreviewDisplayLines(
+            preview.preview.body, 38);
+        pendingToolPreviewLines.insert(
+            pendingToolPreviewLines.end(), body.begin(), body.end());
+        if (preview.preview.truncated) {
+            pendingToolPreviewLines.push_back("[Preview truncated]");
+        }
+    }
+    if (!pendingToolPreviewActionable) {
+        pendingToolPreviewLines.push_back("Interrupted; execution is disabled");
+    }
+    pendingToolPreviewLineCount = pendingToolPreviewLines.size();
+}
+
+void renderPendingToolPreview()
+{
+    const String position = pendingToolPreviewLines.empty()
+        ? String("0/0")
+        : String(pendingToolPreviewFirstLine + 1) + "/" +
+              String(pendingToolPreviewLines.size());
+    cardputer::showReadOnlyTextViewer(
+        "TOOL CONFIRMATION", pendingToolPreviewLines,
+        pendingToolPreviewFirstLine, position);
+}
+
+std::vector<String> pendingToolActionItems()
+{
+    cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success || !pending.found) return {"Back"};
+    std::string().swap(pending.pending.continuation.call.arguments);
+    if (pendingToolPreviewActionable &&
+        pending.pending.state == cardputer::PendingToolCallState::Awaiting &&
+        devicePendingContextMatches(pending.pending) &&
+        pendingIdentityMatchesCurrent(pending.pending) &&
+        cardputer::pendingToolCallIsResumableThisBoot(pending.pending.pendingId)) {
+        if (pending.pending.reason ==
+            cardputer::PendingToolConfirmationReason::PolicyAsk) {
+            return {"Allow once", "Allow for chat", "Deny", "Back"};
+        }
+        return {"Allow once", "Deny", "Back"};
+    }
+    if (pending.pending.state == cardputer::PendingToolCallState::ClaimedApprove) {
+        return {"Acknowledge unknown effect", "Back"};
+    }
+    if (pending.pending.state == cardputer::PendingToolCallState::Denied) {
+        return {"Acknowledge interrupted response", "Back"};
+    }
+    return {"Discard interrupted request", "Back"};
+}
+
+void renderPendingToolActions()
+{
+    cardputer::showSelectionList(
+        "CONFIRM TOOL", pendingToolActionItems(), pendingToolActionsIndex,
+        menuStatus.isEmpty() ? String("ENTER choose  ESC preview") : menuStatus);
+}
+
+void openPendingToolPreview()
+{
+    clearPendingToolPreviewCache();
+    cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success || !pending.found) {
+        menuStatus = pending.success ? String("No pending confirmation") : pending.error;
+        currentScreen = pendingToolReturnScreen;
+        if (currentScreen == Screen::Chat) render();
+        else renderAiMenu();
+        return;
+    }
+    pendingToolPreviewFirstLine = 0;
+    pendingToolActionsIndex = 0;
+    menuStatus = "";
+    currentScreen = Screen::PendingToolPreview;
+    std::string().swap(pending.pending.continuation.call.arguments);
+    cachePendingToolPreview(pending.pending);
+    renderPendingToolPreview();
+}
+
+struct PendingContinuationInputs {
+    bool success = false;
+    String pendingId;
+    cardputer::PendingToolConfirmationReason reason =
+        cardputer::PendingToolConfirmationReason::PolicyAsk;
+    cardputer::ToolRequestPlan plan = {};
+    String error;
+};
+
+PendingContinuationInputs loadPendingContinuationInputs()
+{
+    PendingContinuationInputs result;
+    if (!pendingToolPreviewActionable) {
+        result.error = "Pending preview is unavailable; execution is disabled";
+        return result;
+    }
+    if (!devicePendingContext.present) {
+        result.error = "This request was interrupted and cannot be resumed";
+        return result;
+    }
+    cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success || !pending.found ||
+        pending.pending.state != cardputer::PendingToolCallState::Awaiting ||
+        !devicePendingContextMatches(pending.pending) ||
+        !cardputer::pendingToolCallIsResumableThisBoot(pending.pending.pendingId)) {
+        result.error = pending.success
+            ? String("Pending request is no longer resumable") : pending.error;
+        return result;
+    }
+    std::string().swap(pending.pending.continuation.call.arguments);
+    if (!pendingIdentityMatchesCurrent(pending.pending)) {
+        result.error = "Pending request is no longer resumable";
+        return result;
+    }
+    result.pendingId = pending.pending.pendingId;
+    result.reason = pending.pending.reason;
+    const cardputer::ProjectDocumentResult project =
+        cardputer::loadProject(pending.pending.projectId);
+    const cardputer::ChatDocumentResult chat = cardputer::loadProjectChatMetadata(
+        pending.pending.projectId, pending.pending.chatId);
+    if (!project.success || !chat.success) {
+        result.error = project.success ? chat.error : project.error;
+        return result;
+    }
+    result.plan = cardputer::resolveChatToolRequestPlan(
+        settings, project.project, chat.chat, devicePendingContext.intent,
+        fileWorkspaceReady,
+        fileWorkspaceReady &&
+            currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+        currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+        cardputer::sshToolIsAvailable());
+    result.error = toolRequestPlanError(result.plan);
+    const cardputer::ToolCatalogEntry* entry = cardputer::toolCatalogEntryForName(
+        pending.pending.continuation.call.name);
+    if (result.error.isEmpty() &&
+        (entry == nullptr ||
+         !cardputer::toolRequestPlanIncludesSchema(result.plan, entry->schema))) {
+        result.error = "Current policy no longer permits the pending tool";
+    }
+    result.success = true;
+    return result;
+}
+
+void showPendingDecisionError(const String& error)
+{
+    menuStatus = error;
+    currentScreen = Screen::PendingToolActions;
+    renderPendingToolActions();
+}
+
+void continuePendingToolDecision(
+    cardputer::PendingToolDecisionResult decision,
+    const cardputer::ToolRequestPlan& continuationPlan,
+    const String& warning)
+{
+    const String oldPendingId = decision.pending.pendingId;
+    const cardputer::PendingToolCallState terminalState = decision.pending.state;
+    clearPendingToolPreviewCache();
+    cardputer::Settings requestSettings = settings;
+    requestSettings.model = devicePendingContext.requestPolicy.model;
+    requestSettings.globalInstructions = devicePendingContext.globalInstructions;
+    const std::uint32_t contextBudget =
+        devicePendingContext.requestPolicy.contextByteBudget;
+    const bool ownerIsActive = decision.pending.projectId == activeProjectId &&
+        decision.pending.chatId == activeChatId;
+    std::vector<cardputer::Message> storedMessages;
+    const std::vector<cardputer::Message>* continuationMessages = &history;
+    String historyError;
+    if (ownerIsActive) {
+        if (history.empty() || history.back().role != "user") {
+            historyError = "Pending continuation lost its final user message";
+        }
+    } else {
+        cardputer::ChatDocumentResult stored = cardputer::loadProjectChat(
+            decision.pending.projectId, decision.pending.chatId, 64,
+            std::min<std::size_t>(contextBudget, 65536));
+        if (!stored.success) {
+            historyError = stored.error;
+        } else if (stored.chat.summary.messageCount !=
+                   decision.pending.chatMessageCount) {
+            historyError = "Pending continuation chat history changed";
+        } else {
+            cardputer::ContextWindowResult fitted =
+                cardputer::fitOwnedMessagesToByteBudget(
+                    cardputer::takeUnsummarizedChatTail(std::move(stored.chat)),
+                    contextBudget);
+            if (fitted.retained.empty() || fitted.retained.back().role != "user") {
+                historyError = "Pending continuation lost its final user message";
+            } else {
+                storedMessages = std::move(fitted.retained);
+                continuationMessages = &storedMessages;
+            }
+        }
+    }
+    if (!historyError.isEmpty()) {
+        std::string().swap(decision.pending.continuation.call.arguments);
+        clearDevicePendingContext();
+        const String error = warning.isEmpty()
+            ? String("Tool decision recorded; response was not continued: ") + historyError
+            : warning + "; response was not continued: " + historyError;
+        if (ownerIsActive) {
+            activeResponse.clear();
+            statusMessage = error;
+            currentScreen = Screen::Chat;
+            render();
+        } else {
+            showPendingDecisionError(error);
+        }
+        return;
+    }
+    if (ownerIsActive) {
+        activeResponse.clear();
+        statusMessage = "Continuing response...";
+        currentScreen = Screen::Chat;
+        render();
+    }
+    std::uint32_t lastStreamRenderAt = 0;
+    const cardputer::ChatTextCallback onText =
+        [ownerIsActive, &lastStreamRenderAt](const std::string& text) {
+            if (!ownerIsActive) return;
+            activeResponse += text;
+            const std::uint32_t now = millis();
+            if (lastStreamRenderAt == 0 || now - lastStreamRenderAt >= 120) {
+                render();
+                lastStreamRenderAt = now;
+            }
+        };
+    const cardputer::CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        return cardputerEscapePressed();
+    };
+    cardputer::markOperation("chat_tools");
+    const cardputer::ChatResult result =
+        cardputer::continueChatCompletionAfterPendingToolResult(
+            requestSettings, *continuationMessages,
+            devicePendingContext.scopedInstructions, continuationPlan,
+            devicePendingContext.requestPolicy.maximumOutputTokens,
+            std::move(decision.pending.continuation),
+            std::move(decision.toolResult), onText,
+            [&continuationPlan, &isCancelled,
+             projectId = decision.pending.projectId](
+                const cardputer::ToolCall& call) {
+                return cardputer::routeProjectToolCall(
+                    settings, continuationPlan, projectId, call, isCancelled);
+            },
+            [&continuationPlan, oldPendingId, terminalState,
+             projectId = decision.pending.projectId,
+             chatId = decision.pending.chatId](
+                const cardputer::PendingToolContinuation& continuation) {
+                return cardputer::replaceTerminalPendingToolCall(
+                    oldPendingId, terminalState, continuationPlan,
+                    projectId, chatId, continuation);
+            },
+            isCancelled);
+    cardputer::markOperation("idle");
+    std::string().swap(decision.pending.continuation.call.arguments);
+    if (result.outcome == cardputer::ChatCompletionOutcome::AwaitingConfirmation) {
+        cardputer::PendingToolCallResult next = cardputer::loadPendingToolCall();
+        if (!next.success || !next.found ||
+            next.pending.state != cardputer::PendingToolCallState::Awaiting ||
+            next.pending.projectId != decision.pending.projectId ||
+            next.pending.chatId != decision.pending.chatId ||
+            !cardputer::pendingToolCallIsResumableThisBoot(next.pending.pendingId)) {
+            clearDevicePendingContext();
+            statusMessage = next.success
+                ? String("Next confirmation could not be recovered") : next.error;
+            if (ownerIsActive) render();
+            else showPendingDecisionError(statusMessage);
+            return;
+        }
+        devicePendingContext.pendingId = next.pending.pendingId;
+        std::string().swap(next.pending.continuation.call.arguments);
+        pendingToolReturnScreen = ownerIsActive ? Screen::Chat : Screen::AiMenu;
+        statusMessage = warning.isEmpty()
+            ? result.error : warning + "; " + result.error;
+        openPendingToolPreview();
+        return;
+    }
+    if (!result.success) {
+        clearDevicePendingContext();
+        if (ownerIsActive) {
+            activeResponse = result.response;
+            statusMessage = warning.isEmpty()
+                ? result.error : warning + "; " + result.error;
+            render();
+        } else {
+            showPendingDecisionError(
+                warning.isEmpty() ? result.error : warning + "; " + result.error);
+        }
+        return;
+    }
+    cardputer::OperationResult saved = cardputer::appendProjectChatMessages(
+        decision.pending.projectId, decision.pending.chatId,
+        {{"assistant", result.response}}, currentChatTimestamp(),
+        settings.projectChatHistoryQuotaBytes);
+    if (!saved.success) {
+        clearDevicePendingContext();
+        if (ownerIsActive) {
+            activeResponse = result.response;
+            statusMessage = "Response received but chat save failed: " + saved.error;
+            render();
+        } else {
+            showPendingDecisionError(
+                "Response received but chat save failed: " + saved.error);
+        }
+        return;
+    }
+    const cardputer::OperationResult cleared = cardputer::clearPendingToolCall(
+        oldPendingId, terminalState);
+    clearDevicePendingContext();
+    if (ownerIsActive) {
+        history.push_back({"assistant", result.response});
+        cardputer::ContextWindowResult fitted = cardputer::fitMessagesToByteBudget(
+            history, contextBudget);
+        history = std::move(fitted.retained);
+        activeResponse.clear();
+        statusMessage = !cleared.success
+            ? "Response saved; pending cleanup failed: " + cleared.error
+            : (warning.isEmpty() ? String("Response complete") : warning);
+        const cardputer::OperationResult listed = refreshChatList();
+        if (!listed.success) statusMessage += "; chat list: " + listed.error;
+        currentScreen = Screen::Chat;
+        render();
+    } else {
+        menuStatus = !cleared.success
+            ? "Response saved; pending cleanup failed: " + cleared.error
+            : (warning.isEmpty() ? String("Response complete") : warning);
+        currentScreen = Screen::AiMenu;
+        renderAiMenu();
+    }
+}
+
+void allowPendingToolOnce()
+{
+    PendingContinuationInputs inputs = loadPendingContinuationInputs();
+    if (!inputs.success) {
+        showPendingDecisionError(inputs.error);
+        return;
+    }
+    if (!inputs.error.isEmpty()) {
+        showPendingDecisionError(inputs.error);
+        return;
+    }
+    const cardputer::CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        return cardputerEscapePressed();
+    };
+    cardputer::PendingToolDecisionResult decision =
+        cardputer::approvePendingProjectToolCall(
+            settings, inputs.plan, inputs.pendingId, isCancelled);
+    if (!decision.success) {
+        showPendingDecisionError(decision.error);
+        return;
+    }
+    const cardputer::ToolRequestPlan continuationPlan = inputs.plan;
+    continuePendingToolDecision(
+        std::move(decision), continuationPlan, "");
+}
+
+void allowPendingToolForChat()
+{
+    PendingContinuationInputs inputs = loadPendingContinuationInputs();
+    if (!inputs.success) {
+        showPendingDecisionError(inputs.error);
+        return;
+    }
+    if (!inputs.error.isEmpty()) {
+        showPendingDecisionError(inputs.error);
+        return;
+    }
+    if (inputs.reason !=
+        cardputer::PendingToolConfirmationReason::PolicyAsk) {
+        showPendingDecisionError("Mandatory confirmation cannot be saved for chat");
+        return;
+    }
+    const cardputer::CancelCallback isCancelled = []() {
+        M5Cardputer.update();
+        return cardputerEscapePressed();
+    };
+    cardputer::PendingToolDecisionResult decision =
+        cardputer::approvePendingProjectToolCall(
+            settings, inputs.plan, inputs.pendingId, isCancelled);
+    if (!decision.success) {
+        showPendingDecisionError(decision.error);
+        return;
+    }
+    cardputer::ToolRequestPlan continuationPlan = inputs.plan;
+    String warning;
+    const cardputer::ToolCatalogEntry* entry = cardputer::toolCatalogEntryForName(
+        decision.pending.continuation.call.name);
+    cardputer::ChatDocumentResult chat = cardputer::loadProjectChatMetadata(
+        decision.pending.projectId, decision.pending.chatId);
+    if (entry == nullptr || !chat.success) {
+        warning = entry == nullptr
+            ? String("Tool ran, but its chat permission was not saved")
+            : "Tool ran, but chat permission save failed: " + chat.error;
+    } else {
+        chat.chat.toolPolicy[static_cast<std::size_t>(entry->capability)] =
+            cardputer::ScopedToolPermission::Allow;
+        chat.chat.summary.updatedAt = currentChatTimestamp();
+        const cardputer::OperationResult saved =
+            cardputer::saveProjectChatMetadata(chat.chat);
+        if (!saved.success) {
+            warning = "Tool ran, but chat permission save failed: " + saved.error;
+        } else {
+            if (decision.pending.projectId == activeProjectId &&
+                decision.pending.chatId == activeChatId) {
+                activeChatToolPolicy = chat.chat.toolPolicy;
+            }
+            const cardputer::ProjectDocumentResult project =
+                cardputer::loadProject(decision.pending.projectId);
+            const cardputer::ChatDocumentResult updatedChat =
+                cardputer::loadProjectChatMetadata(
+                    decision.pending.projectId, decision.pending.chatId);
+            if (!project.success || !updatedChat.success) {
+                warning = "Tool ran; saved permission could not be reloaded";
+            } else {
+                const cardputer::ToolRequestPlan updatedPlan =
+                    cardputer::resolveChatToolRequestPlan(
+                        settings, project.project, updatedChat.chat,
+                        devicePendingContext.intent, fileWorkspaceReady,
+                        fileWorkspaceReady &&
+                            currentSdStorageStatus.state ==
+                                cardputer::SdStorageState::Ready,
+                        currentSdStorageStatus.state ==
+                            cardputer::SdStorageState::Ready,
+                        cardputer::sshToolIsAvailable());
+                if (toolRequestPlanError(updatedPlan).isEmpty()) {
+                    continuationPlan = updatedPlan;
+                } else {
+                    warning = "Tool ran; continuing with the original bounded policy";
+                }
+            }
+        }
+    }
+    continuePendingToolDecision(
+        std::move(decision), continuationPlan, warning);
+}
+
+void denyPendingTool()
+{
+    PendingContinuationInputs inputs = loadPendingContinuationInputs();
+    if (!inputs.success) {
+        showPendingDecisionError(inputs.error);
+        return;
+    }
+    cardputer::PendingToolDecisionResult decision =
+        cardputer::denyPendingProjectToolCall(inputs.pendingId);
+    if (!decision.success) {
+        showPendingDecisionError(decision.error);
+        return;
+    }
+    if (!inputs.error.isEmpty()) {
+        std::string().swap(decision.pending.continuation.call.arguments);
+        clearPendingToolPreviewCache();
+        clearDevicePendingContext();
+        showPendingDecisionError(
+            "Tool denied; response was not continued: " + inputs.error);
+        return;
+    }
+    const cardputer::ToolRequestPlan continuationPlan = inputs.plan;
+    continuePendingToolDecision(
+        std::move(decision), continuationPlan, "");
+}
+
+void acknowledgeInterruptedPendingTool()
+{
+    cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success || !pending.found) {
+        showPendingDecisionError(
+            pending.success ? String("No pending confirmation") : pending.error);
+        return;
+    }
+    const String pendingId = pending.pending.pendingId;
+    const cardputer::PendingToolCallState pendingState = pending.pending.state;
+    std::string().swap(pending.pending.continuation.call.arguments);
+    const cardputer::OperationResult cleared = cardputer::clearPendingToolCall(
+        pendingId, pendingState);
+    if (!cleared.success) {
+        showPendingDecisionError(cleared.error);
+        return;
+    }
+    clearPendingToolPreviewCache();
+    const String acknowledged =
+        pendingState == cardputer::PendingToolCallState::ClaimedApprove
+            ? String("Interrupted effect acknowledged; it was not replayed")
+            : (pendingState == cardputer::PendingToolCallState::Denied
+                ? String("Interrupted denied response acknowledged")
+                : String("Interrupted request discarded without execution"));
+    clearDevicePendingContext();
+    if (pendingToolReturnScreen == Screen::Chat) {
+        currentScreen = Screen::Chat;
+        statusMessage = acknowledged;
+        render();
+    } else {
+        currentScreen = Screen::AiMenu;
+        menuStatus = acknowledged;
+        renderAiMenu();
+    }
+}
+
+void renderProjectToolPolicy()
+{
+    const cardputer::ProjectDocumentResult project =
+        cardputer::loadProject(selectedProjectId);
+    const std::vector<String> items = project.success
+        ? capabilityPolicyItems(project.project.toolPolicy)
+        : std::vector<String>{"Back"};
+    cardputer::showSelectionList(
+        "PROJECT CAPABILITIES", items, capabilityPolicyIndex,
+        !project.success ? project.error :
+            (menuStatus.isEmpty() ? String("ENTER change  ESC project") : menuStatus));
 }
 
 void runUiSearchEndToEndTest()
@@ -1741,7 +2893,8 @@ void runUiSearchEndToEndTest()
     const String originalChatId = activeChatId;
     const Screen originalScreen = currentScreen;
     const cardputer::ChatDocumentResult created = cardputer::createProjectChat(
-        activeProjectId, "E2E search " + String(millis()));
+        activeProjectId, "E2E search " + String(millis()),
+        settings.newChatToolPolicy);
     if (!created.success) {
         Serial.println("E2ETEST result=failed stage=create_chat");
         return;
@@ -1957,10 +3110,17 @@ void setup()
     crashJournalInitializationError = crashJournalError;
     Serial.printf("CRASH_JOURNAL result=%s\n", crashJournalReady ? "ready" : "failed");
 
+    const cardputer::OperationResult toolActivityResult = fileWorkspaceReady
+        ? cardputer::initializeToolActivityJournal()
+        : cardputer::OperationResult{false, fileWorkspaceError};
+    Serial.printf("TOOL_ACTIVITY result=%s\n",
+                  toolActivityResult.success ? "ready" : "failed");
+
     const cardputer::OperationResult sshStorageResult = fileWorkspaceReady
         ? cardputer::initializeSshStorage()
         : cardputer::OperationResult{false, fileWorkspaceError};
     sshStorageReady = sshStorageResult.success;
+    cachedSshToolAvailable = sshStorageReady && cardputer::sshToolIsAvailable();
     sshStorageError = sshStorageResult.success ? String() : sshStorageResult.error;
     sshStorageInitialized = sshStorageResult.success;
     sshStorageInitializationError = sshStorageError;
@@ -1973,8 +3133,19 @@ void setup()
         : !fileWorkspaceReady
         ? fileWorkspaceError
         : (!crashJournalReady ? crashJournalError
-                              : (sshStorageReady ? String() : sshStorageError));
+                              : (!toolActivityResult.success
+                                     ? toolActivityResult.error
+                                     : (sshStorageReady ? String() : sshStorageError)));
     statusMessage = "";
+    cardputer::PendingToolCallResult startupPending =
+        cardputer::loadPendingToolCall();
+    if (menuStatus.isEmpty() && startupPending.success && startupPending.found) {
+        menuStatus = startupPending.pending.state ==
+                cardputer::PendingToolCallState::ClaimedApprove
+            ? String("Interrupted tool effect needs acknowledgement")
+            : String("Interrupted tool request was not resumed");
+    }
+    std::string().swap(startupPending.pending.continuation.call.arguments);
     startupInProgress = false;
     currentScreen = Screen::MainCarousel;
     renderCarousel();

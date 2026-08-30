@@ -7,6 +7,7 @@
 #include "sd_storage.h"
 #include "storage.h"
 #include "text_utils.h"
+#include "tool_policy_codec.h"
 
 #include <ArduinoJson.h>
 #include <SD.h>
@@ -81,6 +82,8 @@ ProjectChatAppendPlanResult planProjectChatAppend(
 
 namespace {
 
+constexpr std::size_t kMaximumProjectChatModelBytes = 240;
+
 String projectChatMetadataPath(const String& projectId, const String& chatId)
 {
     return projectChatDirectoryPath(projectId, chatId) + "/chat.json";
@@ -111,12 +114,22 @@ std::size_t unsignedDecimalBytes(std::uint64_t value)
     return bytes;
 }
 
-std::uint64_t measureUpdatedProjectChatMetadata(
+StorageSizeResult measureUpdatedProjectChatMetadata(
     const ChatDocument& chat,
     std::uint32_t messageCount,
     std::uint64_t updatedAt,
     std::uint32_t revision)
 {
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            0,
+            String("Project chat tool policy cannot be measured: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
+    }
     JsonDocument document;
     document["version"] = kProjectChatFormatVersion;
     document["project_id"] = chat.projectId;
@@ -129,10 +142,12 @@ std::uint64_t measureUpdatedProjectChatMetadata(
     document["revision"] = revision;
     document["instructions"] = chat.instructions.c_str();
     document["draft"] = chat.draft.c_str();
-    document["ssh_tools_enabled"] = chat.sshToolsEnabled;
+    document["tool_policy"] = policy.encoded.value.data();
+    document["ssh_tools_enabled"] = legacySshToolsEnabled(chat.toolPolicy);
     document["context_summary"] = chat.contextSummary.c_str();
     document["summarized_message_count"] = chat.summarizedMessageCount;
-    return measureJson(document);
+    document["model"] = chat.model;
+    return {true, measureJson(document), ""};
 }
 
 String serializeUpdatedChatSummary(const ChatSummary& source,
@@ -384,6 +399,9 @@ struct ProjectChatMetadataStateResult {
 
 OperationResult validateHistoryFile(const String& path, std::uint32_t expectedMessages);
 OperationResult recoverPendingAppend(const String& projectId, const String& chatId);
+ChatDocumentResult loadProjectChatMetadataDocument(
+    const String& projectId,
+    const String& chatId);
 
 String generateProjectChatId()
 {
@@ -410,8 +428,21 @@ OperationResult validateProjectChatMetadataValues(const ChatDocument& chat)
         !isValidUtf8(chat.contextSummary)) {
         return {false, "Project chat text metadata exceeds its limit or is invalid UTF-8"};
     }
+    if (chat.model.length() > kMaximumProjectChatModelBytes ||
+        !isValidUtf8(chat.model.c_str())) {
+        return {false, "Project chat model must be valid UTF-8 up to 240 bytes"};
+    }
     if (chat.summarizedMessageCount > chat.summary.messageCount) {
         return {false, "Project chat summary covers more messages than the chat contains"};
+    }
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Project chat tool policy is invalid: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
     }
     return {true, ""};
 }
@@ -741,11 +772,14 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
     filter["pinned"] = true;
     filter["archived"] = true;
     filter["revision"] = true;
+    filter["tool_policy"] = true;
     filter["ssh_tools_enabled"] = true;
     filter["summarized_message_count"] = true;
+    filter["model"] = true;
     JsonDocument document;
     const DeserializationError error = deserializeJson(
         document, file, DeserializationOption::Filter(filter));
+    const JsonVariantConst model = document.as<JsonObjectConst>()["model"];
     if (error || !document["version"].is<std::uint32_t>() ||
         document["version"].as<std::uint32_t>() != kProjectChatFormatVersion ||
         !document["project_id"].is<const char*>() || !document["id"].is<const char*>() ||
@@ -758,6 +792,9 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
         !document["summarized_message_count"].is<std::uint32_t>()) {
         return {false, {}, "Project chat metadata is missing required typed fields"};
     }
+    if (!model.isUnbound() && !model.is<const char*>()) {
+        return {false, {}, "Project chat model must be a string when present"};
+    }
     ChatDocument chat;
     chat.projectId = document["project_id"].as<const char*>();
     chat.summary.id = document["id"].as<const char*>();
@@ -767,7 +804,39 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
     chat.summary.pinned = document["pinned"].as<bool>();
     chat.summary.archived = document["archived"].as<bool>();
     chat.summary.revision = document["revision"].as<std::uint32_t>();
-    chat.sshToolsEnabled = document["ssh_tools_enabled"].as<bool>();
+    if (!model.isUnbound()) {
+        chat.model = model.as<const char*>();
+    }
+    const bool sshToolsEnabled = document["ssh_tools_enabled"].as<bool>();
+    const JsonVariantConst canonicalPolicy =
+        document.as<JsonObjectConst>()["tool_policy"];
+    if (canonicalPolicy.isUnbound()) {
+        chat.toolPolicy = migrateLegacyChatToolPermissionPolicy(sshToolsEnabled);
+    } else {
+        if (!canonicalPolicy.is<const char*>()) {
+            return {false, {}, "Project chat tool_policy must be a string"};
+        }
+        const char* encodedPolicy = canonicalPolicy.as<const char*>();
+        const ScopedToolPermissionPolicyDecodeResult decodedPolicy =
+            decodeScopedToolPermissionPolicy(
+                encodedPolicy, std::strlen(encodedPolicy));
+        if (decodedPolicy.error != ToolPolicyCodecError::None) {
+            return {
+                false,
+                {},
+                String("Project chat tool_policy is invalid: ") +
+                    toolPolicyCodecErrorText(decodedPolicy.error),
+            };
+        }
+        if (legacySshToolsEnabled(decodedPolicy.policy) != sshToolsEnabled) {
+            return {
+                false,
+                {},
+                "Project chat tool_policy disagrees with ssh_tools_enabled compatibility metadata",
+            };
+        }
+        chat.toolPolicy = decodedPolicy.policy;
+    }
     chat.summarizedMessageCount = document["summarized_message_count"].as<std::uint32_t>();
     JsonStringFieldResult instructions = readJsonStringField(
         path, "instructions", kMaximumProjectChatInstructionsBytes);
@@ -781,6 +850,10 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
         path, "context_summary", kMaximumProjectChatSummaryBytes);
     if (!contextSummary.success) return {false, {}, contextSummary.error};
     chat.contextSummary = std::move(contextSummary.value);
+    if (chat.model.length() > kMaximumProjectChatModelBytes ||
+        !isValidUtf8(chat.model.c_str())) {
+        return {false, {}, "Project chat model must be valid UTF-8 up to 240 bytes"};
+    }
     if (chat.projectId != projectId || chat.summary.id != chatId ||
         !isValidChatId(chat.projectId.c_str()) || !isValidChatId(chat.summary.id.c_str()) ||
         chat.summary.title.isEmpty() || !isValidUtf8(chat.summary.title.c_str()) ||
@@ -795,7 +868,12 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
 ProjectChatMetadataStateResult readProjectChatMetadataState(
     const String& projectId, const String& chatId)
 {
-    File metadata = SD.open(projectChatMetadataPath(projectId, chatId), FILE_READ);
+    const String metadataPath = projectChatMetadataPath(projectId, chatId);
+    const OperationResult recovered = recoverAtomicSdFile(metadataPath);
+    if (!recovered.success) {
+        return {false, 0, 0, recovered.error};
+    }
+    File metadata = SD.open(metadataPath, FILE_READ);
     if (!metadata) {
         return {false, 0, 0, "Project chat metadata does not exist"};
     }
@@ -838,6 +916,15 @@ OperationResult writeProjectChatMetadataWithRevision(
     if (!validation.success) {
         return validation;
     }
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Project chat tool policy cannot be stored: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
+    }
     JsonDocument document;
     document["version"] = kProjectChatFormatVersion;
     document["project_id"] = chat.projectId;
@@ -850,9 +937,11 @@ OperationResult writeProjectChatMetadataWithRevision(
     document["revision"] = revision;
     document["instructions"] = chat.instructions.c_str();
     document["draft"] = chat.draft.c_str();
-    document["ssh_tools_enabled"] = chat.sshToolsEnabled;
+    document["tool_policy"] = policy.encoded.value.data();
+    document["ssh_tools_enabled"] = legacySshToolsEnabled(chat.toolPolicy);
     document["context_summary"] = chat.contextSummary.c_str();
     document["summarized_message_count"] = chat.summarizedMessageCount;
+    document["model"] = chat.model;
     return writeAtomicJsonSdFile(
         projectChatMetadataPath(chat.projectId, chat.summary.id), document);
 }
@@ -909,12 +998,17 @@ OperationResult recoverPendingAppend(const String& projectId, const String& chat
     if (newCount <= oldCount) {
         return {false, "Pending chat append marker contains an invalid message range"};
     }
-    File metadataFile = SD.open(projectChatMetadataPath(projectId, chatId), FILE_READ);
+    const String metadataPath = projectChatMetadataPath(projectId, chatId);
+    const OperationResult recovered = recoverAtomicSdFile(metadataPath);
+    if (!recovered.success) {
+        return recovered;
+    }
+    File metadataFile = SD.open(metadataPath, FILE_READ);
     if (!metadataFile) {
         return {false, "Pending chat append cannot recover because metadata is missing"};
     }
     ChatDocumentResult metadata = parseProjectChatMetadata(
-        metadataFile, projectId, chatId, projectChatMetadataPath(projectId, chatId));
+        metadataFile, projectId, chatId, metadataPath);
     metadataFile.close();
     if (!metadata.success) {
         return {false, "Pending chat append metadata is invalid: " + metadata.error};
@@ -964,11 +1058,24 @@ OperationResult recoverPendingAppend(const String& projectId, const String& chat
 
 }  // namespace
 
-ChatDocumentResult createProjectChat(const String& projectId, const String& title)
+ChatDocumentResult createProjectChat(
+    const String& projectId,
+    const String& title,
+    const ScopedToolPermissionPolicy& toolPolicy)
 {
     if (!isValidChatId(projectId.c_str()) || title.isEmpty() ||
         !isValidUtf8(title.c_str())) {
         return {false, {}, "Cannot create a project chat with invalid metadata"};
+    }
+    const ToolPolicyEncodeResult encodedPolicy =
+        encodeScopedToolPermissionPolicy(toolPolicy);
+    if (encodedPolicy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            {},
+            String("Cannot create a project chat with an invalid tool policy: ") +
+                toolPolicyCodecErrorText(encodedPolicy.error),
+        };
     }
     const ProjectDocumentResult project = loadProject(projectId);
     if (!project.success) {
@@ -993,6 +1100,7 @@ ChatDocumentResult createProjectChat(const String& projectId, const String& titl
     ChatDocument chat;
     chat.projectId = projectId;
     chat.summary = {chatId, title, 0, 0, false, false, 0, 1};
+    chat.toolPolicy = toolPolicy;
     result = writeEmptyAtomicSdFile(projectChatHistoryPath(projectId, chatId));
     if (result.success) {
         result = writeEmptyAtomicSdFile(projectChatTailPath(projectId, chatId));
@@ -1122,8 +1230,12 @@ OperationResult appendProjectChatMessages(const String& projectId,
     const std::uint32_t newMessageCount =
         current.chat.summary.messageCount + appendedMessages;
     const std::uint32_t newChatRevision = current.chat.summary.revision + 1U;
-    const std::uint64_t stagedChatMetadataBytes = measureUpdatedProjectChatMetadata(
+    const StorageSizeResult stagedChatMetadata = measureUpdatedProjectChatMetadata(
         current.chat, newMessageCount, updatedAt, newChatRevision);
+    if (!stagedChatMetadata.success) {
+        return {false, stagedChatMetadata.error};
+    }
+    const std::uint64_t stagedChatMetadataBytes = stagedChatMetadata.bytes;
     const String chatSummaryLine = serializeUpdatedChatSummary(
         current.chat.summary, newMessageCount, updatedAt, newChatRevision);
     const StorageIndexMutationPlanResult chatIndexPlan = planJsonlSdIndexMutation(
@@ -1737,16 +1849,20 @@ ChatDocumentResult loadProjectChatMetadataDocument(const String& projectId,
     if (!isValidChatId(projectId.c_str()) || !isValidChatId(chatId.c_str())) {
         return {false, {}, "Cannot load project chat with an invalid id"};
     }
-    const OperationResult recovered = recoverPendingAppend(projectId, chatId);
+    const String metadataPath = projectChatMetadataPath(projectId, chatId);
+    OperationResult recovered = recoverAtomicSdFile(metadataPath);
+    if (recovered.success) {
+        recovered = recoverPendingAppend(projectId, chatId);
+    }
     if (!recovered.success) {
         return {false, {}, recovered.error};
     }
-    File metadata = SD.open(projectChatMetadataPath(projectId, chatId), FILE_READ);
+    File metadata = SD.open(metadataPath, FILE_READ);
     if (!metadata) {
         return {false, {}, "Project chat metadata does not exist"};
     }
     ChatDocumentResult result = parseProjectChatMetadata(
-        metadata, projectId, chatId, projectChatMetadataPath(projectId, chatId));
+        metadata, projectId, chatId, metadataPath);
     metadata.close();
     if (!result.success) {
         return result;
@@ -2026,6 +2142,15 @@ OperationResult writeProjectChatBundleRecords(File& output,
     if (!loaded.success) {
         return {false, loaded.error};
     }
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(loaded.chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Project chat tool policy cannot be exported: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
+    }
     JsonDocument header;
     header["record"] = "chat";
     header["id"] = loaded.chat.summary.id;
@@ -2036,9 +2161,11 @@ OperationResult writeProjectChatBundleRecords(File& output,
     header["archived"] = loaded.chat.summary.archived;
     header["instructions"] = loaded.chat.instructions;
     header["draft"] = loaded.chat.draft;
-    header["ssh_tools_enabled"] = loaded.chat.sshToolsEnabled;
+    header["tool_policy"] = policy.encoded.value.data();
+    header["ssh_tools_enabled"] = legacySshToolsEnabled(loaded.chat.toolPolicy);
     header["context_summary"] = loaded.chat.contextSummary;
     header["summarized_message_count"] = loaded.chat.summarizedMessageCount;
+    header["model"] = loaded.chat.model;
     const std::size_t headerBytes = measureJson(header);
     if (serializeJson(header, output) != headerBytes || output.write('\n') != 1) {
         return {false, "Failed to write project bundle chat header"};
@@ -2086,6 +2213,16 @@ StorageSizeResult measureProjectChatBundleRecords(const String& projectId,
     if (!loaded.success) {
         return {false, 0, loaded.error};
     }
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(loaded.chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            0,
+            String("Project chat tool policy cannot be measured for export: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
+    }
     JsonDocument header;
     header["record"] = "chat";
     header["id"] = loaded.chat.summary.id;
@@ -2096,9 +2233,11 @@ StorageSizeResult measureProjectChatBundleRecords(const String& projectId,
     header["archived"] = loaded.chat.summary.archived;
     header["instructions"] = loaded.chat.instructions;
     header["draft"] = loaded.chat.draft;
-    header["ssh_tools_enabled"] = loaded.chat.sshToolsEnabled;
+    header["tool_policy"] = policy.encoded.value.data();
+    header["ssh_tools_enabled"] = legacySshToolsEnabled(loaded.chat.toolPolicy);
     header["context_summary"] = loaded.chat.contextSummary;
     header["summarized_message_count"] = loaded.chat.summarizedMessageCount;
+    header["model"] = loaded.chat.model;
     std::uint64_t bytes = measureJson(header) + 1;
     File history = SD.open(projectChatHistoryPath(projectId, chatId), FILE_READ);
     if (!history) {
@@ -2145,10 +2284,23 @@ OperationResult importProjectChatBundleRecords(File& input,
         metadata.instructions.size() > kMaximumProjectChatInstructionsBytes ||
         metadata.draft.size() > kMaximumProjectChatDraftBytes ||
         metadata.contextSummary.size() > kMaximumProjectChatSummaryBytes ||
+        metadata.model.length() > kMaximumProjectChatModelBytes ||
         !isValidUtf8(metadata.instructions) || !isValidUtf8(metadata.draft) ||
         !isValidUtf8(metadata.contextSummary) ||
+        !isValidUtf8(metadata.model.c_str()) ||
         metadata.summarizedMessageCount > messageCount) {
         return {false, "Project bundle chat import arguments are invalid"};
+    }
+    const ScopedToolPermissionPolicy importedToolPolicy =
+        setLegacySshToolsEnabled(metadata.toolPolicy, false);
+    const ToolPolicyEncodeResult encodedPolicy =
+        encodeScopedToolPermissionPolicy(importedToolPolicy);
+    if (encodedPolicy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Project bundle chat tool policy is invalid: ") +
+                toolPolicyCodecErrorText(encodedPolicy.error),
+        };
     }
     const String chatDirectory = projectChatDirectoryPath(
         destinationProjectId, metadata.summary.id);
@@ -2257,6 +2409,7 @@ OperationResult importProjectChatBundleRecords(File& input,
     imported.projectId = destinationProjectId;
     imported.messages.clear();
     imported.summary.revision = 1;
+    imported.toolPolicy = importedToolPolicy;
     if (result.success) {
         result = rebuildTailFile(destinationProjectId, metadata.summary.id, messageCount);
     }

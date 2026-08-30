@@ -2,30 +2,52 @@
 
 #include "api_client.h"
 #include "app_types.h"
+#include "tool_catalog.h"
 
 #include <string>
 
 namespace cardputer {
 
-struct ChatToolPolicy {
-    bool workspaceEnabled;
-    bool webSearchEnabled;
-    bool sshEnabled;
+struct PendingToolDecisionResult {
+    bool success;
+    PendingToolCall pending;
+    ToolExecutionResult toolResult;
+    String error;
 };
 
-ChatToolPolicy resolveChatToolPolicy(const Settings& settings,
-                                     const std::string& prompt,
-                                     bool chatAllowsSsh,
-                                     bool sshAvailable);
-bool chatToolPolicyIsEnabled(const ChatToolPolicy& policy);
+ToolPolicyResolutionResult resolveChatToolPermissions(
+    const Settings& settings,
+    const ProjectDocument& project,
+    const ChatDocument& chat,
+    const ToolMessageIntent& intent,
+    bool filesReadable,
+    bool filesWritable,
+    bool webStorageWritable,
+    bool sshAvailable);
+ToolRequestPlan resolveChatToolRequestPlan(
+    const Settings& settings,
+    const ProjectDocument& project,
+    const ChatDocument& chat,
+    const ToolMessageIntent& intent,
+    bool filesReadable,
+    bool filesWritable,
+    bool webStorageWritable,
+    bool sshAvailable);
 ToolExecutionResult routeToolCall(const Settings& settings,
-                                  const ChatToolPolicy& policy,
+                                  const ToolRequestPlan& plan,
                                   const ToolCall& call,
                                   const CancelCallback& isCancelled);
 ToolExecutionResult routeProjectToolCall(const Settings& settings,
-                                         const ChatToolPolicy& policy,
+                                         const ToolRequestPlan& plan,
                                          const String& projectId,
                                          const ToolCall& call,
                                          const CancelCallback& isCancelled);
+PendingToolDecisionResult approvePendingProjectToolCall(
+    const Settings& settings,
+    const ToolRequestPlan& currentPlan,
+    const String& pendingId,
+    const CancelCallback& isCancelled);
+PendingToolDecisionResult denyPendingProjectToolCall(
+    const String& pendingId);
 
 }  // namespace cardputer

@@ -45,6 +45,10 @@ jobs:
             firmware/CardputerAssistant/src/audio_utils.cpp \
             firmware/CardputerAssistant/src/document_reader.cpp \
             firmware/CardputerAssistant/src/instruction_policy.cpp \
+            firmware/CardputerAssistant/src/pending_tool_preview.cpp \
+            firmware/CardputerAssistant/src/tool_catalog.cpp \
+            firmware/CardputerAssistant/src/tool_policy.cpp \
+            firmware/CardputerAssistant/src/tool_policy_codec.cpp \
             firmware/CardputerAssistant/src/offline_tools.cpp \
             firmware/CardputerAssistant/src/ssh_terminal.cpp \
             -o build/host-tests

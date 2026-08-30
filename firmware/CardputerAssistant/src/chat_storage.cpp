@@ -3,6 +3,7 @@
 #include "file_workspace.h"
 #include "sd_storage.h"
 #include "text_utils.h"
+#include "tool_policy_codec.h"
 
 #include <ArduinoJson.h>
 #include <SD.h>
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <string>
 
@@ -24,6 +26,12 @@ constexpr std::size_t kPortableChatHeaderLineBytes =
     6 * (120 + kMaximumChatInstructionsBytes) + 512;
 constexpr std::size_t kPortableChatMessageLineBytes =
     6 * (9 + kMaximumStoredHistoryBytes) + 512;
+
+struct ChatToolPolicyParseResult {
+    bool success;
+    ScopedToolPermissionPolicy policy;
+    String error;
+};
 
 String chatPath(const String& id, const char* extension)
 {
@@ -53,6 +61,50 @@ OperationResult validateSummary(const ChatSummary& summary)
         return {false, "Chat message count exceeds the 64-message context limit"};
     }
     return {true, ""};
+}
+
+ChatToolPolicyParseResult parseChatToolPolicy(const JsonObjectConst& object)
+{
+    const JsonVariantConst canonical = object["tool_policy"];
+    const JsonVariantConst compatibility = object["ssh_tools_enabled"];
+    const bool hasCanonical = !canonical.isUnbound();
+    const bool hasCompatibility = !compatibility.isUnbound();
+
+    if (hasCanonical) {
+        if (!canonical.is<const char*>()) {
+            return {false, {}, "Chat tool_policy must be a string"};
+        }
+        const char* encoded = canonical.as<const char*>();
+        const ScopedToolPermissionPolicyDecodeResult decoded =
+            decodeScopedToolPermissionPolicy(encoded, std::strlen(encoded));
+        if (decoded.error != ToolPolicyCodecError::None) {
+            return {
+                false,
+                {},
+                String("Chat tool_policy is invalid: ") +
+                    toolPolicyCodecErrorText(decoded.error),
+            };
+        }
+        if (!hasCompatibility || !compatibility.is<bool>()) {
+            return {false, {},
+                    "Canonical chat tool_policy requires typed ssh_tools_enabled compatibility metadata"};
+        }
+        if (compatibility.as<bool>() != legacySshToolsEnabled(decoded.policy)) {
+            return {false, {},
+                    "Chat tool_policy disagrees with ssh_tools_enabled compatibility metadata"};
+        }
+        return {true, decoded.policy, ""};
+    }
+
+    if (hasCompatibility && !compatibility.is<bool>()) {
+        return {false, {}, "Chat ssh_tools_enabled compatibility metadata must be boolean"};
+    }
+    return {
+        true,
+        migrateLegacyChatToolPermissionPolicy(
+            hasCompatibility && compatibility.as<bool>()),
+        "",
+    };
 }
 
 OperationResult validateDocument(const ChatDocument& chat)
@@ -85,6 +137,15 @@ OperationResult validateDocument(const ChatDocument& chat)
     if (chat.draft.size() > kMaximumChatDraftBytes || !isValidUtf8(chat.draft)) {
         return {false, "Chat draft must be valid UTF-8 up to 1200 bytes"};
     }
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Chat tool policy cannot be stored: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
+    }
     return {true, ""};
 }
 
@@ -116,6 +177,11 @@ ChatDocumentResult parseChatFile(File& file)
     if (version >= 4 && !document["ssh_tools_enabled"].is<bool>()) {
         return {false, {}, "Chat JSON is missing version-4 SSH permission metadata"};
     }
+    const ChatToolPolicyParseResult policy =
+        parseChatToolPolicy(document.as<JsonObjectConst>());
+    if (!policy.success) {
+        return {false, {}, policy.error};
+    }
 
     ChatDocument result;
     result.summary.id = document["id"].as<const char*>();
@@ -127,8 +193,7 @@ ChatDocumentResult parseChatFile(File& file)
     result.summary.archived = version >= 3 ? document["archived"].as<bool>() : false;
     result.summary.archivedMessageCount = version >= 3
         ? document["archived_message_count"].as<std::uint32_t>() : 0;
-    result.sshToolsEnabled = version >= 4
-        ? document["ssh_tools_enabled"].as<bool>() : false;
+    result.toolPolicy = policy.policy;
     const JsonArrayConst messages = document["messages"].as<JsonArrayConst>();
     if (messages.size() > kMaximumStoredMessages) {
         return {false, {}, "Chat JSON contains too many messages"};
@@ -164,6 +229,15 @@ OperationResult removeIfPresent(const String& path)
 
 OperationResult writeChatFile(const ChatDocument& chat, const String& path)
 {
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Chat tool policy cannot be stored: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
+    }
     JsonDocument document;
     document["version"] = kFormatVersion;
     document["id"] = chat.summary.id;
@@ -174,7 +248,8 @@ OperationResult writeChatFile(const ChatDocument& chat, const String& path)
     document["pinned"] = chat.summary.pinned;
     document["archived"] = chat.summary.archived;
     document["archived_message_count"] = chat.summary.archivedMessageCount;
-    document["ssh_tools_enabled"] = chat.sshToolsEnabled;
+    document["tool_policy"] = policy.encoded.value.data();
+    document["ssh_tools_enabled"] = legacySshToolsEnabled(chat.toolPolicy);
     JsonArray messages = document["messages"].to<JsonArray>();
     for (const auto& message : chat.messages) {
         JsonObject item = messages.add<JsonObject>();
@@ -410,7 +485,12 @@ ChatDocumentResult loadChat(const String& id)
     if (!isValidChatId(id.c_str())) {
         return {false, {}, "Cannot load chat: invalid chat id"};
     }
-    File file = SD.open(chatPath(id, ".json"), FILE_READ);
+    const String path = chatPath(id, ".json");
+    const OperationResult recovered = recoverAtomicSdFile(path);
+    if (!recovered.success) {
+        return {false, {}, recovered.error};
+    }
+    File file = SD.open(path, FILE_READ);
     if (!file) {
         return {false, {}, "Chat file does not exist for id " + id};
     }
@@ -648,6 +728,15 @@ OperationResult exportChatBundleToWorkspace(const String& id, const String& file
     if (!loaded.success) {
         return {false, loaded.error};
     }
+    const ToolPolicyEncodeResult policy =
+        encodeScopedToolPermissionPolicy(loaded.chat.toolPolicy);
+    if (policy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Chat tool policy cannot be exported: ") +
+                toolPolicyCodecErrorText(policy.error),
+        };
+    }
     const OperationResult created = createWorkspaceFile(filename);
     if (!created.success) {
         return created;
@@ -683,6 +772,8 @@ OperationResult exportChatBundleToWorkspace(const String& id, const String& file
     header["title"] = loaded.chat.summary.title;
     header["instructions"] = loaded.chat.instructions;
     header["archived_message_count"] = loaded.chat.summary.archivedMessageCount;
+    header["tool_policy"] = policy.encoded.value.data();
+    header["ssh_tools_enabled"] = legacySshToolsEnabled(loaded.chat.toolPolicy);
     OperationResult result = writeJsonLine(header);
     File archive;
     if (result.success) {
@@ -758,6 +849,12 @@ ChatDocumentResult importChatBundleFromWorkspace(const String& filename)
         input.close();
         return {false, {}, "Portable chat bundle metadata exceeds the supported limits"};
     }
+    const ChatToolPolicyParseResult policy =
+        parseChatToolPolicy(header.as<JsonObjectConst>());
+    if (!policy.success) {
+        input.close();
+        return {false, {}, policy.error};
+    }
 
     const ChatDocumentResult created = createChat(title);
     if (!created.success) {
@@ -766,6 +863,7 @@ ChatDocumentResult importChatBundleFromWorkspace(const String& filename)
     }
     ChatDocument imported = created.chat;
     imported.instructions = instructions;
+    imported.toolPolicy = setLegacySshToolsEnabled(policy.policy, false);
     std::size_t activeBytes = 0;
     std::uint32_t messageIndex = 0;
     OperationResult result = {true, ""};
@@ -848,7 +946,7 @@ ChatDocumentResult duplicateChat(const String& id)
     duplicate.messages = source.chat.messages;
     duplicate.instructions = source.chat.instructions;
     duplicate.draft = source.chat.draft;
-    duplicate.sshToolsEnabled = source.chat.sshToolsEnabled;
+    duplicate.toolPolicy = source.chat.toolPolicy;
     const OperationResult saved = saveChat(duplicate);
     if (!saved.success) {
         deleteChat(duplicate.summary.id);

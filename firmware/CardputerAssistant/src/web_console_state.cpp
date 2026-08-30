@@ -13,6 +13,46 @@ namespace cardputer {
 namespace {
 
 constexpr std::size_t kMaximumStateHistoryBytes = 12000;
+constexpr const char* kCapabilityIds[kToolCapabilityCount] = {
+    "ws", "wf", "fr", "fw", "sr", "sm", "sf", "py",
+};
+
+const char* scopedPermissionName(ScopedToolPermission permission)
+{
+    switch (permission) {
+        case ScopedToolPermission::Inherit: return "inherit";
+        case ScopedToolPermission::Off: return "off";
+        case ScopedToolPermission::Ask: return "ask";
+        case ScopedToolPermission::Allow: return "allow";
+        case ScopedToolPermission::Count: break;
+    }
+    return nullptr;
+}
+
+const char* permissionDecisionName(ToolPermissionDecision decision)
+{
+    switch (decision) {
+        case ToolPermissionDecision::Deny: return "deny";
+        case ToolPermissionDecision::Ask: return "ask";
+        case ToolPermissionDecision::Allow: return "allow";
+        case ToolPermissionDecision::Unavailable: return "unavailable";
+    }
+    return nullptr;
+}
+
+const char* permissionSourceName(ToolPermissionSource source)
+{
+    switch (source) {
+        case ToolPermissionSource::None: return "built_in";
+        case ToolPermissionSource::BuiltIn: return "built_in";
+        case ToolPermissionSource::Global: return "global";
+        case ToolPermissionSource::Project: return "project";
+        case ToolPermissionSource::Chat: return "chat";
+        case ToolPermissionSource::Message: return "message";
+        case ToolPermissionSource::Availability: return "availability";
+    }
+    return nullptr;
+}
 
 void appendChatMessages(const ChatDocument& chat, JsonDocument& document)
 {
@@ -86,12 +126,32 @@ void buildWebConsoleChatsState(const std::vector<ChatSummary>& chats,
     }
 }
 
-void buildWebConsoleChatState(const Settings& settings,
-                              const ChatDocument& activeChat,
-                              std::size_t maximumContextBytes,
-                              std::uint32_t revision,
-                              JsonDocument& document)
+OperationResult buildWebConsoleChatState(
+    const Settings& settings,
+    const ProjectDocument& activeProject,
+    const ChatDocument& activeChat,
+    const ToolPolicyResolutionResult& toolPermissions,
+    std::size_t maximumContextBytes,
+    std::uint32_t revision,
+    JsonDocument& document)
 {
+    const ToolPolicyEncodeResult projectPolicy =
+        encodeScopedToolPermissionPolicy(activeProject.toolPolicy);
+    const ToolPolicyEncodeResult chatPolicy =
+        encodeScopedToolPermissionPolicy(activeChat.toolPolicy);
+    if (projectPolicy.error != ToolPolicyCodecError::None ||
+        chatPolicy.error != ToolPolicyCodecError::None ||
+        toolPermissions.error != ToolPolicyContractError::None) {
+        return {false, "Tool permission policy could not be encoded"};
+    }
+    for (std::size_t index = 0; index < kToolCapabilityCount; ++index) {
+        if (scopedPermissionName(activeProject.toolPolicy[index]) == nullptr ||
+            scopedPermissionName(activeChat.toolPolicy[index]) == nullptr ||
+            permissionDecisionName(toolPermissions.permissions[index].decision) == nullptr ||
+            permissionSourceName(toolPermissions.permissions[index].source) == nullptr) {
+            return {false, "Tool permission state contains an invalid value"};
+        }
+    }
     document["ok"] = true;
     document["chat_revision"] = revision;
     document["model"] = settings.model;
@@ -106,8 +166,30 @@ void buildWebConsoleChatState(const Settings& settings,
     document["maximum_context_messages"] = 0;
     document["maximum_context_bytes"] = maximumContextBytes;
     document["instructions"] = activeChat.instructions;
-    document["ssh_tools_enabled"] = activeChat.sshToolsEnabled;
+    document["project_tool_policy"] = JsonString(
+        projectPolicy.encoded.value.data(), kEncodedToolPolicyLength,
+        JsonString::Copied);
+    document["chat_tool_policy"] = JsonString(
+        chatPolicy.encoded.value.data(), kEncodedToolPolicyLength,
+        JsonString::Copied);
+    document["chat_model"] = activeChat.model;
+    document["ssh_tools_enabled"] = legacySshToolsEnabled(
+        activeChat.toolPolicy);
+    JsonArray capabilities = document["capabilities"].to<JsonArray>();
+    for (std::size_t index = 0; index < kToolCapabilityCount; ++index) {
+        JsonObject capability = capabilities.add<JsonObject>();
+        capability["id"] = kCapabilityIds[index];
+        capability["raw_project"] = scopedPermissionName(
+            activeProject.toolPolicy[index]);
+        capability["raw_chat"] = scopedPermissionName(
+            activeChat.toolPolicy[index]);
+        capability["effective"] = permissionDecisionName(
+            toolPermissions.permissions[index].decision);
+        capability["source"] = permissionSourceName(
+            toolPermissions.permissions[index].source);
+    }
     appendChatMessages(activeChat, document);
+    return {true, ""};
 }
 
 void buildWebConsoleFilesState(const std::vector<WorkspaceFile>& files,
@@ -163,17 +245,32 @@ void buildWebConsoleSshState(const std::vector<SshProfile>& profiles,
     document["ssh_configured"] = sshProfileIsComplete(profile);
 }
 
-void buildWebConsoleSettingsState(const Settings& settings,
-                                  const WebConsoleRuntimeState& runtime,
-                                  std::uint32_t revision,
-                                  JsonDocument& document)
+OperationResult buildWebConsoleSettingsState(
+    const Settings& settings,
+    const WebConsoleRuntimeState& runtime,
+    std::uint32_t revision,
+    JsonDocument& document)
 {
+    const ToolPolicyEncodeResult masterPolicy =
+        encodeToolPermissionPolicy(settings.masterToolPolicy);
+    const ToolPolicyEncodeResult newChatPolicy =
+        encodeScopedToolPermissionPolicy(settings.newChatToolPolicy);
+    if (masterPolicy.error != ToolPolicyCodecError::None ||
+        newChatPolicy.error != ToolPolicyCodecError::None) {
+        return {false, "Tool permission policy could not be encoded"};
+    }
     document["ok"] = true;
     document["settings_revision"] = revision;
     document["firmware_version"] = runtime.firmwareVersion;
     document["wifi_ssid"] = settings.wifiSsid;
     document["model"] = settings.model;
     document["global_instructions"] = settings.globalInstructions;
+    document["master_tool_policy"] = JsonString(
+        masterPolicy.encoded.value.data(), kEncodedToolPolicyLength,
+        JsonString::Copied);
+    document["new_chat_tool_policy"] = JsonString(
+        newChatPolicy.encoded.value.data(), kEncodedToolPolicyLength,
+        JsonString::Copied);
     document["project_chat_history_quota_bytes"] =
         settings.projectChatHistoryQuotaBytes;
     document["api_base_url"] = settings.apiBaseUrl;
@@ -198,6 +295,7 @@ void buildWebConsoleSettingsState(const Settings& settings,
     document["python_image_ready"] = python.pythonImageReady;
     document["python_error"] = python.error;
     document["python_runtime_error"] = python.lastRuntimeError;
+    return {true, ""};
 }
 
 }  // namespace cardputer

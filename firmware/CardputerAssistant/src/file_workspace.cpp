@@ -17,7 +17,7 @@ namespace {
 constexpr const char* kWorkspaceDirectory = "/assistant/files";
 constexpr const char* kBookmarksPath = "/assistant/file_bookmarks.json";
 constexpr std::size_t kCopyBufferBytes = 4096;
-constexpr std::size_t kMaximumSearchBytes = 128;
+constexpr std::size_t kMaximumSearchBytes = 1024;
 constexpr std::size_t kDefaultWorkspaceToolListEntries = 16;
 constexpr std::size_t kMaximumWorkspaceToolListEntries = 16;
 
@@ -251,8 +251,26 @@ ToolExecutionResult toolFailure(const String& error)
     return {false, jsonOutput(document), error};
 }
 
-OperationResult copyFile(const String& sourcePath, const String& destinationPath)
+ToolExecutionResult toolCancelled(const String& error)
 {
+    JsonDocument document;
+    document["ok"] = false;
+    document["error"] = error;
+    return {
+        false,
+        jsonOutput(document),
+        error,
+        ToolExecutionOutcome::Cancelled,
+    };
+}
+
+OperationResult copyFileControlled(
+    const String& sourcePath,
+    const String& destinationPath,
+    const std::function<bool()>& isCancelled,
+    bool& cancelled)
+{
+    cancelled = false;
     File source = SD.open(sourcePath, FILE_READ);
     if (!source) {
         return {false, "Failed to open source workspace file for copying"};
@@ -276,6 +294,12 @@ OperationResult copyFile(const String& sourcePath, const String& destinationPath
     std::uint8_t buffer[kCopyBufferBytes] = {};
     std::uint32_t copiedBytes = 0;
     while (copiedBytes < expectedBytes) {
+        if (isCancelled()) {
+            cancelled = true;
+            source.close();
+            destination.close();
+            return {false, "Workspace copy canceled by user"};
+        }
         const std::size_t blockBytes = std::min<std::size_t>(
             sizeof(buffer), expectedBytes - copiedBytes);
         const std::size_t readBytes = source.read(buffer, blockBytes);
@@ -303,6 +327,13 @@ OperationResult copyFile(const String& sourcePath, const String& destinationPath
     return copiedBytes == expectedBytes
         ? OperationResult{true, ""}
         : OperationResult{false, "Workspace copy size does not match source size"};
+}
+
+OperationResult copyFile(const String& sourcePath, const String& destinationPath)
+{
+    const std::function<bool()> isCancelled = []() { return false; };
+    bool cancelled = false;
+    return copyFileControlled(sourcePath, destinationPath, isCancelled, cancelled);
 }
 
 OperationResult copyExactBytes(File& source,
@@ -594,7 +625,10 @@ ToolExecutionResult writeFileTool(const String& name, const std::string& content
     return {true, jsonOutput(document), ""};
 }
 
-ToolExecutionResult appendFileTool(const String& name, const std::string& content)
+ToolExecutionResult appendFileTool(
+    const String& name,
+    const std::string& content,
+    const std::function<bool()>& isCancelled)
 {
     if (!isValidWorkspaceFilename(name.c_str())) {
         return toolFailure("Invalid workspace-relative path");
@@ -634,7 +668,15 @@ ToolExecutionResult appendFileTool(const String& name, const std::string& conten
     if (!result.success) {
         return toolFailure(result.error);
     }
-    result = copyFile(target, temporary);
+    bool cancelled = false;
+    result = copyFileControlled(target, temporary, isCancelled, cancelled);
+    if (cancelled) {
+        const OperationResult removed = removeIfPresent(temporary);
+        return toolCancelled(removed.success
+            ? String("Workspace append canceled by user")
+            : String("Workspace append canceled; temporary cleanup failed: ") +
+                  removed.error);
+    }
     if (!result.success) {
         removeIfPresent(temporary);
         return toolFailure(result.error);
@@ -652,6 +694,13 @@ ToolExecutionResult appendFileTool(const String& name, const std::string& conten
     if (written != content.size()) {
         removeIfPresent(temporary);
         return toolFailure("Failed to append complete workspace file content");
+    }
+    if (isCancelled()) {
+        const OperationResult removed = removeIfPresent(temporary);
+        return toolCancelled(removed.success
+            ? String("Workspace append canceled by user")
+            : String("Workspace append canceled; temporary cleanup failed: ") +
+                  removed.error);
     }
     result = commitTemporaryFile(target, temporary, backup);
     if (!result.success) {
@@ -816,7 +865,7 @@ WorkspaceFindResult findWorkspaceText(const String& name,
         return {false, false, 0, textFile.error};
     }
     if (query.empty() || query.size() > kMaximumSearchBytes || !isValidUtf8(query)) {
-        return {false, false, 0, "Search text must be valid UTF-8 between 1 and 128 bytes"};
+        return {false, false, 0, "Search text must be valid UTF-8 between 1 and 1024 bytes"};
     }
     File file = SD.open(workspaceFilePath(name), FILE_READ);
     if (!file) {
@@ -1247,7 +1296,9 @@ OperationResult deleteWorkspaceFile(const String& name)
         : OperationResult{false, "Failed to delete workspace file: " + name};
 }
 
-ToolExecutionResult executeWorkspaceTool(const ToolCall& call)
+static ToolExecutionResult executeWorkspaceToolControlled(
+    const ToolCall& call,
+    const std::function<bool()>& isCancelled)
 {
     JsonDocument arguments;
     const DeserializationError jsonError = deserializeJson(arguments, call.arguments);
@@ -1282,13 +1333,92 @@ ToolExecutionResult executeWorkspaceTool(const ToolCall& call)
         }
         const std::string content = arguments["content"].as<const char*>();
         return call.name == "write_file" ? writeFileTool(name, content)
-                                         : appendFileTool(name, content);
+                                         : appendFileTool(name, content, isCancelled);
     }
     return toolFailure(String("Unsupported workspace tool: ") + call.name.c_str());
 }
 
-ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
-                                                const ToolCall& call)
+ToolExecutionResult executeWorkspaceTool(const ToolCall& call)
+{
+    const std::function<bool()> isCancelled = []() { return false; };
+    return executeWorkspaceToolControlled(call, isCancelled);
+}
+
+ToolExecutionResult executeControlledWorkspaceTool(
+    const ToolCall& call,
+    const std::function<bool()>& isCancelled)
+{
+    bool cancelled = false;
+    const std::function<bool()> latchedCancellation = [&]() {
+        cancelled = cancelled || isCancelled();
+        return cancelled;
+    };
+    if (latchedCancellation()) {
+        return toolCancelled("Workspace tool canceled before execution");
+    }
+    return executeWorkspaceToolControlled(call, latchedCancellation);
+}
+
+WorkspaceWriteTargetResult inspectWorkspaceWriteTarget(const ToolCall& call)
+{
+    if (call.name != "write_file") {
+        return {false, false, "", "Write target inspection requires write_file"};
+    }
+    JsonDocument arguments;
+    const DeserializationError jsonError = deserializeJson(arguments, call.arguments);
+    if (jsonError || !arguments.is<JsonObject>() ||
+        arguments.as<JsonObjectConst>().size() != 2 ||
+        !arguments["name"].is<const char*>() ||
+        !arguments["content"].is<const char*>()) {
+        return {false, false, "",
+                "write_file requires exactly string fields 'name' and 'content'"};
+    }
+    const String name = arguments["name"].as<const char*>();
+    const std::string content = arguments["content"].as<const char*>();
+    if (!isValidWorkspaceFilename(name.c_str())) {
+        return {false, false, "", "Workspace tool path is invalid"};
+    }
+    const OperationResult textFile = requireWorkspaceTextFile(name);
+    if (!textFile.success) {
+        return {false, false, "", textFile.error};
+    }
+    if (content.size() > kMaximumWorkspaceToolChunkBytes) {
+        return {false, false, "", "write_file content exceeds 12288 bytes"};
+    }
+    if (!isValidUtf8(content)) {
+        return {false, false, "", "File content must be valid UTF-8 text"};
+    }
+    return {true, SD.exists(workspaceFilePath(name)), name, ""};
+}
+
+WorkspaceWriteTargetResult inspectProjectWorkspaceWriteTarget(
+    const String& projectId,
+    const ToolCall& call)
+{
+    if (!isValidChatId(projectId.c_str())) {
+        return {false, false, "", "Workspace tool requires an active project"};
+    }
+    const WorkspaceWriteTargetResult target = inspectWorkspaceWriteTarget(call);
+    if (!target.success) {
+        return target;
+    }
+    const SharedFileLinkResult linked = projectHasSharedFileLink(
+        projectId, target.name);
+    if (!linked.success) {
+        return {false, false, "", linked.error};
+    }
+    if (target.replacesExisting && !linked.linked) {
+        return {false, false, "",
+                "Existing Shared file is not linked to the active project: " +
+                    target.name};
+    }
+    return {true, target.replacesExisting && linked.linked, target.name, ""};
+}
+
+static ToolExecutionResult executeProjectWorkspaceToolControlled(
+    const String& projectId,
+    const ToolCall& call,
+    const std::function<bool()>& isCancelled)
 {
     if (!isValidChatId(projectId.c_str())) {
         return toolFailure("Workspace tool requires an active project");
@@ -1327,7 +1457,8 @@ ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
     if (call.name == "write_file" && exists && !linked.linked) {
         return toolFailure("Existing Shared file is not linked to the active project: " + name);
     }
-    const ToolExecutionResult executed = executeWorkspaceTool(call);
+    const ToolExecutionResult executed = executeWorkspaceToolControlled(
+        call, isCancelled);
     if (!executed.success || call.name != "write_file" || linked.linked) {
         return executed;
     }
@@ -1340,6 +1471,30 @@ ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
         ? "File was created but project linking failed: " + linkResult.error
         : "File linking failed and created-file rollback also failed: " +
               linkResult.error + "; " + rollback.error);
+}
+
+ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
+                                                const ToolCall& call)
+{
+    const std::function<bool()> isCancelled = []() { return false; };
+    return executeProjectWorkspaceToolControlled(projectId, call, isCancelled);
+}
+
+ToolExecutionResult executeControlledProjectWorkspaceTool(
+    const String& projectId,
+    const ToolCall& call,
+    const std::function<bool()>& isCancelled)
+{
+    bool cancelled = false;
+    const std::function<bool()> latchedCancellation = [&]() {
+        cancelled = cancelled || isCancelled();
+        return cancelled;
+    };
+    if (latchedCancellation()) {
+        return toolCancelled("Workspace tool canceled before execution");
+    }
+    return executeProjectWorkspaceToolControlled(
+        projectId, call, latchedCancellation);
 }
 
 String workspaceFilePath(const String& name)

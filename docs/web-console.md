@@ -30,12 +30,22 @@ configuration and SFTP controls.
   beside the active thread; on a phone the active conversation and composer appear
   first.
 - Edit project instructions, model override, context budget, output budget, and
-  automatic compaction from **Details**. Chat instructions remain a narrower override.
+  automatic compaction from **Details**. The same panel contains the project's eight
+  capability policies plus the chat's separate model and policy overrides.
 - Select, create, rename, pin, archive, duplicate, export, or delete chats.
 - Load earlier raw turns, clear a chat without deleting it, and monitor total messages
   and active context usage.
 - Send prompts with SSE streaming, cancel an active request, or retry the previous
   browser prompt.
+- Choose **Auto**, **No tools**, or any combination of Web, Files, SSH, and Python in
+  the composer. The one-message selection resets to **Auto** after send and never edits
+  persistent chat policy.
+- Read compact `W`, `F`, `S`, and `P` states beside the chat title, or the accessible
+  eight-row policy/effective/source view in **Details**.
+- Review safe pending previews, including bounded file diffs and exact SSH commands,
+  and choose **Allow once**, **Allow for chat**, or **Deny** when offered. Mandatory
+  confirmation omits **Allow for chat**; an interrupted request can only be
+  acknowledged, never replayed.
 - Edit instructions that belong only to the active chat.
 - Chat history written by the browser is the same microSD-backed history shown on
   the Cardputer.
@@ -87,17 +97,24 @@ installed outside the downloadable workspace. Browser terminal output is retaine
 only in the current page; on-device terminal sessions also use the rotating microSD
 scrollback log.
 
-SSH access for the model is a separate, per-chat permission in **Chat → Details**.
-It is disabled by default. Enabling it requires a complete SSH profile; execution
-also requires a host fingerprint that was already reviewed and trusted. Imported
-project bundles always reset this permission to disabled.
+Tool policies apply only to model actions; they do not disable the manual terminal or
+SFTP browser. Model access is split into **SSH read**, **SSH mutate**, and **SFTP
+read/write** rows at global, project, and chat scope. The current model SSH action is
+classified as SSH mutate, requires a complete trusted profile, shows the exact command,
+and always requires confirmation even when the effective policy is
+**Allow**. No model-facing SSH read or SFTP tool is currently exposed, so those rows
+report unavailable; manual terminal and SFTP operations remain available. Imported
+project bundles force chat SSH read and SSH mutate policies to **Off**.
 
 Destructive actions and editable names use CardMind dialogs instead of browser-native
 prompts, so confirmation remains usable and visually consistent on desktop and mobile.
 
 ### Settings
 
-- Change 2.4 GHz Wi-Fi, the OpenAI-compatible base URL, model, and write-only API key.
+- Change 2.4 GHz Wi-Fi, the OpenAI-compatible base URL, global **Default model**, and
+  write-only API key.
+- Set the global **Master access** ceiling and the policies copied into new chats for
+  all eight capabilities. Project and chat editors may narrow but never exceed it.
 - Configure the optional STT, web-search, and TTS providers, automatic speech, and
   speaker volume.
 - Adjust brightness, display sleep, keyboard repeat, and the power profile.
@@ -110,6 +127,8 @@ prompts, so confirmation remains usable and visually consistent on desktop and m
 - Temporarily enable detailed request timing for diagnostics. The switch is
   session-only and does not expose API keys, passwords, or SSH secrets.
 - Start the installed Python workspace directly from the Settings page.
+- Review recent foreground tool activity with tool name, target, status, duration,
+  output size, and SSH exit status when present.
 - Choose browser-only density, motion, contrast, and terminal wake-lock preferences.
 
 API keys and Wi-Fi passwords are intentionally not returned to the browser. A blank

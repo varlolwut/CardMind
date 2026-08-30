@@ -12,18 +12,26 @@ active chat and these defaults:
 
 - instructions applied to every chat;
 - an optional model override;
+- capability policies for Web search/fetch, Files read and write/delete, SSH
+  read/mutate, SFTP read/write, and Python write/run;
 - request-context budget from 8 KiB to 256 KiB;
 - maximum response tokens;
 - automatic context compaction on or off.
 
 On the Cardputer, select a project and press Enter to open **Project Actions**. This
 screen changes the project model, instructions, context budget, response budget, and
-compaction preference without requiring the Web Console. The same fields are available
-under **Chat → Project details** in the Web Console.
+compaction preference, and opens the project capability policies without requiring the
+Web Console. The same fields are available under **Chat → Project details** in the
+Web Console. Each chat can add its own model override and capability policy.
 
-Configuration is resolved from broad to narrow: global settings, project settings,
-then chat settings. A narrower value overrides only the field it defines. For example,
-a project may request concise answers while one chat asks for a detailed table.
+Models are resolved from broad to narrow: global **Default model**, project override,
+then chat override. A blank narrower model inherits its parent. Built-in safety remains
+above every configurable tool policy. Global, project, and chat access acts as a
+ceiling rather than a normal override: the most restrictive applicable policy wins,
+and a narrower **Allow** cannot elevate a parent **Ask** or **Off**. The global
+**Defaults for new chats** policy is copied when a chat is created; changing it later
+does not rewrite existing chats. Per-message capability choices select, require, or
+disable tools once and do not change persistent project or chat policy.
 
 Raw messages are appended to the project's microSD history. When they no longer fit
 the request budget, CardMind omits the oldest complete messages from the API request.
@@ -67,8 +75,8 @@ history.
 **Export project** creates one portable project bundle in Shared workspace. It contains
 the project settings, chat metadata, complete raw histories, summaries, and Shared-link
 paths. It does not copy linked Shared file contents and does not export API keys, Wi-Fi
-credentials, SSH secrets, or installation credentials. Model SSH permission is reset
-to disabled when a bundle is imported.
+credentials, SSH secrets, or installation credentials. Import forces every chat's SSH
+read and SSH mutate policies to **Off**, so a bundle cannot grant remote command access.
 
 Import validates the bundle and creates a new project. Existing projects and Shared
 files are not overwritten. Recreate or relink Shared files that are not already present
@@ -82,5 +90,6 @@ The migration is staged and validated before the new schema becomes active. If p
 lost during staging, CardMind discards the incomplete staging tree and retries without
 modifying the legacy source data.
 
-Keep a normal backup before changing or reformatting the microSD card. Firmware update
-alone does not erase NVS or microSD data.
+Export needed project bundles and copy other workspace data off the card before
+changing or reformatting the microSD card. Firmware update alone does not erase NVS or
+microSD data.

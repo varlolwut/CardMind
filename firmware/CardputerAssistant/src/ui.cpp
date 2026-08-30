@@ -82,6 +82,23 @@ bool isErrorStatus(const String& status)
            status.indexOf("Error") >= 0 || status.indexOf("error") >= 0;
 }
 
+std::uint16_t chatCapabilityColor(ChatCapabilityState state)
+{
+    switch (state) {
+        case ChatCapabilityState::Off:
+            return TFT_DARKGREY;
+        case ChatCapabilityState::Inherit:
+            return TFT_CYAN;
+        case ChatCapabilityState::Ask:
+            return TFT_YELLOW;
+        case ChatCapabilityState::Allow:
+            return TFT_GREEN;
+        case ChatCapabilityState::Required:
+            return TFT_MAGENTA;
+    }
+    return TFT_RED;
+}
+
 std::size_t visibleTranscriptLineCount(const String& status)
 {
     if (status.isEmpty() || status == "Ready") {
@@ -495,6 +512,7 @@ void showChat(const std::vector<Message>& history,
               const String& chatTitle,
               const String& status,
               std::size_t scrollOffset,
+              const ChatCapabilityStates& capabilities,
               bool wifiConnected,
               int batteryLevel,
               bool batteryCharging)
@@ -505,7 +523,13 @@ void showChat(const std::vector<Message>& history,
     canvas->drawBitmap(3, 3, kChatsIcon, 8, 8, TFT_CYAN);
     canvas->setTextColor(TFT_WHITE, TFT_NAVY);
     canvas->setCursor(14, 2);
-    canvas->print(clippedLine(chatTitle, 17));
+    canvas->print(clippedLine(chatTitle, 14));
+    constexpr char capabilityLabels[] = {'W', 'F', 'S', 'P'};
+    for (std::size_t index = 0; index < capabilities.size(); ++index) {
+        canvas->setTextColor(chatCapabilityColor(capabilities[index]), TFT_NAVY);
+        canvas->setCursor(106 + static_cast<int>(index * 8U), 2);
+        canvas->print(capabilityLabels[index]);
+    }
     drawBatteryStatus(143, 3, batteryLevel, batteryCharging);
     canvas->setFont(&fonts::efontCN_10);
     canvas->setTextColor(TFT_WHITE, TFT_NAVY);
@@ -565,7 +589,7 @@ void showChat(const std::vector<Message>& history,
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     drawToolbarItem(0, kMicIcon, "G0 MIC");
     drawToolbarItem(48, kChatsIcon, "F1 CHAT");
-    drawToolbarItem(96, kModelIcon, "F2 AI");
+    drawToolbarItem(96, kModelIcon, "F2 CAP");
     drawToolbarItem(144, kLanguageIcon,
                     layout == KeyboardLayout::English ? "F3 RU" : "F3 EN");
     drawToolbarItem(192, kSettingsIcon, "F4 MENU");
@@ -761,10 +785,13 @@ void showDeviceDiagnostics(const DeviceDiagnosticsView& diagnostics, std::size_t
     canvas->pushSprite(0, 0);
 }
 
-void showTextViewer(const String& title,
+namespace {
+
+void drawTextViewer(const String& title,
                     const std::vector<std::string>& lines,
                     std::size_t firstLine,
-                    const String& position)
+                    const String& position,
+                    const String& footer)
 {
     constexpr std::size_t maximumVisibleLines = 8;
     canvas->fillScreen(TFT_BLACK);
@@ -798,8 +825,27 @@ void showTextViewer(const String& title,
     canvas->print(clippedLine(position, 18));
     canvas->setTextColor(TFT_WHITE, TFT_DARKGREY);
     canvas->setCursor(91, 118);
-    canvas->print("UP/DOWN  ENTER edit  ESC");
+    canvas->print(footer);
     canvas->pushSprite(0, 0);
+}
+
+}  // namespace
+
+void showTextViewer(const String& title,
+                    const std::vector<std::string>& lines,
+                    std::size_t firstLine,
+                    const String& position)
+{
+    drawTextViewer(title, lines, firstLine, position,
+                   "UP/DOWN  ENTER edit  ESC");
+}
+
+void showReadOnlyTextViewer(const String& title,
+                            const std::vector<std::string>& lines,
+                            std::size_t firstLine,
+                            const String& position)
+{
+    drawTextViewer(title, lines, firstLine, position, "UP/DOWN  ESC back");
 }
 
 void showTextEditor(const String& title,

@@ -19,6 +19,7 @@ std::string eraseUtf8Before(const std::string& value, std::size_t index);
 std::string mapKeyToRussian(char key);
 std::vector<std::string> wrapUtf8Text(const std::string& value, std::size_t maxCells);
 bool extractSseData(const std::string& line, std::string& data);
+bool isValidUtf8(const char* value, std::size_t size);
 bool isValidUtf8(const std::string& value);
 std::string buildVersionedApiUrl(const std::string& baseUrl, const std::string& versionedPath);
 std::string ellipsizeUtf8(const std::string& value, std::size_t maxCells);
@@ -42,6 +43,7 @@ struct RetryRequestResult {
 RetryRequestResult prepareRetryRequest(const std::vector<Message>& messages,
                                        std::size_t maximumBytes);
 std::vector<Message> unsummarizedChatTail(const ChatDocument& chat);
+std::vector<Message> takeUnsummarizedChatTail(ChatDocument chat);
 struct ContextSummaryPromptResult {
     bool success;
     std::string prompt;
@@ -70,6 +72,7 @@ std::uint32_t resolveRequestOutputTokens(std::uint32_t projectTokens,
 ResolvedProjectRequestPolicy resolveProjectRequestPolicy(
     const Settings& settings,
     const ProjectDocument& project,
+    const ChatDocument& chat,
     std::uint32_t requestOutputTokens);
 bool shouldAutomaticallyCompactRequest(
     const ResolvedProjectRequestPolicy& policy,

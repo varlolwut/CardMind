@@ -287,6 +287,19 @@ void retryLastRequest()
         renderChatActions();
         return;
     }
+    cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success || pending.found) {
+        if (!pending.success) {
+            menuStatus = pending.error;
+            renderChatActions();
+            return;
+        }
+        pendingToolReturnScreen = Screen::Chat;
+        statusMessage = "Resolve the pending tool request before retrying";
+        std::string().swap(pending.pending.continuation.call.arguments);
+        openPendingToolPreview();
+        return;
+    }
     const cardputer::ProjectDocumentResult project = cardputer::loadProject(
         activeProjectId);
     const cardputer::ChatDocumentResult stored = cardputer::loadProjectChat(
@@ -307,14 +320,34 @@ void retryLastRequest()
         renderChatActions();
         return;
     }
+    const cardputer::ToolMessageIntent requestIntent = retryToolIntent;
+    const cardputer::ToolRequestPlan requestPlan =
+        cardputer::resolveChatToolRequestPlan(
+            settings, project.project, stored.chat, requestIntent,
+            fileWorkspaceReady,
+            fileWorkspaceReady &&
+                currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+            currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+            cardputer::sshToolIsAvailable());
+    const String planError = toolRequestPlanError(requestPlan);
+    if (!planError.isEmpty()) {
+        menuStatus = planError;
+        renderChatActions();
+        return;
+    }
+    const std::string requestInstructions = retryRequestInstructions;
     history = std::move(retry.messages);
     activeResponse.clear();
     currentScreen = Screen::Chat;
     menuStatus = "";
     const std::uint32_t outputTokens = retryOutputTokens == 0
         ? project.project.maximumOutputTokens : retryOutputTokens;
+    cardputer::ResolvedProjectRequestPolicy requestPolicy =
+        cardputer::resolveProjectRequestPolicy(
+            settings, project.project, stored.chat, outputTokens);
     executeStoredPromptRequest(
-        retry.prompt, project.project, stored.chat, outputTokens);
+        retry.prompt, project.project, stored.chat, requestInstructions,
+        std::move(requestPolicy), requestIntent, requestPlan);
 }
 
 }  // namespace
