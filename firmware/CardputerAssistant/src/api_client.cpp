@@ -1,5 +1,6 @@
 #include "api_client.h"
 
+#include "sftp_tool.h"
 #include "ssh_command_options.h"
 
 #include "instruction_policy.h"
@@ -281,6 +282,63 @@ void addToolSchema(JsonArray tools, ToolSchemaId schema)
             required.add("command");
             break;
         }
+        case ToolSchemaId::SftpList: {
+            function["description"] =
+                "List one bounded page from an absolute directory on the selected trusted SSH host.";
+            parameters["properties"]["path"]["type"] = "string";
+            parameters["properties"]["offset"]["type"] = "integer";
+            parameters["properties"]["offset"]["minimum"] = 0;
+            parameters["properties"]["max_entries"]["type"] = "integer";
+            parameters["properties"]["max_entries"]["minimum"] = 1;
+            parameters["properties"]["max_entries"]["maximum"] =
+                kMaximumModelSftpPageEntries;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("path");
+            required.add("offset");
+            required.add("max_entries");
+            break;
+        }
+        case ToolSchemaId::SftpRead: {
+            function["description"] =
+                "Read one bounded UTF-8 chunk from an absolute path on the selected trusted SSH host.";
+            parameters["properties"]["path"]["type"] = "string";
+            parameters["properties"]["offset"]["type"] = "integer";
+            parameters["properties"]["offset"]["minimum"] = 0;
+            parameters["properties"]["max_bytes"]["type"] = "integer";
+            parameters["properties"]["max_bytes"]["minimum"] =
+                kMinimumModelSftpReadBytes;
+            parameters["properties"]["max_bytes"]["maximum"] =
+                kMaximumModelSftpChunkBytes;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("path");
+            required.add("offset");
+            required.add("max_bytes");
+            break;
+        }
+        case ToolSchemaId::SftpWrite: {
+            function["description"] =
+                "Safely write bounded UTF-8 content to an absolute remote path. Overwrite defaults to false and requires confirmation when true.";
+            parameters["properties"]["path"]["type"] = "string";
+            parameters["properties"]["content"]["type"] = "string";
+            parameters["properties"]["overwrite"]["type"] = "boolean";
+            parameters["properties"]["overwrite"]["default"] = false;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("path");
+            required.add("content");
+            break;
+        }
+        case ToolSchemaId::SftpMove: {
+            function["description"] =
+                "Move one absolute remote path to another. Overwrite defaults to false and requires confirmation when true.";
+            parameters["properties"]["source_path"]["type"] = "string";
+            parameters["properties"]["destination_path"]["type"] = "string";
+            parameters["properties"]["overwrite"]["type"] = "boolean";
+            parameters["properties"]["overwrite"]["default"] = false;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("source_path");
+            required.add("destination_path");
+            break;
+        }
         case ToolSchemaId::Count:
             return;
     }
@@ -351,9 +409,9 @@ String buildToolChatRequest(const Settings& settings,
     }
     if (sshToolAvailable) {
         systemPrompt +=
-            " The selected SSH profile is available through ssh_command. "
-            "Use ssh_command only for remote-machine work requested by the user. Report the command's "
-            "non-zero exit status and never claim success when its output says otherwise.";
+            " The selected SSH profile is available through ssh_command and bounded SFTP "
+            "list/read/write/move tools. Use them only for remote-machine work requested by the user. "
+            "Report non-zero command exit status and never claim success when tool output says otherwise.";
         if (requiresGroup(ToolCapabilityGroup::Ssh)) {
             systemPrompt +=
                 " The current request requires an SSH tool call before the final answer.";

@@ -1380,6 +1380,56 @@ OperationResult loadSshProfile(SshProfile& profile)
     return {true, ""};
 }
 
+OperationResult loadSelectedSshAuthority(SshAuthoritySummary& authority)
+{
+    std::vector<SshProfileSummary> profiles;
+    std::size_t selectedIndex = 0;
+    const OperationResult loaded = loadSshProfileSummaries(
+        profiles, selectedIndex);
+    if (!loaded.success) {
+        return loaded;
+    }
+    if (profiles.empty() || selectedIndex >= profiles.size()) {
+        return {false, "Selected SSH profile is unavailable"};
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, true)) {
+        return {false, "Failed to open selected SSH authority in NVS"};
+    }
+    const std::size_t count = preferences.getUChar("cnt", 0);
+    if ((count == 0 && (profiles.size() != 1 || selectedIndex != 0)) ||
+        (count != 0 &&
+         (count != profiles.size() ||
+          preferences.getUChar("sel", 0) != selectedIndex))) {
+        preferences.end();
+        return {false, "Stored SSH profile selection changed during authority load"};
+    }
+    std::uint64_t privateKeyId = 0;
+    bool privateKeyIdFound = false;
+    const OperationResult keyLoaded = readOptionalSshPrivateKeyId(
+        preferences, indexedPrivateKeyIdKey(selectedIndex),
+        privateKeyId, privateKeyIdFound);
+    preferences.end();
+    if (!keyLoaded.success) {
+        return keyLoaded;
+    }
+    const SshProfileSummary& selected = profiles[selectedIndex];
+    if (selected.authMode == SshAuthMode::PrivateKey &&
+        !privateKeyIdFound) {
+        return {false, "Selected SSH profile has no private-key binding"};
+    }
+    authority = {
+        selected.id,
+        selected.name,
+        selected.host,
+        selected.port,
+        selected.username,
+        selected.authMode,
+        selected.authMode == SshAuthMode::PrivateKey ? privateKeyId : 0,
+    };
+    return {true, ""};
+}
+
 OperationResult loadSshProfiles(std::vector<SshProfile>& profiles,
                                 std::size_t& selectedIndex)
 {
@@ -2433,8 +2483,19 @@ OperationResult SshClient::executeCommandStreamingControlled(
 
 OperationResult SshClient::openSftp(std::uint32_t timeoutMs)
 {
+    const std::function<bool()> isCancelled = []() { return false; };
+    return openSftpControlled(timeoutMs, isCancelled);
+}
+
+OperationResult SshClient::openSftpControlled(
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
     if (implementation_ == nullptr || implementation_->session == nullptr) {
         return {false, "SSH session is not connected"};
+    }
+    if (timeoutMs == 0 || !isCancelled) {
+        return {false, "SFTP initialization requires a timeout and cancellation callback"};
     }
     if (implementation_->sftp != nullptr) {
         return {true, ""};
@@ -2442,6 +2503,9 @@ OperationResult SshClient::openSftp(std::uint32_t timeoutMs)
     const std::uint32_t deadline = millis() + timeoutMs;
     while (implementation_->sftp == nullptr &&
            static_cast<std::int32_t>(deadline - millis()) > 0) {
+        if (isCancelled()) {
+            return {false, "SFTP initialization canceled"};
+        }
         implementation_->sftp = libssh2_sftp_init(implementation_->session);
         if (implementation_->sftp == nullptr &&
             libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) {
@@ -2525,6 +2589,570 @@ SftpEntriesResult SshClient::listSftpDirectory(const String& path,
         return left.name.compareTo(right.name) < 0;
     });
     return {true, std::move(entries), ""};
+}
+
+SftpPageResult SshClient::listSftpDirectoryPageControlled(
+    const String& path,
+    std::uint32_t offset,
+    std::size_t maximumEntries,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr) {
+        return {false, {}, 0, false, "SFTP session is not open"};
+    }
+    if (!isValidRemotePath(path) || maximumEntries == 0 ||
+        maximumEntries > 16 || timeoutMs == 0 || !isCancelled) {
+        return {false, {}, 0, false, "SFTP list page arguments are invalid"};
+    }
+    const std::uint32_t deadline = millis() + timeoutMs;
+    LIBSSH2_SFTP_HANDLE* directory = nullptr;
+    while (directory == nullptr &&
+           static_cast<std::int32_t>(deadline - millis()) > 0) {
+        if (isCancelled()) {
+            return {false, {}, 0, false, "SFTP directory listing canceled"};
+        }
+        directory = libssh2_sftp_opendir(implementation_->sftp, path.c_str());
+        if (directory == nullptr &&
+            libssh2_session_last_errno(implementation_->session) !=
+                LIBSSH2_ERROR_EAGAIN) {
+            return {false, {}, 0, false,
+                    sessionError(implementation_->session,
+                                 "SFTP directory open",
+                                 libssh2_session_last_errno(
+                                     implementation_->session))};
+        }
+        delay(5);
+    }
+    if (directory == nullptr) {
+        return {false, {}, 0, false, "SFTP directory open timed out"};
+    }
+    std::vector<SftpEntry> entries;
+    entries.reserve(maximumEntries);
+    std::uint64_t visibleIndex = 0;
+    bool eof = false;
+    bool hasLookahead = false;
+    while (static_cast<std::int32_t>(deadline - millis()) > 0) {
+        if (isCancelled()) {
+            closeSftpHandle(directory);
+            return {false, {}, 0, false, "SFTP directory listing canceled"};
+        }
+        char name[256] = {};
+        LIBSSH2_SFTP_ATTRIBUTES attributes = {};
+        const ssize_t read = libssh2_sftp_readdir_ex(
+            directory, name, sizeof(name) - 1, nullptr, 0, &attributes);
+        if (read == LIBSSH2_ERROR_EAGAIN) {
+            delay(5);
+            continue;
+        }
+        if (read < 0) {
+            closeSftpHandle(directory);
+            return {false, {}, 0, false,
+                    sessionError(implementation_->session,
+                                 "SFTP directory read",
+                                 static_cast<int>(read))};
+        }
+        if (read == 0) {
+            eof = true;
+            break;
+        }
+        const std::size_t nameBytes = static_cast<std::size_t>(read);
+        if (nameBytes >= sizeof(name) ||
+            std::memchr(name, '\0', nameBytes) != nullptr ||
+            !isValidUtf8(name, nameBytes)) {
+            closeSftpHandle(directory);
+            return {false, {}, 0, false,
+                    "SFTP directory contains an invalid or oversized name"};
+        }
+        const std::string nameValue(name, nameBytes);
+        if (nameValue == "." || nameValue == "..") {
+            continue;
+        }
+        if (nameValue.find('/') != std::string::npos ||
+            nameValue.find('\r') != std::string::npos ||
+            nameValue.find('\n') != std::string::npos) {
+            closeSftpHandle(directory);
+            return {false, {}, 0, false,
+                    "SFTP directory contains an unsafe name"};
+        }
+        if (visibleIndex++ < offset) {
+            continue;
+        }
+        if (entries.size() == maximumEntries) {
+            hasLookahead = true;
+            break;
+        }
+        const bool isDirectory =
+            (attributes.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0 &&
+            LIBSSH2_SFTP_S_ISDIR(attributes.permissions);
+        entries.push_back({
+            String(nameValue.c_str()),
+            isDirectory,
+            (attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0
+                ? static_cast<std::uint64_t>(attributes.filesize) : 0,
+        });
+    }
+    closeSftpHandle(directory);
+    if (!eof && !hasLookahead) {
+        return {false, {}, 0, false,
+                "SFTP directory listing timed out before completing the page"};
+    }
+    const std::uint64_t next = static_cast<std::uint64_t>(offset) +
+        entries.size();
+    if (next > UINT32_MAX) {
+        return {false, {}, 0, false, "SFTP directory offset exceeds uint32 range"};
+    }
+    return {
+        true,
+        std::move(entries),
+        static_cast<std::uint32_t>(next),
+        eof && !hasLookahead,
+        "",
+    };
+}
+
+namespace {
+
+std::size_t utf8CodePointBytes(std::uint8_t first)
+{
+    if (first <= 0x7F) return 1;
+    if (first >= 0xC2 && first <= 0xDF) return 2;
+    if (first >= 0xE0 && first <= 0xEF) return 3;
+    if (first >= 0xF0 && first <= 0xF4) return 4;
+    return 0;
+}
+
+std::size_t completeUtf8Prefix(const std::uint8_t* data, std::size_t bytes)
+{
+    if (bytes == 0) {
+        return 0;
+    }
+    std::size_t continuationStart = bytes;
+    while (continuationStart > 0 &&
+           (data[continuationStart - 1] & 0xC0) == 0x80) {
+        --continuationStart;
+    }
+    if (continuationStart == bytes) {
+        const std::size_t width = utf8CodePointBytes(data[bytes - 1]);
+        return width > 1 ? bytes - 1 : bytes;
+    }
+    if (continuationStart == 0) {
+        return bytes;
+    }
+    const std::size_t lead = continuationStart - 1;
+    const std::size_t width = utf8CodePointBytes(data[lead]);
+    return width > bytes - lead ? lead : bytes;
+}
+
+std::uint32_t remainingBefore(std::uint32_t deadline)
+{
+    const std::int32_t remaining = static_cast<std::int32_t>(
+        deadline - millis());
+    return remaining > 0 ? static_cast<std::uint32_t>(remaining) : 0;
+}
+
+bool renameFailureHasFinalStatus(LIBSSH2_SFTP* sftp, int result)
+{
+    if (result == LIBSSH2_FX_OP_UNSUPPORTED) {
+        return true;
+    }
+    return result == LIBSSH2_ERROR_SFTP_PROTOCOL &&
+        libssh2_sftp_last_error(sftp) != LIBSSH2_FX_OK;
+}
+
+String remoteTemporaryPath(const String& destination,
+                           std::uint32_t first,
+                           std::uint32_t second)
+{
+    const int slash = destination.lastIndexOf('/');
+    const String parent = slash <= 0
+        ? String("/") : destination.substring(0, slash + 1);
+    char nonce[17] = {};
+    std::snprintf(nonce, sizeof(nonce), "%08lx%08lx",
+                  static_cast<unsigned long>(first),
+                  static_cast<unsigned long>(second));
+    return parent + ".cardmind-" + nonce + ".tmp";
+}
+
+}  // namespace
+
+SftpReadResult SshClient::readSftpFileChunkControlled(
+    const String& path,
+    std::uint64_t offset,
+    std::size_t maximumBytes,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr) {
+        return {false, "", 0, 0, false, "SFTP session is not open"};
+    }
+    if (!isValidRemotePath(path) || maximumBytes < 4 ||
+        maximumBytes > 12288 || timeoutMs == 0 || !isCancelled) {
+        return {false, "", 0, 0, false, "SFTP read arguments are invalid"};
+    }
+    const std::uint32_t deadline = millis() + timeoutMs;
+    LIBSSH2_SFTP_HANDLE* remote = nullptr;
+    while (remote == nullptr && remainingBefore(deadline) > 0) {
+        if (isCancelled()) {
+            return {false, "", 0, 0, false, "SFTP file read canceled"};
+        }
+        remote = libssh2_sftp_open(
+            implementation_->sftp, path.c_str(), LIBSSH2_FXF_READ, 0);
+        if (remote == nullptr &&
+            libssh2_session_last_errno(implementation_->session) !=
+                LIBSSH2_ERROR_EAGAIN) {
+            return {false, "", 0, 0, false,
+                    sessionError(implementation_->session,
+                                 "SFTP remote file open",
+                                 libssh2_session_last_errno(
+                                     implementation_->session))};
+        }
+        delay(5);
+    }
+    if (remote == nullptr) {
+        return {false, "", 0, 0, false, "SFTP file open timed out"};
+    }
+    LIBSSH2_SFTP_ATTRIBUTES attributes = {};
+    bool cancelled = false;
+    const int stat = runUntilCompleteControlled(
+        [remote, &attributes]() {
+            return libssh2_sftp_fstat(remote, &attributes);
+        }, remainingBefore(deadline), isCancelled, cancelled);
+    if (stat != 0 ||
+        (attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) == 0) {
+        closeSftpHandle(remote);
+        return {false, "", 0, 0, false, cancelled
+            ? String("SFTP file read canceled")
+            : (stat == 0
+                ? String("SFTP server did not report a file size")
+                : sessionError(implementation_->session,
+                               "SFTP remote file stat", stat))};
+    }
+    const std::uint64_t totalBytes = attributes.filesize;
+    if (offset > totalBytes) {
+        closeSftpHandle(remote);
+        return {false, "", 0, totalBytes, false,
+                "SFTP read offset exceeds the remote file size"};
+    }
+    if (offset == totalBytes) {
+        closeSftpHandle(remote);
+        return {true, "", offset, totalBytes, true, ""};
+    }
+    libssh2_sftp_seek64(remote, offset);
+    const std::size_t requested = static_cast<std::size_t>(
+        std::min<std::uint64_t>(maximumBytes, totalBytes - offset));
+    std::vector<std::uint8_t> bytes(requested);
+    std::size_t received = 0;
+    while (received < requested && remainingBefore(deadline) > 0) {
+        if (isCancelled()) {
+            closeSftpHandle(remote);
+            return {false, "", 0, totalBytes, false,
+                    "SFTP file read canceled"};
+        }
+        const ssize_t read = libssh2_sftp_read(
+            remote, reinterpret_cast<char*>(bytes.data() + received),
+            requested - received);
+        if (read > 0) {
+            received += static_cast<std::size_t>(read);
+        } else if (read == LIBSSH2_ERROR_EAGAIN) {
+            delay(5);
+        } else if (read == 0) {
+            break;
+        } else {
+            closeSftpHandle(remote);
+            return {false, "", 0, totalBytes, false,
+                    sessionError(implementation_->session,
+                                 "SFTP file read", static_cast<int>(read))};
+        }
+    }
+    closeSftpHandle(remote);
+    if (received != requested) {
+        return {false, "", 0, totalBytes, false,
+                remainingBefore(deadline) == 0
+                    ? String("SFTP file read timed out")
+                    : String("SFTP file changed during the bounded read")};
+    }
+    if ((bytes[0] & 0xC0) == 0x80) {
+        return {false, "", 0, totalBytes, false,
+                "SFTP read offset is inside a UTF-8 code point"};
+    }
+    const std::size_t prefixBytes = completeUtf8Prefix(
+        bytes.data(), bytes.size());
+    if (prefixBytes == 0 ||
+        std::memchr(bytes.data(), '\0', prefixBytes) != nullptr ||
+        !isValidUtf8(reinterpret_cast<const char*>(bytes.data()), prefixBytes)) {
+        return {false, "", 0, totalBytes, false,
+                "SFTP file chunk is not NUL-free valid UTF-8"};
+    }
+    const std::uint64_t nextOffset = offset + prefixBytes;
+    return {
+        true,
+        std::string(reinterpret_cast<const char*>(bytes.data()), prefixBytes),
+        nextOffset,
+        totalBytes,
+        nextOffset == totalBytes,
+        "",
+    };
+}
+
+SftpMutationResult SshClient::writeSftpTextFileControlled(
+    const String& path,
+    const std::string& content,
+    bool overwrite,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr ||
+        !isValidRemotePath(path) || content.size() > 12288 ||
+        timeoutMs == 0 || !isCancelled) {
+        return {false, false, "SFTP write arguments or session are invalid"};
+    }
+    const std::uint32_t deadline = millis() + timeoutMs;
+    String temporaryPath;
+    LIBSSH2_SFTP_HANDLE* remote = nullptr;
+    bool createRequestPending = false;
+    bool createCancelled = false;
+    bool createTimedOut = false;
+    for (std::size_t attempt = 0; attempt < 8 && remote == nullptr; ++attempt) {
+        temporaryPath = remoteTemporaryPath(path, esp_random(), esp_random());
+        if (!isValidRemotePath(temporaryPath)) {
+            return {false, false,
+                    "SFTP destination leaves no room for a safe temporary name"};
+        }
+        createRequestPending = false;
+        while (remote == nullptr) {
+            if (isCancelled()) {
+                createCancelled = true;
+                break;
+            }
+            if (remainingBefore(deadline) == 0) {
+                createTimedOut = true;
+                break;
+            }
+            createRequestPending = true;
+            remote = libssh2_sftp_open(
+                implementation_->sftp, temporaryPath.c_str(),
+                LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_EXCL,
+                LIBSSH2_SFTP_S_IRUSR | LIBSSH2_SFTP_S_IWUSR);
+            if (remote != nullptr) {
+                createRequestPending = false;
+                break;
+            }
+            const int error = libssh2_session_last_errno(
+                implementation_->session);
+            if (error == LIBSSH2_ERROR_EAGAIN) {
+                delay(5);
+                continue;
+            }
+            createRequestPending = false;
+            if (libssh2_sftp_last_error(implementation_->sftp) ==
+                LIBSSH2_FX_FILE_ALREADY_EXISTS) {
+                break;
+            }
+            return {false, false,
+                    sessionError(implementation_->session,
+                                 "SFTP temporary file create", error)};
+        }
+        if (createCancelled || createTimedOut) break;
+    }
+    const String createInterruption = createCancelled
+        ? String("SFTP write canceled during temporary creation")
+        : String("SFTP temporary file create timed out");
+    if (remote == nullptr && createRequestPending &&
+        (createCancelled || createTimedOut)) {
+        const std::uint32_t resolutionDeadline = millis() + 5000;
+        int finalError = LIBSSH2_ERROR_EAGAIN;
+        while (remote == nullptr && remainingBefore(resolutionDeadline) > 0) {
+            remote = libssh2_sftp_open(
+                implementation_->sftp, temporaryPath.c_str(),
+                LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_EXCL,
+                LIBSSH2_SFTP_S_IRUSR | LIBSSH2_SFTP_S_IWUSR);
+            if (remote != nullptr) break;
+            finalError = libssh2_session_last_errno(implementation_->session);
+            if (finalError == LIBSSH2_ERROR_EAGAIN) {
+                delay(5);
+                continue;
+            }
+            if (libssh2_sftp_last_error(implementation_->sftp) ==
+                LIBSSH2_FX_FILE_ALREADY_EXISTS) {
+                return {false, false, createInterruption};
+            }
+            return {false, true,
+                    createInterruption +
+                        "; temporary create outcome is unknown for exact path " +
+                        temporaryPath};
+        }
+        if (remote == nullptr) {
+            return {false, true,
+                    createInterruption +
+                        "; temporary create outcome is unknown for exact path " +
+                        temporaryPath};
+        }
+        const int closed = runUntilComplete(
+            [remote]() { return libssh2_sftp_close_handle(remote); }, 5000);
+        remote = nullptr;
+        if (closed != 0) {
+            return {false, false,
+                    createInterruption +
+                        "; exact remote temporary cleanup could not close " +
+                        temporaryPath};
+        }
+        const int removed = runUntilComplete(
+            [this, &temporaryPath]() {
+                return libssh2_sftp_unlink(
+                    implementation_->sftp, temporaryPath.c_str());
+            }, 5000);
+        return {false, false, removed == 0
+            ? createInterruption
+            : createInterruption +
+                  "; exact remote temporary cleanup failed for " + temporaryPath};
+    }
+    if (remote == nullptr) {
+        return {false, false, createCancelled
+            ? String("SFTP write canceled before temporary creation")
+            : (createTimedOut
+                ? String("SFTP temporary file create timed out before a request")
+                : String("SFTP could not allocate a collision-free temporary path"))};
+    }
+    const auto cleanupTemporary = [&]() {
+        const int removed = runUntilComplete(
+            [this, &temporaryPath]() {
+                return libssh2_sftp_unlink(
+                    implementation_->sftp, temporaryPath.c_str());
+            }, 5000);
+        return removed == 0 ? String()
+            : String("; exact remote temporary cleanup failed for ") +
+                  temporaryPath;
+    };
+    std::size_t written = 0;
+    while (written < content.size() && remainingBefore(deadline) > 0) {
+        if (isCancelled()) {
+            closeSftpHandle(remote);
+            remote = nullptr;
+            return {false, false,
+                    "SFTP write canceled before rename" + cleanupTemporary()};
+        }
+        const ssize_t result = libssh2_sftp_write(
+            remote, content.data() + written, content.size() - written);
+        if (result > 0) {
+            written += static_cast<std::size_t>(result);
+        } else if (result == LIBSSH2_ERROR_EAGAIN) {
+            delay(5);
+        } else {
+            const String error = sessionError(
+                implementation_->session, "SFTP temporary file write",
+                static_cast<int>(result));
+            closeSftpHandle(remote);
+            remote = nullptr;
+            return {false, false, error + cleanupTemporary()};
+        }
+    }
+    if (written != content.size()) {
+        closeSftpHandle(remote);
+        remote = nullptr;
+        return {false, false,
+                "SFTP temporary file write timed out" + cleanupTemporary()};
+    }
+    bool closeCancelled = false;
+    const int closed = runUntilCompleteControlled(
+        [remote]() { return libssh2_sftp_close_handle(remote); },
+        remainingBefore(deadline), isCancelled, closeCancelled);
+    remote = nullptr;
+    if (closed != 0) {
+        return {false, false,
+                String(closeCancelled ? "SFTP write canceled before rename"
+                                      : "SFTP temporary file close failed") +
+                    cleanupTemporary()};
+    }
+    if (isCancelled() || remainingBefore(deadline) == 0) {
+        return {false, false,
+                String(isCancelled() ? "SFTP write canceled before rename"
+                                     : "SFTP write timed out before rename") +
+                    cleanupTemporary()};
+    }
+    bool renameCancelled = false;
+    bool renameAttempted = false;
+    const int renamed = runUntilCompleteControlled(
+        [this, &temporaryPath, &path, overwrite, &renameAttempted]() {
+            renameAttempted = true;
+            return overwrite
+                ? libssh2_sftp_posix_rename_ex(
+                      implementation_->sftp,
+                      temporaryPath.c_str(), temporaryPath.length(),
+                      path.c_str(), path.length())
+                : libssh2_sftp_rename_ex(
+                      implementation_->sftp,
+                      temporaryPath.c_str(), temporaryPath.length(),
+                      path.c_str(), path.length(), 0);
+        }, remainingBefore(deadline), isCancelled, renameCancelled);
+    if (renamed == 0) {
+        return {true, false, ""};
+    }
+    if (!renameAttempted) {
+        return {false, false,
+                String(renameCancelled ? "SFTP write canceled before rename"
+                                       : "SFTP write timed out before rename") +
+                    cleanupTemporary()};
+    }
+    if (!renameFailureHasFinalStatus(implementation_->sftp, renamed)) {
+        return {false, true,
+                "SFTP rename did not return a final status; remote outcome is unknown and was not retried; temporary path was " +
+                    temporaryPath};
+    }
+    const String error = renamed == LIBSSH2_FX_OP_UNSUPPORTED && overwrite
+        ? String("SFTP server does not support safe POSIX overwrite")
+        : sessionError(implementation_->session, "SFTP destination rename", renamed);
+    return {false, false, error + cleanupTemporary()};
+}
+
+SftpMutationResult SshClient::moveSftpPathControlled(
+    const String& sourcePath,
+    const String& destinationPath,
+    bool overwrite,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
+    if (implementation_ == nullptr || implementation_->sftp == nullptr ||
+        !isValidRemotePath(sourcePath) ||
+        !isValidRemotePath(destinationPath) ||
+        sourcePath == destinationPath || timeoutMs == 0 || !isCancelled) {
+        return {false, false, "SFTP move arguments or session are invalid"};
+    }
+    if (isCancelled()) {
+        return {false, false, "SFTP move canceled before rename"};
+    }
+    bool renameCancelled = false;
+    bool renameAttempted = false;
+    const int renamed = runUntilCompleteControlled(
+        [this, &sourcePath, &destinationPath, overwrite, &renameAttempted]() {
+            renameAttempted = true;
+            return overwrite
+                ? libssh2_sftp_posix_rename_ex(
+                      implementation_->sftp,
+                      sourcePath.c_str(), sourcePath.length(),
+                      destinationPath.c_str(), destinationPath.length())
+                : libssh2_sftp_rename_ex(
+                      implementation_->sftp,
+                      sourcePath.c_str(), sourcePath.length(),
+                      destinationPath.c_str(), destinationPath.length(), 0);
+        }, timeoutMs, isCancelled, renameCancelled);
+    if (renamed == 0) {
+        return {true, false, ""};
+    }
+    if (!renameAttempted) {
+        return {false, false, renameCancelled
+            ? String("SFTP move canceled before rename")
+            : String("SFTP move timed out before rename")};
+    }
+    if (!renameFailureHasFinalStatus(implementation_->sftp, renamed)) {
+        return {false, true,
+                "SFTP move did not return a final status; remote outcome is unknown and was not retried"};
+    }
+    return {false, false,
+            renamed == LIBSSH2_FX_OP_UNSUPPORTED && overwrite
+                ? String("SFTP server does not support safe POSIX overwrite")
+                : sessionError(implementation_->session,
+                               "SFTP remote move", renamed)};
 }
 
 OperationResult SshClient::downloadSftpFile(const String& remotePath,

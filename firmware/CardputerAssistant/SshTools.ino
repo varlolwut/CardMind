@@ -734,6 +734,355 @@ cardputer::OperationResult cleanupSshCommandOutputRemoteTest(
     return {true, ""};
 }
 
+cardputer::OperationResult runModelSftpRemoteTest(bool& cleanupComplete)
+{
+    cleanupComplete = false;
+    const std::function<bool()> neverCancel = []() { return false; };
+    char nonce[17] = {};
+    std::snprintf(
+        nonce, sizeof(nonce), "%08lx%08lx",
+        static_cast<unsigned long>(esp_random()),
+        static_cast<unsigned long>(esp_random()));
+    const String sourcePath = String("/tmp/cardmind-p4-06-") + nonce + "-source";
+    const String destinationPath =
+        String("/tmp/cardmind-p4-06-") + nonce + "-destination";
+    const std::string sourceContent = std::string("ABC") + "\xD1\x8F" + "Z";
+    const std::string existingContent = "existing";
+    const std::string finalContent = "final";
+    bool sourceCleanupCandidate = false;
+    bool destinationCleanupCandidate = false;
+    std::array<String, 3> temporaryCleanupCandidates = {};
+    std::size_t temporaryCleanupCandidateCount = 0;
+    bool cleanupCandidateTrackingFailed = false;
+
+    const auto makeCall = [](const char* id, const char* name,
+                             const JsonDocument& arguments) {
+        cardputer::ToolCall call = {id, name, ""};
+        serializeJson(arguments, call.arguments);
+        return call;
+    };
+    const auto write = [&](const String& path, const std::string& content,
+                           bool overwrite) {
+        JsonDocument arguments;
+        arguments["path"] = path;
+        arguments["content"] = content;
+        arguments["overwrite"] = overwrite;
+        return cardputer::executeSftpWriteTool(
+            makeCall("p4-06-write", "sftp_write", arguments), neverCancel);
+    };
+    const auto move = [&](bool overwrite) {
+        JsonDocument arguments;
+        arguments["source_path"] = sourcePath;
+        arguments["destination_path"] = destinationPath;
+        arguments["overwrite"] = overwrite;
+        return cardputer::executeSftpMoveTool(
+            makeCall("p4-06-move", "sftp_move", arguments), neverCancel);
+    };
+    const auto read = [&](const String& path, std::uint64_t offset,
+                          std::size_t maximumBytes) {
+        JsonDocument arguments;
+        arguments["path"] = path;
+        arguments["offset"] = offset;
+        arguments["max_bytes"] = maximumBytes;
+        return cardputer::executeSftpReadTool(
+            makeCall("p4-06-read", "sftp_read", arguments), neverCancel);
+    };
+    const auto expectRead = [&](const String& path, std::uint64_t offset,
+                                std::size_t maximumBytes,
+                                const std::string& expected,
+                                std::uint64_t nextOffset, bool eof) {
+        const cardputer::ToolExecutionResult result =
+            read(path, offset, maximumBytes);
+        if (!result.success) return cardputer::OperationResult{false, result.error};
+        JsonDocument output;
+        const DeserializationError parsed = deserializeJson(output, result.output);
+        if (parsed || !output["ok"].is<bool>() ||
+            !output["ok"].as<bool>() || !output["content"].is<const char*>() ||
+            output["content"].as<std::string>() != expected ||
+            output["next_offset"].as<std::uint64_t>() != nextOffset ||
+            output["eof"].as<bool>() != eof) {
+            return cardputer::OperationResult{
+                false, "Model SFTP read returned an unexpected bounded chunk"};
+        }
+        return cardputer::OperationResult{true, ""};
+    };
+
+    const auto findOwnedName = [&](cardputer::SshClient& client,
+                                   const String& path, bool& found) {
+        found = false;
+        const String name = path.substring(path.lastIndexOf('/') + 1);
+        std::uint32_t offset = 0;
+        for (std::size_t pageIndex = 0; pageIndex < 64; ++pageIndex) {
+            const cardputer::SftpPageResult page =
+                client.listSftpDirectoryPageControlled(
+                    "/tmp", offset, cardputer::kMaximumModelSftpPageEntries,
+                    30000, neverCancel);
+            if (!page.success) {
+                return cardputer::OperationResult{false, page.error};
+            }
+            for (const cardputer::SftpEntry& entry : page.entries) {
+                if (entry.name == name) {
+                    found = true;
+                    return cardputer::OperationResult{true, ""};
+                }
+            }
+            if (page.eof) return cardputer::OperationResult{true, ""};
+            if (page.nextOffset <= offset) {
+                return cardputer::OperationResult{
+                    false, "Model SFTP cleanup page did not advance"};
+            }
+            offset = page.nextOffset;
+        }
+        return cardputer::OperationResult{
+            false, "Model SFTP cleanup directory exceeded the bounded scan"};
+    };
+    const auto rememberTemporaryPath = [&](const String& error) {
+        const String prefix = "/tmp/.cardmind-";
+        const int start = error.indexOf(prefix);
+        if (start < 0) return cardputer::OperationResult{true, ""};
+        const int pathLength = prefix.length() + 16 + 4;
+        if (start + pathLength > static_cast<int>(error.length())) {
+            cleanupCandidateTrackingFailed = true;
+            return cardputer::OperationResult{
+                false, "Model SFTP write reported a malformed temporary path"};
+        }
+        const String path = error.substring(start, start + pathLength);
+        if (!path.endsWith(".tmp")) {
+            cleanupCandidateTrackingFailed = true;
+            return cardputer::OperationResult{
+                false, "Model SFTP write reported a malformed temporary path"};
+        }
+        for (int index = prefix.length(); index < prefix.length() + 16; ++index) {
+            const char value = path[index];
+            if (!((value >= '0' && value <= '9') ||
+                  (value >= 'a' && value <= 'f'))) {
+                cleanupCandidateTrackingFailed = true;
+                return cardputer::OperationResult{
+                    false, "Model SFTP write reported a malformed temporary path"};
+            }
+        }
+        for (std::size_t index = 0;
+             index < temporaryCleanupCandidateCount; ++index) {
+            if (temporaryCleanupCandidates[index] == path) {
+                return cardputer::OperationResult{true, ""};
+            }
+        }
+        if (temporaryCleanupCandidateCount >= temporaryCleanupCandidates.size()) {
+            cleanupCandidateTrackingFailed = true;
+            return cardputer::OperationResult{
+                false, "Model SFTP write reported too many temporary paths"};
+        }
+        temporaryCleanupCandidates[temporaryCleanupCandidateCount++] = path;
+        return cardputer::OperationResult{true, ""};
+    };
+
+    cardputer::SshProfile profile;
+    cardputer::OperationResult preflight = cardputer::loadSshProfile(profile);
+    cardputer::SshClient preflightClient;
+    if (preflight.success) {
+        preflight = connectTrustedSsh(profile, preflightClient);
+    }
+    if (preflight.success) {
+        preflight = preflightClient.openSftpControlled(30000, neverCancel);
+    }
+    bool sourceCollision = false;
+    bool destinationCollision = false;
+    if (preflight.success) {
+        preflight = findOwnedName(preflightClient, sourcePath, sourceCollision);
+    }
+    if (preflight.success) {
+        preflight = findOwnedName(
+            preflightClient, destinationPath, destinationCollision);
+    }
+    preflightClient.close();
+    if (!preflight.success) {
+        cleanupComplete = true;
+        return preflight;
+    }
+    if (sourceCollision || destinationCollision) {
+        cleanupComplete = true;
+        return {
+            false, "Model SFTP exact-owned fixture path already exists"};
+    }
+
+    const auto inspectExactPath = [&](const String& path, bool& found) {
+        cardputer::SshClient client;
+        cardputer::OperationResult inspected = connectTrustedSsh(profile, client);
+        if (inspected.success) {
+            inspected = client.openSftpControlled(30000, neverCancel);
+        }
+        if (inspected.success) inspected = findOwnedName(client, path, found);
+        client.close();
+        return inspected;
+    };
+    const auto cleanup = [&](cardputer::OperationResult outcome) {
+        const bool hasCleanupCandidate = sourceCleanupCandidate ||
+            destinationCleanupCandidate || temporaryCleanupCandidateCount > 0;
+        if (!hasCleanupCandidate) {
+            cleanupComplete = !cleanupCandidateTrackingFailed;
+            return outcome;
+        }
+        cardputer::OperationResult cleaned = {true, ""};
+        cardputer::SshClient client;
+        if (cleaned.success) cleaned = connectTrustedSsh(profile, client);
+        if (cleaned.success) cleaned = client.openSftpControlled(30000, neverCancel);
+        const std::array<String, 5> paths = {
+            sourcePath,
+            destinationPath,
+            temporaryCleanupCandidates[0],
+            temporaryCleanupCandidates[1],
+            temporaryCleanupCandidates[2],
+        };
+        const std::array<bool, 5> owned = {
+            sourceCleanupCandidate,
+            destinationCleanupCandidate,
+            temporaryCleanupCandidateCount > 0,
+            temporaryCleanupCandidateCount > 1,
+            temporaryCleanupCandidateCount > 2,
+        };
+        for (std::size_t index = 0; cleaned.success && index < paths.size(); ++index) {
+            if (!owned[index]) continue;
+            bool found = false;
+            cleaned = findOwnedName(client, paths[index], found);
+            if (cleaned.success && found) {
+                cleaned = client.removeSftpPath(paths[index], false, 30000);
+            }
+        }
+        for (std::size_t pass = 0; cleaned.success && pass < 2; ++pass) {
+            for (std::size_t index = 0; cleaned.success && index < paths.size(); ++index) {
+                if (!owned[index]) continue;
+                bool found = false;
+                cleaned = findOwnedName(client, paths[index], found);
+                if (cleaned.success && found) {
+                    cleaned = {false, "Exact model SFTP fixture remains after cleanup"};
+                }
+            }
+        }
+        client.close();
+        cleanupComplete = cleaned.success && !cleanupCandidateTrackingFailed;
+        if (!cleanupComplete) {
+            const String cleanupError = cleaned.success
+                ? String("Exact model SFTP cleanup candidate tracking failed")
+                : cleaned.error;
+            return cardputer::OperationResult{
+                false, outcome.success
+                    ? cleanupError
+                    : outcome.error + "; exact remote cleanup failed: " + cleanupError};
+        }
+        return outcome;
+    };
+
+    cardputer::OperationResult outcome = {true, ""};
+    sourceCleanupCandidate = true;
+    cardputer::ToolExecutionResult result =
+        write(sourcePath, sourceContent, false);
+    if (!result.success) {
+        const cardputer::OperationResult remembered =
+            rememberTemporaryPath(result.error);
+        outcome = remembered.success
+            ? cardputer::OperationResult{false, result.error}
+            : remembered;
+    }
+    if (outcome.success) {
+        destinationCleanupCandidate = true;
+        result = write(destinationPath, existingContent, false);
+        if (!result.success) {
+            const cardputer::OperationResult remembered =
+                rememberTemporaryPath(result.error);
+            outcome = remembered.success
+                ? cardputer::OperationResult{false, result.error}
+                : remembered;
+        }
+    }
+    if (outcome.success) {
+        JsonDocument firstArguments;
+        firstArguments["path"] = "/tmp";
+        firstArguments["offset"] = 0;
+        firstArguments["max_entries"] = 1;
+        const cardputer::ToolExecutionResult first =
+            cardputer::executeSftpListTool(
+                makeCall("p4-06-list-1", "sftp_list", firstArguments),
+                neverCancel);
+        JsonDocument firstOutput;
+        if (!first.success || deserializeJson(firstOutput, first.output) ||
+            !firstOutput["entries"].is<JsonArray>() ||
+            firstOutput["entries"].as<JsonArray>().size() != 1 ||
+            firstOutput["eof"].as<bool>()) {
+            outcome = {false, first.success
+                ? String("First model SFTP list page was not bounded") : first.error};
+        } else {
+            const std::uint32_t next =
+                firstOutput["next_offset"].as<std::uint32_t>();
+            JsonDocument secondArguments;
+            secondArguments["path"] = "/tmp";
+            secondArguments["offset"] = next;
+            secondArguments["max_entries"] = 1;
+            const cardputer::ToolExecutionResult second =
+                cardputer::executeSftpListTool(
+                    makeCall("p4-06-list-2", "sftp_list", secondArguments),
+                    neverCancel);
+            JsonDocument secondOutput;
+            if (next == 0 || !second.success ||
+                deserializeJson(secondOutput, second.output) ||
+                !secondOutput["entries"].is<JsonArray>() ||
+                secondOutput["entries"].as<JsonArray>().size() != 1 ||
+                secondOutput["next_offset"].as<std::uint32_t>() <= next) {
+                outcome = {false, second.success
+                    ? String("Second model SFTP list page did not advance")
+                    : second.error};
+            }
+        }
+    }
+    if (outcome.success) {
+        outcome = expectRead(sourcePath, 0, 4, "ABC", 3, false);
+    }
+    if (outcome.success) {
+        outcome = expectRead(
+            sourcePath, 3, 4, std::string("\xD1\x8F") + "Z", 6, true);
+    }
+    if (outcome.success && read(sourcePath, 4, 4).success) {
+        outcome = {false, "Model SFTP read accepted a UTF-8 continuation offset"};
+    }
+    if (outcome.success && move(false).success) {
+        outcome = {false, "Model SFTP no-overwrite move replaced an existing target"};
+    }
+    if (outcome.success) {
+        outcome = expectRead(sourcePath, 0, 8, sourceContent, 6, true);
+    }
+    if (outcome.success) {
+        outcome = expectRead(destinationPath, 0, 16, existingContent, 8, true);
+    }
+    if (outcome.success) {
+        result = move(true);
+        if (!result.success) outcome = {false, result.error};
+    }
+    if (outcome.success) {
+        bool sourceStillExists = false;
+        outcome = inspectExactPath(sourcePath, sourceStillExists);
+        if (outcome.success && sourceStillExists) {
+            outcome = {
+                false, "Model SFTP overwrite move left the source path present"};
+        }
+    }
+    if (outcome.success) {
+        outcome = expectRead(destinationPath, 0, 8, sourceContent, 6, true);
+    }
+    if (outcome.success) {
+        result = write(destinationPath, finalContent, true);
+        if (!result.success) {
+            const cardputer::OperationResult remembered =
+                rememberTemporaryPath(result.error);
+            outcome = remembered.success
+                ? cardputer::OperationResult{false, result.error}
+                : remembered;
+        }
+    }
+    if (outcome.success) {
+        outcome = expectRead(destinationPath, 0, 8, finalContent, 5, true);
+    }
+    return cleanup(outcome);
+}
+
 cardputer::OperationResult runSshDemoTest()
 {
     const cardputer::SshProfile profile = {

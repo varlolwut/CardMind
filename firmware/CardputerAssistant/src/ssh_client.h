@@ -31,6 +31,16 @@ struct SshProfileSummary {
     SshAuthMode authMode;
 };
 
+struct SshAuthoritySummary {
+    std::uint64_t profileId;
+    String name;
+    String host;
+    std::uint16_t port;
+    String username;
+    SshAuthMode authMode;
+    std::uint64_t privateKeyId;
+};
+
 constexpr std::size_t kMaximumSshProfiles = 5;
 
 struct SshRuntimeProbeResult {
@@ -68,10 +78,34 @@ struct SftpEntriesResult {
     String error;
 };
 
+struct SftpPageResult {
+    bool success;
+    std::vector<SftpEntry> entries;
+    std::uint32_t nextOffset;
+    bool eof;
+    String error;
+};
+
+struct SftpReadResult {
+    bool success;
+    std::string content;
+    std::uint64_t nextOffset;
+    std::uint64_t totalBytes;
+    bool eof;
+    String error;
+};
+
+struct SftpMutationResult {
+    bool success;
+    bool outcomeUnknown;
+    String error;
+};
+
 using SshCommandOutputCallback =
     std::function<OperationResult(const std::uint8_t*, std::size_t)>;
 
 OperationResult loadSshProfile(SshProfile& profile);
+OperationResult loadSelectedSshAuthority(SshAuthoritySummary& authority);
 OperationResult saveSshProfile(const SshProfile& profile);
 OperationResult loadSshProfileSummaries(
     std::vector<SshProfileSummary>& profiles,
@@ -142,8 +176,35 @@ public:
         const std::function<bool()>& isCancelled,
         const SshCommandOutputCallback& onOutput);
     OperationResult openSftp(std::uint32_t timeoutMs);
+    OperationResult openSftpControlled(
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
     SftpEntriesResult listSftpDirectory(const String& path,
                                         std::uint32_t timeoutMs);
+    SftpPageResult listSftpDirectoryPageControlled(
+        const String& path,
+        std::uint32_t offset,
+        std::size_t maximumEntries,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
+    SftpReadResult readSftpFileChunkControlled(
+        const String& path,
+        std::uint64_t offset,
+        std::size_t maximumBytes,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
+    SftpMutationResult writeSftpTextFileControlled(
+        const String& path,
+        const std::string& content,
+        bool overwrite,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
+    SftpMutationResult moveSftpPathControlled(
+        const String& sourcePath,
+        const String& destinationPath,
+        bool overwrite,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
     OperationResult downloadSftpFile(const String& remotePath,
                                      const String& workspaceName,
                                      std::uint32_t timeoutMs);

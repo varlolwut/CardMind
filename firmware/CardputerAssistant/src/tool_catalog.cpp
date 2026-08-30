@@ -18,6 +18,14 @@ constexpr std::array<ToolCatalogEntry, kToolCatalogSize> kToolCatalog = {{
      ToolCapability::FilesWriteDelete},
     {ToolSchemaId::SshCommand, "ssh_command", ToolCapabilityGroup::Ssh,
      ToolCapability::SshMutate},
+    {ToolSchemaId::SftpList, "sftp_list", ToolCapabilityGroup::Ssh,
+     ToolCapability::SftpReadWrite},
+    {ToolSchemaId::SftpRead, "sftp_read", ToolCapabilityGroup::Ssh,
+     ToolCapability::SftpReadWrite},
+    {ToolSchemaId::SftpWrite, "sftp_write", ToolCapabilityGroup::Ssh,
+     ToolCapability::SftpReadWrite},
+    {ToolSchemaId::SftpMove, "sftp_move", ToolCapabilityGroup::Ssh,
+     ToolCapability::SftpReadWrite},
 }};
 
 bool decisionIncludesSchema(ToolPermissionDecision decision) noexcept
@@ -161,7 +169,7 @@ ToolPermissionDecision toolRequestPlanDecision(
 ToolConfirmationReason toolConfirmationReason(
     ToolPermissionDecision decision,
     ToolSchemaId schema,
-    bool replacesExistingFile) noexcept
+    bool mutatesExistingTarget) noexcept
 {
     if (static_cast<std::uint8_t>(schema) >=
             static_cast<std::uint8_t>(ToolSchemaId::Count) ||
@@ -170,7 +178,9 @@ ToolConfirmationReason toolConfirmationReason(
         return ToolConfirmationReason::None;
     }
     if (schema == ToolSchemaId::SshCommand ||
-        (schema == ToolSchemaId::WriteFile && replacesExistingFile)) {
+        ((schema == ToolSchemaId::WriteFile ||
+          schema == ToolSchemaId::SftpWrite ||
+          schema == ToolSchemaId::SftpMove) && mutatesExistingTarget)) {
         return ToolConfirmationReason::Mandatory;
     }
     return decision == ToolPermissionDecision::Ask

@@ -5789,6 +5789,28 @@ void handleSerialCommand(const String& command)
             result.success ? "none" : result.error.c_str());
         return;
     }
+    if (command == "MODELSFTPTEST") {
+        ensureNetworkReady();
+        cardputer::markOperation("model_sftp_test");
+        const std::uint32_t startedAt = millis();
+        bool cleanupComplete = false;
+        const cardputer::OperationResult result =
+            runModelSftpRemoteTest(cleanupComplete);
+        const std::uint32_t elapsedMs = millis() - startedAt;
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "MODELSFTPTEST result=%s elapsed_ms=%u heap=%u minimum_heap=%u largest_heap=%u stack_free=%u cleanup=%s error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(elapsedMs),
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(ESP.getMinFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            cleanupComplete ? "yes" : "no",
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
     if (command == "SSHSESSIONTEST" || command == "SFTPTEST") {
         ensureNetworkReady();
         cardputer::markOperation(command == "SFTPTEST" ? "sftp_test" : "ssh_session_test");

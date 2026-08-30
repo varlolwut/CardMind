@@ -53,7 +53,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-03 | Conservative model SSH classification in the existing Phase 3 policy/runtime path | Every arbitrary shell `ssh_command` remains `SshMutate`; `SshRead` is available only to exact fixed reviewed safe actions or strict non-shell templates; no regex/prefix shell classifier exists; manual Device/Web terminal authority is unchanged | completed |
 | P4-04 | Configurable model SSH command timeout/output policy while retaining the existing 1,024-byte direct command cap | Timeout/output policy is explicit; the user-removed 8 KiB increase is not implemented | completed |
 | P4-05 | Single-pass streamed SD command log, bounded model summary/reference, cancellation, and downloadable output | Output is written once while streaming to SD; the model receives only a bounded summary/reference; a long foreground command cancels and its log downloads without background execution | completed |
-| P4-06 | Paged model SFTP list/read/write/move through existing `SftpReadWrite` and Phase 3 permission/confirmation boundaries | Model listing is bounded/paged; `Ask` confirms every model SFTP call; `Allow` still confirms overwrite/delete/move onto an existing target; overwrite defaults deny and no prior remote target is truncated/deleted before confirmed safe replacement; manual Device/Web SFTP remains direct-user authority | pending |
+| P4-06 | Paged model SFTP list/read/write/move through existing `SftpReadWrite` and Phase 3 permission/confirmation boundaries | Model listing is bounded/paged; `Ask` confirms every model SFTP call; `Allow` still confirms overwrite/delete/move onto an existing target; overwrite defaults deny and no prior remote target is truncated/deleted before confirmed safe replacement; manual Device/Web SFTP remains direct-user authority | completed |
 | P4-07 | Existing streaming CardMind workspace transfer to/from selected remote host | Both directions preserve workspace policy, total foreground deadline and cooperative cancel; overwrite defaults deny and replacement never destroys the prior target before confirmation | pending |
 | P4-08 | Small fixed built-in Safe Actions set for logs, service state, containers, disk and processes | Reviewed fixed actions obey existing Off/Ask/ceiling/host-key/timeout/audit boundaries; no presets, editor, macros, persistence schema or action framework | pending |
 | P4-09 | Removed by user: Web terminal tabs; existing single terminal remains | Scope closed by explicit user decision; not implemented | removed_by_user |
@@ -969,3 +969,238 @@ state, API, timeout, output-storage or channel-management contract changes.
 - P4-05 completed at 2026-08-30 23:59:26 +03:00 after approximately 89 minutes. The mandatory
   material pivots were the independently closed P4-04 validator regression and then the proven
   same-iteration cancellation-order correction; no third patch/review loop was entered.
+
+## P4-06 design gate
+
+**Status:** completed
+**Started:** 2026-08-31 00:15:29 +03:00.
+
+### Locked clauses, adjacent ownership and non-goals
+
+- Add exactly four model-facing tools: `sftp_list`, `sftp_read`, `sftp_write` and `sftp_move`.
+  They use the existing single `ToolCapability::SftpReadWrite`, Phase 3 policy resolution,
+  confirmation, pending preview, audit and cancellation boundaries.
+- `Ask` requires confirmation for every model SFTP call. Under `Allow`, `sftp_write` and
+  `sftp_move` still require mandatory confirmation when their explicit `overwrite` argument is
+  true. No remote lookup, stat or mutation occurs before confirmation. The pending preview shows
+  the exact destination and whether overwrite was requested.
+- `overwrite` defaults to false. A write never opens the destination with `TRUNC` and a move never
+  unlinks the destination. Replacement uses a collision-owned same-directory temporary file plus
+  negotiated POSIX rename only after confirmation; a no-overwrite call uses the same completed-temp
+  path and ordinary rename with zero flags.
+- Listing is paged and bounded to at most 16 returned entries. Write content and each returned read
+  chunk are bounded to 12,288 valid UTF-8 bytes, matching the existing model workspace chunk
+  ceiling. Read offsets are raw byte offsets and `max_bytes` is 4..12,288 so a complete Unicode
+  code point can always make progress. Remote paths are absolute, length-aware, NUL/CR/LF-free and
+  at most 511 bytes.
+- Every operation remains one foreground connection with a fixed 60-second total deadline from
+  connection start through SFTP completion and cooperative cancellation. Existing trusted-host
+  verification remains mandatory and mismatch or missing trust fails closed before authentication
+  or SFTP mutation.
+- Manual Device/Web SFTP retains direct-user authority and its existing methods. P4-07 owns
+  workspace transfer, P4-11 owns standalone mismatch acceptance, P4-14 owns project/chat ceilings,
+  and P4-16/P4-17 own consolidated UI journeys.
+- Non-goals: a new capability or permission hierarchy, delete tool, shell classifier, remote
+  action editor, background executor, retries, resumable transfer, persistent settings, remote
+  transaction/recovery framework, UI assets, host-key-store changes or general SFTP abstraction.
+
+### Existing producer, consumer, persistence and vendor inventory
+
+- `tool_catalog` currently has seven schemas and an 8-bit mask. Four appended stable schema IDs
+  require an 11-bit `uint16_t` mask; the plan itself is not persisted. The persisted policy codec
+  already owns `SftpReadWrite` as `sf`, so no Settings or codec migration is required.
+- `resolveChatToolPermissions()` currently leaves `SftpReadWrite` unavailable. The existing
+  project route delegates all non-file tools to the generic audited route; enabling the existing
+  capability and adding four dispatch cases is sufficient.
+- Pending tool-call format v2 already stores canonical arguments and a generic SSH target. P4-06
+  reuses that target: its authority hash is rebuilt from the selected public summary's stable
+  opaque profile ID, public connection fields and trusted fingerprint without loading any profile
+  secret; SFTP targets additionally store the canonical remote destination in `target.name`.
+  Existing v2 `ssh_command` targets remain readable; a pre-change authority hash may become stale
+  and fail closed, but is not treated as corrupt or migrated.
+- Existing Device and Web confirmation renderers already display generic `targetName` and preview
+  body. No Device/Web asset change is needed to show destination, source and overwrite intent.
+- Existing manual SFTP list allocates and sorts the whole directory; model listing therefore needs
+  a separate bounded page method. Existing manual upload opens the destination with `TRUNC` and is
+  not reused for model writes. Existing manual download/transfer remains P4-07 ownership.
+- The installed CardMind package identifies itself as version 1.11.1 in `library.properties`, while
+  the compiled official-derived header is exact `LIBSSH2_VERSION` `1.11.1_DEV`. Its `CREAT|EXCL`
+  open fails when a name exists. For SFTP v3, ordinary `rename_ex` does not transmit rename flags;
+  therefore no-overwrite uses ordinary rename with zero flags, while confirmed overwrite uses only
+  the negotiated `posix-rename@openssh.com` extension. If that extension is unsupported, overwrite
+  fails explicitly with source and destination unchanged. There is no unlink/TRUNC fallback and no
+  stronger portability claim than the server extension supplies.
+- The completed read-only inventory agent was closed after one report and will not be reused for
+  design, code, evidence or another roadmap row.
+
+### Minimal contracts and state transitions
+
+- `sftp_list`: exact `path`, `offset` and `max_entries`; `max_entries` is 1..16. It scans the
+  foreground directory stream to the requested accepted-entry offset under the total deadline,
+  retains at most one page plus one lookahead, and returns entries, `next_offset` and `eof`.
+- `sftp_read`: exact `path`, raw byte `offset` and `max_bytes`; `max_bytes` is 4..12,288. A starting
+  offset on a UTF-8 continuation byte fails explicitly. The reader returns the largest valid prefix
+  not exceeding `max_bytes`; if the bound splits a multibyte code point, `next_offset` remains at
+  that code point so the next call returns it once, without skip or duplication. NUL/binary/invalid
+  UTF-8 fails with no partial model result.
+- `sftp_write`: exact `path`, `content` and optional boolean `overwrite` normalized to false. It
+  creates a bounded collision-owned same-directory temporary path with `CREAT|EXCL`, writes and
+  closes the full content, then renames once to the destination. False uses ordinary rename with
+  zero flags; true uses only `posix-rename@openssh.com` after mandatory confirmation and fails
+  unchanged if the extension is unsupported.
+- `sftp_move`: exact `source_path`, `destination_path` and optional boolean `overwrite` normalized
+  to false. It performs one rename; false uses ordinary rename with zero flags, while true uses only
+  `posix-rename@openssh.com` after mandatory confirmation and fails unchanged if unsupported.
+- Pending build and claim bind the canonical call, project/chat revision, stable selected profile
+  ID, host, port, username, auth mode, trusted fingerprint, private-key ID for private-key auth, and
+  displayed destination. One narrow public-only authority lookup reads the selected non-secret ID
+  and binding without password, passphrase or private-key bytes. Claim performs no remote operation.
+  SFTP write/move preview body states overwrite yes/no; move also states the exact source.
+- One outer start time and terminal latch governs connect, trust check, authentication, SFTP open,
+  data I/O and rename. Every stage receives only the remaining part of the fixed 60-second budget;
+  stages cannot accumulate fresh 60-second windows. Existing bounded channel/session close and an
+  exact temporary cleanup attempt occur synchronously after the terminal outcome and outside that
+  mutation deadline; no remote operation continues after return.
+- Before the first rename call, cancellation/timeout leaves source and destination unchanged and
+  attempts exact temporary cleanup. Once any rename attempt begins, cancellation, timeout, reset or
+  connector loss before a final status has an explicitly unknown remote outcome and is never
+  retried. A success status is committed remote state. A reset before rename may leave only the
+  collision-owned temporary path; there is no boot scan/recovery owner. Cleanup failure reports that
+  exact path without touching a destination or unrelated path.
+- Pending state remains the existing atomic SD v2 owner. A rebooted pending call remains
+  non-resumable under the existing boot boundary; no SFTP operation starts during recovery.
+
+### Frozen minimal proof and forbidden effects
+
+| Observation | Required result |
+| --- | --- |
+| Catalog/policy | Four appended schemas, 11-bit mask, existing `sf` codec unchanged, SSH group and Off/Deny/Unavailable fail closed |
+| Confirmation | `Ask` persists all four calls; `Allow` executes list/read and no-overwrite write/move, but persists overwrite write/move; destination and overwrite are visible |
+| Pending identity | Canonical exact fields round-trip; selected profile ID/public authority/private-key binding or destination change makes approval stale; no password/passphrase/private-key read or persisted value |
+| Bounded read/list | Two list pages contain at most 16 entries with correct continuation; reads return at most 12,288 valid UTF-8 bytes, reject binary/NUL/mid-code-point offsets, and split one multibyte code point across the bound without skip/duplication |
+| Safe write | Existing destination is unchanged before approval, on deny, on no-overwrite failure, temp-write failure and cancellation before the first rename call; a started rename without final status is unknown; confirmed replacement writes exact bytes and leaves no temp |
+| Safe move | Existing destination blocks no-overwrite; confirmed overwrite uses negotiated POSIX rename or fails unchanged, with no fallback unlink; source/destination and pre-send/sent-unknown/success states are explicit |
+| Trust/audit/cancel | Missing or changed host trust blocks before SFTP; every started call uses existing audit/cancel owner and no work continues after foreground return |
+| Total deadline | A focused boundary proves connect/trust/auth/open/data/rename consume one shared 60-second budget while bounded teardown/temp cleanup is reported separately |
+| Device/resources | One exact-core build/upload and smallest real-host exact-owned list/read/write/move scenario pass; active SSH heap/largest block/stack/latency do not regress or reset/freeze |
+| Cleanup | Collision-checked remote fixtures and pending state are removed after success/failure, repeated cleanup is idempotent, and prior profile/selection/remote inventory is restored |
+
+- Forbidden: destination `TRUNC` or pre-delete, remote preflight before confirmation, full-directory
+  materialization, partial model output after a read failure, secret/key/path bytes in schema,
+  result, pending JSON, preview, audit, serial or diagnostics, and any manual SFTP authority change.
+- Forbidden: P4-07 transfer, P4-08 Safe Actions, P4-11 host-store UI, P4-14 ceilings, P4-16/P4-17
+  UI integration, background work, retry/reconnect, temp-file boot scan or generic SFTP framework.
+
+### Expected row-owned write set
+
+- Production: `src/tool_catalog.{h,cpp}`, `src/tool_policy.cpp`, `src/api_client.cpp`,
+  `src/pending_tool_call.cpp`, `src/tool_router.cpp`, `src/ssh_client.{h,cpp}` and one narrow
+  `src/sftp_tool.{h,cpp}` execution owner.
+- Proportional proof: `tests/host_tests.cpp` plus the existing serial diagnostic owner only if a
+  direct real-host observation cannot be made through an existing command. No Web asset, Settings,
+  policy codec, project/chat schema, known-host storage or manual SFTP UI file may change.
+
+### Device-proof owner
+
+- Read-only inventory after the first successful upload confirmed that existing `SFTPTEST` and
+  `SSHDEMOTEST` exercise only the pre-P4 manual list/download methods; no existing serial command
+  reaches the four model-SFTP executors. The optional existing serial owner is therefore activated
+  for one proportional `MODELSFTPTEST` only in `SshTools.ino`, its forward declaration/header include
+  in `CardputerAssistant.ino`, and command/result wiring in `SerialDiagnostics.ino`.
+- The diagnostic uses the unchanged selected profile/trust, two random collision-checked exact-owned
+  `/tmp` names and no SD/pending/profile mutation. It proves two one-entry list pages, UTF-8 raw-offset
+  continuation, no-overwrite unchanged state, safe move/write overwrite, then removes only checked
+  final paths it attempted and exact temporary paths reported by the connector, verifying every
+  candidate absent twice. Any failure runs the same bounded cleanup.
+
+### Diagnostic cleanup correction lock
+
+- Architect health-check and the fresh read-only test review confirmed a P4-06 diagnostic defect,
+  not a production-contract or adjacent-row defect: an initial write whose rename outcome is unknown
+  can leave its final or reported collision-owned temporary path even though the model executor
+  returns an ordinary failure, while the diagnostic previously marked a final path owned only after
+  success and skipped cleanup when neither success flag was set. The serial result also derived
+  `cleanup=yes` from overall operation success instead of observing cleanup independently.
+- Before any mutation, the diagnostic must use the selected trusted profile to collision-check both
+  random final paths. Immediately before each attempted write it marks that already-absent final path
+  as an exact-owned cleanup candidate. A failed write contributes only a reported path matching the
+  exact `/tmp/.cardmind-<16 lowercase hex>.tmp` production pattern; malformed or excess candidates
+  fail the diagnostic rather than broadening cleanup. Success, failure and sent-unknown outcomes run
+  one bounded cleanup over only these candidates and verify every candidate absent twice.
+- After a successful overwrite move, the diagnostic must directly verify that the source path is
+  absent before cleanup, so cleanup cannot hide a copy-like or partial move result. The serial result
+  reports cleanup completion through a separate output value on both pass and failure paths.
+- Frozen correction write set: only this evidence section plus the existing `MODELSFTPTEST`
+  declaration, implementation and serial result wiring. No production SFTP contract/API, schema,
+  permission, persistence, retry/recovery owner or general fixture framework may change.
+
+### Design review outcome
+
+- Fresh independent reviewer `01a05489-4289-7990-949a-5c03827deb62` returned five concrete STOP
+  items: SFTP-v3 overwrite semantics, rename sent/unknown states, private-key binding in pending
+  authority, one shared deadline and UTF-8 chunk boundaries. One combined follow-up confirmed that
+  all substantive blockers were resolved and identified only two stale trace phrases; those exact
+  phrases were corrected above. The reviewer is closed and will not review implementation,
+  evidence, closure or another roadmap row.
+
+### Code review correction gate
+
+- Fresh read-only code review returned `STOP` for six concrete P4-06 defects: one duplicate local
+  contract declaration; overwrite confirmation recomputed from the wrong canonical field; an
+  indeterminate temporary-file open without explicit outcome/cleanup reporting; wrapper loss of
+  exact cleanup detail; pre-send versus sent-unknown rename state collapse; and worst-case JSON
+  expansion beyond existing pending/result bounds.
+- Ownership is active-row P4-06. No completed or adjacent row is reopened. The correction is locked
+  to those six findings, uses the existing pending/result limits and SFTP connector, and adds no
+  schema, persistence owner, retry, recovery framework, UI or manual-SFTP change.
+- Canonical `overwrite`, not remote target state, drives claim-time confirmation. A local
+  first-call flag distinguishes cancellation/deadline before rename from a sent request whose
+  final status is unavailable. An in-flight temporary create is resolved only through the same
+  bounded libssh2 call; success is closed/unlinked, while unresolved status reports the exact
+  collision-owned path and unknown outcome without retry.
+- Model SFTP content is explicitly text: NUL and C0/DEL controls other than tab, CR and LF are
+  rejected while valid UTF-8 up to 12,288 bytes remains accepted. Thus JSON escaping is at most
+  twofold and both canonical pending arguments and read results fit the existing 32-KiB envelope;
+  no larger buffer, storage side channel or new codec is introduced.
+- After one coherent primary-agent correction and cheap checks, the same reviewer may receive its
+  single combined follow-up for only these findings, then it is closed.
+- The corrected diff passed `git diff --check` and the strict WSL host suite. The same reviewer used
+  its single combined follow-up, returned `GO` for all six corrections and was then closed; it will
+  not review evidence, closure or another row.
+- The first exact firmware compile then failed before link on one P4-06-owned type mismatch while
+  prefixing an SFTP move preview (`Arduino String` plus `std::string`). The locked correction is one
+  `std::string` expression; no design, interface or adjacent-row behavior changes. This is recorded
+  as one late compile escape and justifies one repeated exact build.
+
+### Observed P4-06 evidence and closure
+
+- Strict host regression, `git diff --check` and the focused catalog/policy/pending/parser checks
+  passed. They proved four appended schemas with the existing `SftpReadWrite` capability, fail-closed
+  Off/Deny/Unavailable behavior, `Ask` confirmation for every call, `Allow` confirmation for explicit
+  overwrite, canonical destination/overwrite preview and stale approval after authority, key binding
+  or destination change. No Settings codec, Web asset, new capability or manual-SFTP authority changed.
+- The independent production code reviewer returned `GO` after its six concrete blockers were
+  corrected and was closed. Architect health-check plus the fresh diagnostic reviewer independently
+  confirmed the later fixture-cleanup and source-absence defects; the primary correction changed only
+  the existing diagnostic declaration/implementation/result wiring and the trace lock above.
+- Final exact pinned build passed with FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`, the unique resolved M5Stack
+  ESP32 core `3.2.1`, 3,396,822 sketch bytes and 65,628 global bytes. The uploaded image is 3,397,008
+  bytes with SHA-256 `BDEC90F28414C02EC1A4965A7123B1D38CA52AD57B53F18A8BD9420B41F158AE`;
+  every flashed segment reported hash verification and COM8 returned after reset.
+- Real-device `MODELSFTPTEST` passed in 57,728 ms through the four model executors. It observed two
+  bounded one-entry list pages with advancing continuation, UTF-8 byte-offset split and continuation
+  rejection, exact reads, no-overwrite preservation, confirmed overwrite move/write, source absence
+  after the successful move and final content. The same selected trusted profile and existing manual
+  SFTP owner were used; no profile, selection, pending state, SD file or user remote object changed.
+- Both random `/tmp/cardmind-p4-06-<nonce>-*` paths were collision-checked before mutation. Every
+  attempted final path and any exact connector-reported `/tmp/.cardmind-<16hex>.tmp` candidate used
+  the bounded success/failure cleanup path, was verified absent twice, and serial independently
+  returned `cleanup=yes`. No retry, boot scan or general fixture/recovery framework was added.
+- Post-scenario `STATUS` remained responsive with microSD ready, two preserved chats and two history
+  entries, reset reason 1, free heap 117,540 bytes, largest block 53,236 bytes, minimum heap 48,552
+  bytes and stack margin 7,860 bytes. The diagnostic result itself reported free heap 117,076 bytes
+  and the same minimum/largest/stack bounds. This remains above the retained active-SSH comparison
+  points for free heap and largest block, with only a 396-byte lower global minimum than P4-05, and
+  no reset, freeze or persistent session.
+- P4-06 completed at 2026-08-31 01:37:01 +03:00. P4-07 and later behavior remain pending.

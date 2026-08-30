@@ -214,13 +214,12 @@ ToolCapabilityGroupMaskResult toolCapabilityGroupMask(
             };
         case ToolCapability::SshRead:
         case ToolCapability::SshMutate:
+        case ToolCapability::SftpReadWrite:
             return {
                 static_cast<std::uint8_t>(
                     1U << static_cast<std::uint8_t>(ToolCapabilityGroup::Ssh)),
                 ToolPolicyContractError::None,
             };
-        case ToolCapability::SftpReadWrite:
-            return {0, ToolPolicyContractError::None};
         case ToolCapability::PythonWriteRun:
             return {
                 static_cast<std::uint8_t>(

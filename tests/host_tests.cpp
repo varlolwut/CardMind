@@ -123,7 +123,7 @@ void testToolPolicyContracts()
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Files),
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Ssh),
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Ssh),
-            0,
+            toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Ssh),
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Python),
         };
     for (std::size_t index = 0; index < expectedMasks.size(); ++index) {
@@ -292,11 +292,12 @@ cardputer::ToolPolicyResolutionResult uniformToolResolution(
 void testToolCatalogAndRequestPlan()
 {
     const auto& catalog = cardputer::toolCatalog();
-    const std::array<std::string, 7> expectedNames = {
+    const std::array<std::string, 11> expectedNames = {
         "web_search", "web_fetch", "list_files", "read_file",
         "write_file", "append_file", "ssh_command",
+        "sftp_list", "sftp_read", "sftp_write", "sftp_move",
     };
-    const std::array<cardputer::ToolCapabilityGroup, 7> expectedGroups = {
+    const std::array<cardputer::ToolCapabilityGroup, 11> expectedGroups = {
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Files,
@@ -304,8 +305,12 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapabilityGroup::Files,
         cardputer::ToolCapabilityGroup::Files,
         cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
     };
-    const std::array<cardputer::ToolCapability, 7> expectedPrimary = {
+    const std::array<cardputer::ToolCapability, 11> expectedPrimary = {
         cardputer::ToolCapability::WebSearch,
         cardputer::ToolCapability::WebFetch,
         cardputer::ToolCapability::FilesRead,
@@ -313,8 +318,12 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapability::FilesWriteDelete,
         cardputer::ToolCapability::FilesWriteDelete,
         cardputer::ToolCapability::SshMutate,
+        cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SftpReadWrite,
     };
-    require(catalog.size() == 7, "Tool catalog size changed");
+    require(catalog.size() == 11, "Tool catalog size changed");
     for (std::size_t index = 0; index < catalog.size(); ++index) {
         require(static_cast<std::size_t>(catalog[index].schema) == index &&
                     expectedNames[index] == catalog[index].name &&
@@ -330,8 +339,9 @@ void testToolCatalogAndRequestPlan()
                     &catalog[index],
                 "Canonical tool name did not resolve to its catalog row");
     }
-    const std::array<std::string, 5> noncanonicalNames = {
-        "WebSearch", "web-search", "SSH_COMMAND", "ssh-command", "sftp_list",
+    const std::array<std::string, 6> noncanonicalNames = {
+        "WebSearch", "web-search", "SSH_COMMAND", "ssh-command",
+        "SFTP_LIST", "sftp-list",
     };
     for (const std::string& name : noncanonicalNames) {
         require(cardputer::toolCatalogEntryForName(name) == nullptr,
@@ -450,7 +460,7 @@ void testToolCatalogAndRequestPlan()
                     resolvedBefore.permissions[index].source;
         }
         require(plan.error == cardputer::ToolPolicyContractError::None &&
-                    plan.schemas == 0x7F &&
+                    plan.schemas == 0x7FF &&
                     plan.missingRequiredGroups ==
                         static_cast<std::uint8_t>(mask & pythonGroup) &&
                     remainingGroups ==
@@ -473,7 +483,7 @@ void testToolCatalogAndRequestPlan()
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
         plan, remaining, "WebSearch");
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
-        plan, remaining, "sftp_list");
+        plan, remaining, "SFTP_LIST");
     require(remaining == requiredUnion,
             "Unknown or noncanonical tool call satisfied a required group");
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
@@ -498,9 +508,9 @@ void testToolCatalogAndRequestPlan()
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
         plan, remaining, "read_file");
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
-        plan, remaining, "ssh_command");
+        plan, remaining, "sftp_list");
     require(remaining == 0,
-            "Exact multi-group tool calls left a required group unmatched");
+            "Exact SFTP call did not satisfy the SSH required group");
 
     cardputer::ToolRequestPlan forged = plan;
     forged.decisions[static_cast<std::size_t>(
@@ -515,7 +525,7 @@ void testToolCatalogAndRequestPlan()
             "Inconsistent denied schema satisfied a required group");
     forged = plan;
     forged.schemas = static_cast<cardputer::ToolSchemaMask>(
-        forged.schemas | 0x80U);
+        forged.schemas | 0x800U);
     require(!cardputer::toolRequestPlanIsConsistent(forged),
             "Plan with an unknown schema bit was accepted");
     forged = plan;
@@ -584,6 +594,18 @@ void testToolCatalogAndRequestPlan()
                 cardputer::toolConfirmationReason(
                     cardputer::ToolPermissionDecision::Allow,
                     cardputer::ToolSchemaId::AppendFile, true) ==
+                    cardputer::ToolConfirmationReason::None &&
+                cardputer::toolConfirmationReason(
+                    cardputer::ToolPermissionDecision::Allow,
+                    cardputer::ToolSchemaId::SftpWrite, true) ==
+                    cardputer::ToolConfirmationReason::Mandatory &&
+                cardputer::toolConfirmationReason(
+                    cardputer::ToolPermissionDecision::Allow,
+                    cardputer::ToolSchemaId::SftpMove, true) ==
+                    cardputer::ToolConfirmationReason::Mandatory &&
+                cardputer::toolConfirmationReason(
+                    cardputer::ToolPermissionDecision::Allow,
+                    cardputer::ToolSchemaId::SftpRead, true) ==
                     cardputer::ToolConfirmationReason::None,
             "Destructive file confirmation matrix is incorrect");
     require(cardputer::toolConfirmationReason(

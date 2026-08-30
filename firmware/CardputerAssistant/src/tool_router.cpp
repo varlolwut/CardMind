@@ -1,6 +1,7 @@
 #include "tool_router.h"
 
 #include "file_workspace.h"
+#include "sftp_tool.h"
 #include "ssh_tool.h"
 #include "storage.h"
 #include "tool_activity.h"
@@ -155,6 +156,14 @@ ToolExecutionResult dispatchToolCall(
             return executeControlledWorkspaceTool(call, isCancelled);
         case ToolSchemaId::SshCommand:
             return executeSshTool(call, isCancelled);
+        case ToolSchemaId::SftpList:
+            return executeSftpListTool(call, isCancelled);
+        case ToolSchemaId::SftpRead:
+            return executeSftpReadTool(call, isCancelled);
+        case ToolSchemaId::SftpWrite:
+            return executeSftpWriteTool(call, isCancelled);
+        case ToolSchemaId::SftpMove:
+            return executeSftpMoveTool(call, isCancelled);
         case ToolSchemaId::Count:
             break;
     }
@@ -247,6 +256,8 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
         false;
     availability[static_cast<std::size_t>(ToolCapability::SshMutate)] =
         sshAvailable && project.sshProfile.isEmpty();
+    availability[static_cast<std::size_t>(ToolCapability::SftpReadWrite)] =
+        sshAvailable && project.sshProfile.isEmpty();
     return resolveToolPolicy(
         defaultGlobalToolPermissionPolicy(), settings.masterToolPolicy,
         project.toolPolicy, chat.toolPolicy, intent, availability);
@@ -295,6 +306,19 @@ ToolExecutionResult routeToolCall(const Settings& settings,
         if (toolConfirmationReason(
                 ToolPermissionDecision::Allow, entry->schema,
                 target.replacesExisting) != ToolConfirmationReason::None) {
+            return confirmationRequiredTool(call.name);
+        }
+    }
+    if (entry->schema == ToolSchemaId::SftpWrite ||
+        entry->schema == ToolSchemaId::SftpMove) {
+        const SftpOverwriteInspection overwrite = inspectSftpOverwrite(
+            entry->schema, call);
+        if (!overwrite.success) {
+            return invalidToolCall(overwrite.error);
+        }
+        if (toolConfirmationReason(
+                ToolPermissionDecision::Allow, entry->schema,
+                overwrite.requested) != ToolConfirmationReason::None) {
             return confirmationRequiredTool(call.name);
         }
     }

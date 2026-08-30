@@ -29,6 +29,7 @@
 #include "src/storage.h"
 #include "src/storage_migration.h"
 #include "src/ssh_client.h"
+#include "src/sftp_tool.h"
 #include "src/ssh_command_output.h"
 #include "src/ssh_terminal.h"
 #include "src/ssh_tool.h"
@@ -61,6 +62,7 @@ cardputer::OperationResult runSshCommandOutputRemoteTest(
 cardputer::OperationResult cleanupSshCommandOutputRemoteTest(
     bool& alreadyAbsent,
     bool& removed);
+cardputer::OperationResult runModelSftpRemoteTest(bool& cleanupComplete);
 
 constexpr const char* kFirmwareVersion = "1.12.1";
 constexpr std::size_t kMaximumInputBytes = 16384;
