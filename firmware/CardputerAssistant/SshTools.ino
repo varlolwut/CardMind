@@ -42,7 +42,7 @@ bool editSshProfile(cardputer::SshProfile current, cardputer::SshProfile& result
                             true, value)) return false;
         current.password = value.c_str();
     } else {
-        if (!cardputer::sshPrivateKeyIsInstalled()) {
+        if (!cardputer::sshPrivateKeyIsInstalled(current.privateKeyId)) {
             cardputer::showTextViewer("SSH KEY", {"No private key installed.",
                                                   "Use SSH > Install key first."},
                                      0, "ESC/ENTER close");
@@ -97,32 +97,282 @@ cardputer::OperationResult runSshProfileStorageTest()
 {
     std::vector<cardputer::SshProfile> original;
     std::size_t originalSelected = 0;
-    cardputer::OperationResult result = cardputer::loadSshProfiles(original, originalSelected);
+    cardputer::OperationResult result =
+        cardputer::loadSshProfiles(original, originalSelected);
     if (!result.success) return result;
-    if (original.size() >= cardputer::kMaximumSshProfiles) {
-        return {false, "All SSH profile slots are occupied"};
-    }
-    const cardputer::SshProfile temporary = {
-        "Storage test", "127.0.0.1", 22, "test", "temporary",
-        cardputer::SshAuthMode::Password, ""};
-    result = cardputer::saveSshProfileAt(temporary, original.size());
-    if (!result.success) return result;
-    std::vector<cardputer::SshProfile> verified;
-    std::size_t verifiedSelected = 0;
-    result = cardputer::loadSshProfiles(verified, verifiedSelected);
-    const bool matches = result.success && verified.size() == original.size() + 1 &&
-        verified.back().name == temporary.name && verified.back().host == temporary.host &&
-        verified.back().username == temporary.username;
-    const cardputer::OperationResult removed = cardputer::deleteSshProfile(original.size());
-    const cardputer::OperationResult selected = !original.empty() && removed.success
-        ? cardputer::selectSshProfile(originalSelected)
-        : cardputer::OperationResult{true, ""};
-    if (!removed.success) return removed;
-    if (!selected.success) return selected;
-    return matches ? cardputer::OperationResult{true, ""}
-                   : cardputer::OperationResult{false, "SSH profile NVS round trip did not match"};
-}
 
+    std::vector<cardputer::SshProfileSummary> originalSummaries;
+    std::size_t originalSummarySelected = 0;
+    result = cardputer::loadSshProfileSummaries(
+        originalSummaries, originalSummarySelected);
+    if (!result.success || originalSummaries.size() != original.size() ||
+        (!original.empty() && originalSummarySelected != originalSelected)) {
+        return {false, "SSH public summary does not match the original inventory"};
+    }
+
+    const auto sameProfile = [](const cardputer::SshProfile& left,
+                                const cardputer::SshProfile& right) {
+        return left.name == right.name && left.host == right.host &&
+               left.port == right.port && left.username == right.username &&
+               left.password == right.password && left.authMode == right.authMode &&
+               left.privateKeyPassphrase == right.privateKeyPassphrase;
+    };
+    const auto sameSummary = [](const cardputer::SshProfileSummary& left,
+                                const cardputer::SshProfileSummary& right) {
+        return left.id == right.id && left.name == right.name &&
+               left.host == right.host && left.port == right.port &&
+               left.username == right.username && left.authMode == right.authMode;
+    };
+    const auto findId = [](const std::vector<cardputer::SshProfileSummary>& profiles,
+                           std::uint64_t id) {
+        for (std::size_t index = 0; index < profiles.size(); ++index) {
+            if (profiles[index].id == id) return index;
+        }
+        return profiles.size();
+    };
+
+    std::vector<std::uint64_t> fixtureIds;
+    std::vector<String> fixtureNames;
+    const String fixturePrefix = "P4T" + String(millis(), HEX) + "-";
+    const std::uint64_t originalSelectedId = original.empty()
+        ? 0 : originalSummaries[originalSelected].id;
+
+    const auto cleanup = [&]() -> cardputer::OperationResult {
+        while (true) {
+            std::vector<cardputer::SshProfile> profiles;
+            std::size_t selected = 0;
+            cardputer::OperationResult cleanupResult =
+                cardputer::loadSshProfiles(profiles, selected);
+            if (!cleanupResult.success) return cleanupResult;
+            std::vector<cardputer::SshProfileSummary> summaries;
+            cleanupResult = cardputer::loadSshProfileSummaries(summaries, selected);
+            if (!cleanupResult.success || summaries.size() != profiles.size()) {
+                return {false, "SSH profile fixture cleanup could not load matching summaries"};
+            }
+
+            std::size_t ownedIndex = profiles.size();
+            for (std::size_t index = original.size(); index < profiles.size(); ++index) {
+                bool ownedId = false;
+                for (std::uint64_t id : fixtureIds) {
+                    ownedId = ownedId || summaries[index].id == id;
+                }
+                bool ownedName = false;
+                for (const String& name : fixtureNames) {
+                    ownedName = ownedName || profiles[index].name == name;
+                }
+                const bool ownedFields = ownedName &&
+                    profiles[index].host == "127.0.0.1" &&
+                    profiles[index].port == 22 &&
+                    profiles[index].username == "p4test" &&
+                    profiles[index].password == "temporary" &&
+                    profiles[index].authMode == cardputer::SshAuthMode::Password &&
+                    profiles[index].privateKeyPassphrase.isEmpty();
+                if (ownedId || ownedFields) {
+                    ownedIndex = index;
+                    break;
+                }
+            }
+            if (ownedIndex == profiles.size()) break;
+            cleanupResult = cardputer::deleteSshProfile(ownedIndex);
+            if (!cleanupResult.success) return cleanupResult;
+        }
+
+        if (originalSelectedId != 0) {
+            std::vector<cardputer::SshProfileSummary> summaries;
+            std::size_t selected = 0;
+            cardputer::OperationResult cleanupResult =
+                cardputer::loadSshProfileSummaries(summaries, selected);
+            if (!cleanupResult.success) return cleanupResult;
+            const std::size_t originalIndex = findId(summaries, originalSelectedId);
+            if (originalIndex >= summaries.size()) {
+                return {false, "SSH profile fixture cleanup lost the original selection"};
+            }
+            cleanupResult = cardputer::selectSshProfile(originalIndex);
+            if (!cleanupResult.success) return cleanupResult;
+        }
+
+        std::vector<cardputer::SshProfile> restored;
+        std::size_t restoredSelected = 0;
+        cardputer::OperationResult cleanupResult =
+            cardputer::loadSshProfiles(restored, restoredSelected);
+        if (!cleanupResult.success || restored.size() != original.size() ||
+            (!original.empty() && restoredSelected != originalSelected)) {
+            return {false, "SSH profile fixture cleanup did not restore the inventory"};
+        }
+        std::vector<cardputer::SshProfileSummary> restoredSummaries;
+        std::size_t restoredSummarySelected = 0;
+        cleanupResult = cardputer::loadSshProfileSummaries(
+            restoredSummaries, restoredSummarySelected);
+        if (!cleanupResult.success ||
+            restoredSummaries.size() != originalSummaries.size() ||
+            (!originalSummaries.empty() &&
+             restoredSummarySelected != originalSummarySelected)) {
+            return {false, "SSH profile fixture cleanup did not restore IDs"};
+        }
+        for (std::size_t index = 0; index < original.size(); ++index) {
+            if (!sameProfile(restored[index], original[index]) ||
+                !sameSummary(restoredSummaries[index], originalSummaries[index])) {
+                return {false, "SSH profile fixture cleanup changed original data"};
+            }
+        }
+        return {true, ""};
+    };
+
+    cardputer::OperationResult testResult = {true, ""};
+    do {
+        std::vector<cardputer::SshProfileSummary> summaries = originalSummaries;
+        while (summaries.size() < cardputer::kMaximumSshProfiles) {
+            const String name = fixturePrefix + String(fixtureNames.size());
+            bool collision = name.length() > 32;
+            for (const cardputer::SshProfileSummary& summary : summaries) {
+                collision = collision || summary.name == name;
+            }
+            if (collision) {
+                testResult = {false, "SSH profile fixture name collision"};
+                break;
+            }
+            fixtureNames.push_back(name);
+            const cardputer::SshProfile fixture = {
+                name, "127.0.0.1", 22, "p4test", "temporary",
+                cardputer::SshAuthMode::Password, ""};
+            const std::vector<cardputer::SshProfileSummary> beforeCreate = summaries;
+            testResult = cardputer::saveSshProfileAt(fixture, summaries.size());
+            if (!testResult.success) break;
+
+            std::size_t selected = 0;
+            testResult = cardputer::loadSshProfileSummaries(summaries, selected);
+            if (!testResult.success ||
+                summaries.size() != beforeCreate.size() + 1 ||
+                selected != beforeCreate.size() || summaries.back().id == 0) {
+                testResult = {false, "SSH profile fixture did not receive an opaque ID"};
+                break;
+            }
+            for (const cardputer::SshProfileSummary& existing : beforeCreate) {
+                if (existing.id == summaries.back().id) {
+                    testResult = {false, "SSH profile fixture ID collided with stored identity"};
+                    break;
+                }
+            }
+            if (!testResult.success) break;
+            fixtureIds.push_back(summaries.back().id);
+        }
+        if (!testResult.success) break;
+
+        std::vector<cardputer::SshProfile> beforeSixth;
+        std::size_t beforeSixthSelected = 0;
+        testResult = cardputer::loadSshProfiles(beforeSixth, beforeSixthSelected);
+        if (!testResult.success || beforeSixth.size() != summaries.size()) {
+            testResult = {false, "SSH full profiles and summaries differ before cap check"};
+            break;
+        }
+        const std::vector<cardputer::SshProfileSummary> beforeSixthSummaries = summaries;
+        const cardputer::SshProfile sixth = {
+            fixturePrefix + "sixth", "127.0.0.1", 22, "p4test", "temporary",
+            cardputer::SshAuthMode::Password, ""};
+        fixtureNames.push_back(sixth.name);
+        if (cardputer::saveSshProfileAt(sixth, summaries.size()).success) {
+            testResult = {false, "SSH profile store accepted a sixth profile"};
+            break;
+        }
+
+        std::vector<cardputer::SshProfile> afterSixth;
+        std::size_t afterSixthSelected = 0;
+        testResult = cardputer::loadSshProfiles(afterSixth, afterSixthSelected);
+        if (!testResult.success || afterSixth.size() != beforeSixth.size() ||
+            afterSixthSelected != beforeSixthSelected ||
+            afterSixth.size() != beforeSixthSummaries.size()) {
+            testResult = {false, "Rejected sixth SSH profile changed the inventory"};
+            break;
+        }
+        std::size_t afterSummarySelected = 0;
+        testResult = cardputer::loadSshProfileSummaries(
+            summaries, afterSummarySelected);
+        if (!testResult.success ||
+            summaries.size() != beforeSixthSummaries.size() ||
+            afterSummarySelected != beforeSixthSelected) {
+            testResult = {false, "Rejected sixth SSH profile changed public authority"};
+            break;
+        }
+        for (std::size_t index = 0; index < summaries.size(); ++index) {
+            if (!sameSummary(summaries[index], beforeSixthSummaries[index]) ||
+                !sameProfile(afterSixth[index], beforeSixth[index])) {
+                testResult = {false, "Rejected sixth SSH profile mutated stored data"};
+                break;
+            }
+        }
+        if (!testResult.success || fixtureIds.empty()) break;
+
+        const std::uint64_t editedId = fixtureIds.front();
+        const std::size_t editedIndex = findId(summaries, editedId);
+        if (editedIndex >= summaries.size() || editedIndex >= afterSixth.size()) {
+            testResult = {false, "SSH profile fixture ID disappeared before edit"};
+            break;
+        }
+        cardputer::SshProfile edited = afterSixth[editedIndex];
+        edited.name = fixturePrefix + "edited";
+        fixtureNames.push_back(edited.name);
+        testResult = cardputer::saveSshProfileAt(edited, editedIndex);
+        if (!testResult.success) break;
+        testResult = cardputer::selectSshProfile(editedIndex);
+        if (!testResult.success) break;
+        cardputer::SshProfile selectedProfile;
+        testResult = cardputer::loadSshProfile(selectedProfile);
+        if (!testResult.success || !sameProfile(selectedProfile, edited)) {
+            testResult = {false, "SSH selected JIT profile did not match the edited fixture"};
+            break;
+        }
+        std::size_t selected = 0;
+        testResult = cardputer::loadSshProfileSummaries(summaries, selected);
+        if (!testResult.success || selected != editedIndex ||
+            editedIndex >= summaries.size() ||
+            summaries[editedIndex].id != editedId) {
+            testResult = {false, "SSH profile ID changed during edit or selection"};
+            break;
+        }
+
+        if (fixtureIds.size() >= 2) {
+            const std::uint64_t shiftedId = fixtureIds[1];
+            const std::size_t shiftedBefore = findId(summaries, shiftedId);
+            if (shiftedBefore >= summaries.size() || shiftedBefore <= editedIndex) {
+                testResult = {false, "SSH shifted fixture ID is not in the expected position"};
+                break;
+            }
+            std::vector<cardputer::SshProfile> beforeDelete;
+            std::size_t beforeDeleteSelected = 0;
+            testResult = cardputer::loadSshProfiles(
+                beforeDelete, beforeDeleteSelected);
+            if (!testResult.success) break;
+            if (shiftedBefore >= beforeDelete.size()) {
+                testResult = {false, "SSH shifted fixture profile is missing before deletion"};
+                break;
+            }
+            const cardputer::SshProfile shiftedProfile = beforeDelete[shiftedBefore];
+
+            testResult = cardputer::deleteSshProfile(editedIndex);
+            if (!testResult.success) break;
+            fixtureIds.erase(fixtureIds.begin());
+
+            std::vector<cardputer::SshProfile> afterDelete;
+            std::size_t afterDeleteSelected = 0;
+            testResult = cardputer::loadSshProfiles(afterDelete, afterDeleteSelected);
+            if (!testResult.success) break;
+            testResult = cardputer::loadSshProfileSummaries(summaries, selected);
+            const std::size_t shiftedAfter = findId(summaries, shiftedId);
+            if (!testResult.success || shiftedAfter >= summaries.size() ||
+                shiftedAfter != shiftedBefore - 1 ||
+                shiftedAfter >= afterDelete.size() ||
+                !sameProfile(afterDelete[shiftedAfter], shiftedProfile)) {
+                testResult = {false, "SSH profile ID did not move with its full profile"};
+            }
+        }
+    } while (false);
+
+    const cardputer::OperationResult cleaned = cleanup();
+    if (!cleaned.success) return cleaned;
+    const cardputer::OperationResult cleanedAgain = cleanup();
+    if (!cleanedAgain.success) return cleanedAgain;
+    return testResult;
+}
 cardputer::OperationResult runSshSessionTest(bool testSftp)
 {
     cardputer::SshProfile profile;
@@ -673,7 +923,7 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
     return result.success ? cardputer::OperationResult{true, "SFTP session closed"} : result;
 }
 
-cardputer::OperationResult installSshKeyFromWorkspace()
+cardputer::OperationResult installSshKeyFromWorkspace(std::uint64_t profileId)
 {
     const WorkspaceFileSelectionResult selection = selectWorkspaceFilePage(
         "INSTALL SSH KEY", includeWorkspacePrivateKey, workspacePrivateKeyLabel);
@@ -681,7 +931,8 @@ cardputer::OperationResult installSshKeyFromWorkspace()
     if (selection.empty) return {false, "Put a .pem or .key file in the SD workspace first"};
     if (!selection.selected) return {true, "Key installation cancelled"};
     const String sourcePath = cardputer::workspaceFilePath(selection.file.name);
-    cardputer::OperationResult result = cardputer::installSshPrivateKey(sourcePath);
+    cardputer::OperationResult result = cardputer::installSshPrivateKey(
+        sourcePath, profileId);
     if (result.success && !SD.remove(sourcePath)) {
         result = {false, "Private key installed, but its workspace source could not be removed"};
     }
@@ -696,18 +947,28 @@ cardputer::OperationResult runSshTool()
         std::size_t selectedIndex = 0;
         cardputer::OperationResult result = cardputer::loadSshProfiles(profiles, selectedIndex);
         if (!result.success) return result;
+        std::vector<cardputer::SshProfileSummary> summaries;
+        std::size_t summarySelected = 0;
+        result = cardputer::loadSshProfileSummaries(summaries, summarySelected);
+        if (!result.success || summaries.size() != profiles.size() ||
+            (!profiles.empty() && summarySelected != selectedIndex)) {
+            return {false, "SSH profile IDs do not match the Device inventory"};
+        }
         const String selectedName = profiles.empty() ? String("not configured")
                                                       : profiles[selectedIndex].name;
+        const bool selectedKeyInstalled = !profiles.empty() &&
+            cardputer::sshPrivateKeyIsInstalled(
+                profiles[selectedIndex].privateKeyId);
         const int action = modalSelection("SSH TOOL", {
             "Connect: " + selectedName,
             "SFTP: " + selectedName,
             "Manage profiles (" + String(profiles.size()) + ")",
-            String("Install private key: ") + (cardputer::sshPrivateKeyIsInstalled() ? "yes" : "no"),
+            String("Install private key: ") + (selectedKeyInstalled ? "yes" : "no"),
             "Terminal shortcuts",
             "Back to Tools"}, 0, status.isEmpty() ? "UP/DOWN  ENTER  ESC back" : status);
         status = "";
         if (action < 0 || action == 5) return {true, ""};
-        if ((action == 0 || action == 1) && profiles.empty()) {
+        if ((action == 0 || action == 1 || action == 3) && profiles.empty()) {
             status = "Create an SSH profile first";
             continue;
         }
@@ -718,7 +979,7 @@ cardputer::OperationResult runSshTool()
             result = runSftpBrowser(profiles[selectedIndex]);
             status = result.success ? String("SFTP session closed") : result.error;
         } else if (action == 3) {
-            result = installSshKeyFromWorkspace();
+            result = installSshKeyFromWorkspace(summaries[selectedIndex].id);
             status = result.success ? String("Private key installed") : result.error;
         } else if (action == 4) {
             cardputer::showTextViewer("SSH SHORTCUTS", {

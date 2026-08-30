@@ -19,9 +19,19 @@ struct SshProfile {
     String password;
     SshAuthMode authMode;
     String privateKeyPassphrase;
+    std::uint64_t privateKeyId = 0;
 };
 
-constexpr std::size_t kMaximumSshProfiles = 8;
+struct SshProfileSummary {
+    std::uint64_t id;
+    String name;
+    String host;
+    std::uint16_t port;
+    String username;
+    SshAuthMode authMode;
+};
+
+constexpr std::size_t kMaximumSshProfiles = 5;
 
 struct SshRuntimeProbeResult {
     bool success;
@@ -60,6 +70,9 @@ struct SftpEntriesResult {
 
 OperationResult loadSshProfile(SshProfile& profile);
 OperationResult saveSshProfile(const SshProfile& profile);
+OperationResult loadSshProfileSummaries(
+    std::vector<SshProfileSummary>& profiles,
+    std::size_t& selectedIndex);
 OperationResult loadSshProfiles(std::vector<SshProfile>& profiles,
                                 std::size_t& selectedIndex);
 OperationResult saveSshProfileAt(const SshProfile& profile,
@@ -68,8 +81,9 @@ OperationResult selectSshProfile(std::size_t index);
 OperationResult deleteSshProfile(std::size_t index);
 bool sshProfileIsComplete(const SshProfile& profile);
 OperationResult initializeSshStorage();
-OperationResult installSshPrivateKey(const String& temporaryPath);
-bool sshPrivateKeyIsInstalled();
+OperationResult installSshPrivateKey(const String& temporaryPath,
+                                     std::uint64_t profileId);
+bool sshPrivateKeyIsInstalled(std::uint64_t privateKeyId);
 OperationResult loadTrustedSshFingerprint(const String& host,
                                           std::uint16_t port,
                                           String& fingerprint,

@@ -10,13 +10,20 @@
 #include <libssh2_priv.h>
 #undef public
 
+#include <mbedtls/platform_util.h>
+#include <mbedtls/sha256.h>
+
 #include <NetworkClient.h>
 #include <Preferences.h>
 #include <SD.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 
-#include <cstdio>
+#include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdio>
+#include <cstring>
 #include <new>
 #include <sys/socket.h>
 #include <vector>
@@ -26,11 +33,15 @@ namespace {
 
 constexpr const char* kSshNamespace = "cardmind_ssh";
 constexpr const char* kSshDirectory = "/assistant/ssh";
-constexpr const char* kSshPrivateKeyPath = "/assistant/ssh/id.pem";
-constexpr const char* kSshPrivateKeyVfsPath = "/sd/assistant/ssh/id.pem";
+constexpr const char* kLegacySshPrivateKeyPath = "/assistant/ssh/id.pem";
+constexpr const char* kLegacySshPrivateKeyOwnerKey = "legacy_key";
 constexpr const char* kSshKnownHostsPath = "/assistant/ssh/known_hosts";
 constexpr const char* kSshKnownHostsTemporaryPath = "/assistant/ssh/known_hosts.tmp";
 constexpr std::size_t kMaximumKnownHostsBytes = 16384;
+constexpr std::size_t kMinimumSshPrivateKeyBytes = 64;
+constexpr std::size_t kMaximumSshPrivateKeyBytes = 16384;
+constexpr std::size_t kSshPrivateKeyRecordHeaderBytes = sizeof(std::uint64_t);
+constexpr std::size_t kMaximumSshPrivateKeyRecordSlots = kMaximumSshProfiles + 1;
 constexpr unsigned int kTerminalWindowBytes = 64 * 1024;
 constexpr unsigned int kTerminalPacketBytes = 8 * 1024;
 
@@ -109,8 +120,770 @@ OperationResult validateSshProfile(const SshProfile& profile)
     if (profile.authMode == SshAuthMode::Password && profile.password.isEmpty()) {
         return {false, "SSH password authentication requires a password"};
     }
-    if (profile.authMode == SshAuthMode::PrivateKey && !sshPrivateKeyIsInstalled()) {
+    if (profile.authMode == SshAuthMode::PrivateKey &&
+        !sshPrivateKeyIsInstalled(profile.privateKeyId)) {
         return {false, "SSH private-key authentication requires an installed key"};
+    }
+    return {true, ""};
+}
+
+String indexedProfileIdKey(std::size_t index)
+{
+    return String("i") + String(index);
+}
+
+String indexedPrivateKeyIdKey(std::size_t index)
+{
+    return String("q") + String(index);
+}
+
+String sshPrivateKeyRecordIdKey(std::size_t index)
+{
+    return String("d") + String(index);
+}
+
+String sshPrivateKeyRecordBlobKey(std::size_t index)
+{
+    return String("r") + String(index);
+}
+
+struct SshPrivateKeyRecordSlot {
+    bool idPresent;
+    std::uint64_t id;
+    bool blobPresent;
+    std::size_t blobBytes;
+};
+
+using SshPrivateKeyRecordSlots =
+    std::array<SshPrivateKeyRecordSlot, kMaximumSshPrivateKeyRecordSlots>;
+
+void clearSshSecretBytes(std::vector<std::uint8_t>& bytes)
+{
+    if (!bytes.empty()) {
+        mbedtls_platform_zeroize(bytes.data(), bytes.size());
+    }
+    bytes.clear();
+}
+
+std::uint64_t decodeSshPrivateKeyId(const std::uint8_t* bytes)
+{
+    std::uint64_t value = 0;
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        value |= static_cast<std::uint64_t>(bytes[index]) << (index * 8);
+    }
+    return value;
+}
+
+void encodeSshPrivateKeyId(std::uint64_t value, std::uint8_t* bytes)
+{
+    for (std::size_t index = 0; index < sizeof(value); ++index) {
+        bytes[index] = static_cast<std::uint8_t>(value >> (index * 8));
+    }
+}
+
+OperationResult readOptionalSshPrivateKeyId(Preferences& preferences,
+                                            const String& key,
+                                            std::uint64_t& value,
+                                            bool& found)
+{
+    const PreferenceType type = preferences.getType(key.c_str());
+    if (type == PT_INVALID) {
+        value = 0;
+        found = false;
+        return {true, ""};
+    }
+    if (type != PT_U64) {
+        return {false, "Stored SSH private-key reference has an invalid NVS type"};
+    }
+    value = preferences.getULong64(key.c_str(), 0);
+    found = true;
+    return value == 0
+        ? OperationResult{false, "Stored SSH private-key reference is zero"}
+        : OperationResult{true, ""};
+}
+
+OperationResult readSshPrivateKeyRecordSlots(
+    Preferences& preferences,
+    SshPrivateKeyRecordSlots& slots)
+{
+    for (std::size_t index = 0; index < slots.size(); ++index) {
+        SshPrivateKeyRecordSlot slot = {false, 0, false, 0};
+        const OperationResult idResult = readOptionalSshPrivateKeyId(
+            preferences, sshPrivateKeyRecordIdKey(index), slot.id, slot.idPresent);
+        if (!idResult.success) {
+            return idResult;
+        }
+        const String blobKey = sshPrivateKeyRecordBlobKey(index);
+        const PreferenceType blobType = preferences.getType(blobKey.c_str());
+        if (blobType != PT_INVALID && blobType != PT_BLOB) {
+            return {false, "Stored SSH private-key record has an invalid NVS type"};
+        }
+        slot.blobPresent = blobType == PT_BLOB;
+        if (slot.blobPresent) {
+            slot.blobBytes = preferences.getBytesLength(blobKey.c_str());
+            if (slot.blobBytes < kSshPrivateKeyRecordHeaderBytes +
+                                     kMinimumSshPrivateKeyBytes ||
+                slot.blobBytes > kSshPrivateKeyRecordHeaderBytes +
+                                     kMaximumSshPrivateKeyBytes) {
+                return {false, "Stored SSH private-key record has an invalid length"};
+            }
+        }
+        slots[index] = slot;
+    }
+    for (std::size_t index = 0; index < slots.size(); ++index) {
+        if (!slots[index].idPresent) {
+            continue;
+        }
+        for (std::size_t other = index + 1; other < slots.size(); ++other) {
+            if (slots[other].idPresent && slots[index].id == slots[other].id) {
+                return {false, "Stored SSH private-key record IDs are not unique"};
+            }
+        }
+    }
+    return {true, ""};
+}
+
+OperationResult readSshProfilePrivateKeyIds(
+    Preferences& preferences,
+    std::vector<std::uint64_t>& privateKeyIds)
+{
+    const PreferenceType countType = preferences.getType("cnt");
+    if (countType != PT_INVALID && countType != PT_U8) {
+        return {false, "Stored SSH profile count has an invalid NVS type"};
+    }
+    const std::size_t storedCount = countType == PT_U8
+        ? preferences.getUChar("cnt", 0) : 0;
+    if (storedCount > kMaximumSshProfiles) {
+        return {false, "Stored SSH profile count exceeds the supported limit"};
+    }
+    std::size_t logicalCount = storedCount;
+    if (storedCount == 0) {
+        const PreferenceType legacyHostType = preferences.getType("host");
+        if (legacyHostType != PT_INVALID && legacyHostType != PT_STR) {
+            return {false, "Stored legacy SSH profile authority has an invalid NVS type"};
+        }
+        if (legacyHostType == PT_STR &&
+            !preferences.getString("host", "").isEmpty()) {
+            logicalCount = 1;
+        }
+    }
+    if (logicalCount == 0) {
+        for (std::size_t index = 0; index < kMaximumSshProfiles; ++index) {
+            if (preferences.getType(indexedPrivateKeyIdKey(index).c_str()) !=
+                PT_INVALID) {
+                return {false, "Stored SSH private-key references have no profile authority"};
+            }
+        }
+    }
+    std::vector<std::uint64_t> loaded;
+    loaded.reserve(logicalCount);
+    for (std::size_t index = 0; index < logicalCount; ++index) {
+        std::uint64_t id = 0;
+        bool found = false;
+        const OperationResult result = readOptionalSshPrivateKeyId(
+            preferences, indexedPrivateKeyIdKey(index), id, found);
+        if (!result.success) {
+            return result;
+        }
+        loaded.push_back(found ? id : 0);
+    }
+    privateKeyIds = std::move(loaded);
+    return {true, ""};
+}
+
+bool sshPrivateKeyIdIsReferenced(
+    std::uint64_t id,
+    const std::vector<std::uint64_t>& profileIds,
+    std::uint64_t legacyOwnerId)
+{
+    return id == legacyOwnerId ||
+        std::find(profileIds.begin(), profileIds.end(), id) != profileIds.end();
+}
+
+bool removeExactSshPreference(Preferences& preferences, const String& key)
+{
+    if (preferences.getType(key.c_str()) == PT_INVALID) {
+        return true;
+    }
+    return preferences.remove(key.c_str()) &&
+        preferences.getType(key.c_str()) == PT_INVALID;
+}
+
+OperationResult cleanupSshPrivateKeyRecords()
+{
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {false, "Failed to open SSH private-key records for cleanup"};
+    }
+    std::vector<std::uint64_t> profileIds;
+    OperationResult result = readSshProfilePrivateKeyIds(preferences, profileIds);
+    std::uint64_t legacyOwnerId = 0;
+    bool legacyOwnerFound = false;
+    if (result.success) {
+        result = readOptionalSshPrivateKeyId(
+            preferences, kLegacySshPrivateKeyOwnerKey,
+            legacyOwnerId, legacyOwnerFound);
+    }
+    SshPrivateKeyRecordSlots slots = {};
+    if (result.success) {
+        result = readSshPrivateKeyRecordSlots(preferences, slots);
+    }
+    if (!result.success) {
+        preferences.end();
+        return result;
+    }
+    if (legacyOwnerFound &&
+        std::find(profileIds.begin(), profileIds.end(), legacyOwnerId) !=
+            profileIds.end()) {
+        if (!removeExactSshPreference(
+                preferences, kLegacySshPrivateKeyOwnerKey)) {
+            preferences.end();
+            return {false, "Failed to clear the claimed legacy SSH key owner"};
+        }
+        legacyOwnerFound = false;
+        legacyOwnerId = 0;
+    }
+    for (const std::uint64_t id : profileIds) {
+        if (id == 0) {
+            continue;
+        }
+        bool complete = false;
+        for (const SshPrivateKeyRecordSlot& slot : slots) {
+            complete = complete || (slot.idPresent && slot.blobPresent && slot.id == id);
+        }
+        if (!complete) {
+            preferences.end();
+            return {false, "An SSH profile references a missing private-key record"};
+        }
+    }
+    if (legacyOwnerFound) {
+        bool complete = false;
+        for (const SshPrivateKeyRecordSlot& slot : slots) {
+            complete = complete ||
+                (slot.idPresent && slot.blobPresent && slot.id == legacyOwnerId);
+        }
+        if (!complete) {
+            preferences.end();
+            return {false, "Legacy SSH key owner references a missing record"};
+        }
+    }
+    for (std::size_t index = 0; index < slots.size(); ++index) {
+        const SshPrivateKeyRecordSlot& slot = slots[index];
+        const bool referenced = slot.idPresent && sshPrivateKeyIdIsReferenced(
+            slot.id, profileIds, legacyOwnerFound ? legacyOwnerId : 0);
+        bool removed = true;
+        if (slot.idPresent && !referenced) {
+            removed = removeExactSshPreference(
+                preferences, sshPrivateKeyRecordIdKey(index));
+        }
+        if (slot.blobPresent && (!slot.idPresent || !referenced)) {
+            removed = removeExactSshPreference(
+                preferences, sshPrivateKeyRecordBlobKey(index)) && removed;
+        }
+        if (!removed) {
+            preferences.end();
+            return {false, "Failed to remove an unreferenced SSH private-key record"};
+        }
+    }
+    preferences.end();
+    return {true, ""};
+}
+
+bool sshPrivateKeyPemIsValid(const std::uint8_t* bytes, std::size_t size)
+{
+    if (bytes == nullptr || size < kMinimumSshPrivateKeyBytes ||
+        size > kMaximumSshPrivateKeyBytes) {
+        return false;
+    }
+    constexpr char marker[] = "-----BEGIN ";
+    const std::size_t inspected = std::min<std::size_t>(size, 64);
+    for (std::size_t offset = 0;
+         offset + sizeof(marker) - 1 <= inspected; ++offset) {
+        if (std::memcmp(bytes + offset, marker, sizeof(marker) - 1) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+OperationResult readSshPrivateKeyFile(
+    const String& path,
+    std::vector<std::uint8_t>& record)
+{
+    File source = SD.open(path, FILE_READ);
+    if (!source || source.isDirectory()) {
+        if (source) {
+            source.close();
+        }
+        return {false, "SSH private-key upload could not be opened"};
+    }
+    const std::size_t size = source.size();
+    if (size < kMinimumSshPrivateKeyBytes || size > kMaximumSshPrivateKeyBytes) {
+        source.close();
+        return {false, "SSH private key must contain 64 to 16384 bytes"};
+    }
+    std::vector<std::uint8_t> loaded(
+        kSshPrivateKeyRecordHeaderBytes + size, 0);
+    std::size_t copied = 0;
+    while (copied < size) {
+        const std::size_t readBytes = source.read(
+            loaded.data() + kSshPrivateKeyRecordHeaderBytes + copied,
+            size - copied);
+        if (readBytes == 0) {
+            source.close();
+            clearSshSecretBytes(loaded);
+            return {false, "Failed while reading the complete SSH private key"};
+        }
+        copied += readBytes;
+    }
+    source.close();
+    if (!sshPrivateKeyPemIsValid(
+            loaded.data() + kSshPrivateKeyRecordHeaderBytes, size)) {
+        clearSshSecretBytes(loaded);
+        return {false, "SSH private key is not a PEM document"};
+    }
+    record = std::move(loaded);
+    return {true, ""};
+}
+
+std::uint64_t generateUniqueSshPrivateKeyId(
+    const SshPrivateKeyRecordSlots& slots)
+{
+    for (std::size_t attempt = 0; attempt < 32; ++attempt) {
+        const std::uint64_t candidate =
+            (static_cast<std::uint64_t>(esp_random()) << 32) |
+            static_cast<std::uint64_t>(esp_random());
+        if (candidate == 0) {
+            continue;
+        }
+        bool collision = false;
+        for (const SshPrivateKeyRecordSlot& slot : slots) {
+            collision = collision || (slot.idPresent && slot.id == candidate);
+        }
+        if (!collision) {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+OperationResult readSshPrivateKeyRecord(
+    std::uint64_t id,
+    std::vector<std::uint8_t>& record)
+{
+    if (id == 0) {
+        return {false, "SSH profile has no private-key record binding"};
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, true)) {
+        return {false, "Failed to open SSH private-key records"};
+    }
+    SshPrivateKeyRecordSlots slots = {};
+    OperationResult result = readSshPrivateKeyRecordSlots(preferences, slots);
+    std::size_t slotIndex = slots.size();
+    if (result.success) {
+        for (std::size_t index = 0; index < slots.size(); ++index) {
+            if (slots[index].idPresent && slots[index].id == id) {
+                slotIndex = index;
+                break;
+            }
+        }
+        if (slotIndex == slots.size() || !slots[slotIndex].blobPresent) {
+            result = {false, "SSH private-key record is missing"};
+        }
+    }
+    std::vector<std::uint8_t> loaded;
+    if (result.success) {
+        loaded.resize(slots[slotIndex].blobBytes);
+        const String blobKey = sshPrivateKeyRecordBlobKey(slotIndex);
+        if (preferences.getBytes(blobKey.c_str(), loaded.data(), loaded.size()) !=
+            loaded.size() || decodeSshPrivateKeyId(loaded.data()) != id ||
+            !sshPrivateKeyPemIsValid(
+                loaded.data() + kSshPrivateKeyRecordHeaderBytes,
+                loaded.size() - kSshPrivateKeyRecordHeaderBytes)) {
+            result = {false, "SSH private-key record failed identity or PEM validation"};
+        }
+    }
+    preferences.end();
+    if (!result.success) {
+        clearSshSecretBytes(loaded);
+        return result;
+    }
+    record = std::move(loaded);
+    return {true, ""};
+}
+
+OperationResult createSshPrivateKeyRecord(
+    std::vector<std::uint8_t>& record,
+    std::uint64_t& id)
+{
+    const OperationResult cleaned = cleanupSshPrivateKeyRecords();
+    if (!cleaned.success) {
+        return cleaned;
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, true)) {
+        return {false, "Failed to inspect SSH private-key record capacity"};
+    }
+    SshPrivateKeyRecordSlots slots = {};
+    OperationResult result = readSshPrivateKeyRecordSlots(preferences, slots);
+    preferences.end();
+    if (!result.success) {
+        return result;
+    }
+    std::size_t freeSlot = slots.size();
+    for (std::size_t index = 0; index < slots.size(); ++index) {
+        if (!slots[index].idPresent && !slots[index].blobPresent) {
+            freeSlot = index;
+            break;
+        }
+    }
+    if (freeSlot == slots.size()) {
+        return {false, "All SSH private-key record slots are in use"};
+    }
+    const std::uint64_t generatedId = generateUniqueSshPrivateKeyId(slots);
+    if (generatedId == 0) {
+        return {false, "Failed to generate a unique SSH private-key record ID"};
+    }
+    encodeSshPrivateKeyId(generatedId, record.data());
+    std::array<std::uint8_t, 32> expectedDigest = {};
+    if (mbedtls_sha256(
+            record.data(), record.size(), expectedDigest.data(), 0) != 0) {
+        mbedtls_platform_zeroize(expectedDigest.data(), expectedDigest.size());
+        return {false, "Failed to hash the SSH private-key record before writing"};
+    }
+    const String blobKey = sshPrivateKeyRecordBlobKey(freeSlot);
+    if (!preferences.begin(kSshNamespace, false)) {
+        mbedtls_platform_zeroize(expectedDigest.data(), expectedDigest.size());
+        return {false, "Failed to open SSH private-key records for writing"};
+    }
+    preferences.putBytes(blobKey.c_str(), record.data(), record.size());
+    preferences.end();
+
+    const std::size_t recordBytes = record.size();
+    mbedtls_platform_zeroize(record.data(), recordBytes);
+    std::array<std::uint8_t, 32> verifiedDigest = {};
+    bool readbackHashFailed = false;
+    bool blobMatches = false;
+    if (preferences.begin(kSshNamespace, true)) {
+        if (preferences.getType(blobKey.c_str()) == PT_BLOB &&
+            preferences.getBytesLength(blobKey.c_str()) == recordBytes &&
+            preferences.getBytes(blobKey.c_str(), record.data(), recordBytes) ==
+                recordBytes) {
+            readbackHashFailed = mbedtls_sha256(
+                record.data(), recordBytes, verifiedDigest.data(), 0) != 0;
+            blobMatches = !readbackHashFailed &&
+                decodeSshPrivateKeyId(record.data()) == generatedId &&
+                std::equal(expectedDigest.begin(), expectedDigest.end(),
+                           verifiedDigest.begin());
+        }
+        preferences.end();
+    }
+    mbedtls_platform_zeroize(expectedDigest.data(), expectedDigest.size());
+    mbedtls_platform_zeroize(verifiedDigest.data(), verifiedDigest.size());
+    if (readbackHashFailed) {
+        cleanupSshPrivateKeyRecords();
+        return {false, "Failed to hash the SSH private-key record after writing"};
+    }
+    if (!blobMatches) {
+        cleanupSshPrivateKeyRecords();
+        return {false, "NVS capacity could not store this SSH private key; delete an unused SSH profile/key or use a smaller key"};
+    }
+
+    const String idKey = sshPrivateKeyRecordIdKey(freeSlot);
+    bool idMatches = false;
+    if (preferences.begin(kSshNamespace, false)) {
+        preferences.putULong64(idKey.c_str(), generatedId);
+        idMatches = preferences.getType(idKey.c_str()) == PT_U64 &&
+            preferences.getULong64(idKey.c_str(), 0) == generatedId;
+        preferences.end();
+    }
+    if (!idMatches) {
+        cleanupSshPrivateKeyRecords();
+        return {false, "Failed to commit SSH private-key record identity"};
+    }
+    id = generatedId;
+    return {true, ""};
+}
+
+enum class SshPrivateKeyBindingOutcome {
+    Committed,
+    Unchanged,
+    Unknown,
+};
+
+struct SshPrivateKeyBindingResult {
+    SshPrivateKeyBindingOutcome outcome;
+    String error;
+};
+
+SshPrivateKeyBindingResult bindSshPrivateKeyToProfile(
+    std::uint64_t profileId,
+    std::uint64_t privateKeyId)
+{
+    std::vector<SshProfileSummary> profiles;
+    std::size_t selected = 0;
+    const OperationResult loaded = loadSshProfileSummaries(profiles, selected);
+    if (!loaded.success) {
+        return {SshPrivateKeyBindingOutcome::Unchanged, loaded.error};
+    }
+    std::size_t target = profiles.size();
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        if (profiles[index].id == profileId) {
+            target = index;
+            break;
+        }
+    }
+    if (target == profiles.size()) {
+        return {SshPrivateKeyBindingOutcome::Unchanged,
+                "SSH profile changed before private-key binding"};
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {SshPrivateKeyBindingOutcome::Unchanged,
+                "Failed to open SSH profile key binding for writing"};
+    }
+    std::vector<std::uint64_t> oldBindings;
+    const OperationResult authority = readSshProfilePrivateKeyIds(
+        preferences, oldBindings);
+    const String profileIdKey = indexedProfileIdKey(target);
+    const bool profileMatches = authority.success && target < oldBindings.size() &&
+        preferences.getType(profileIdKey.c_str()) == PT_U64 &&
+        preferences.getULong64(profileIdKey.c_str(), 0) == profileId;
+    if (!profileMatches) {
+        preferences.end();
+        return {SshPrivateKeyBindingOutcome::Unchanged,
+                authority.success
+                    ? String("SSH profile changed before private-key binding")
+                    : authority.error};
+    }
+    const std::uint64_t oldBinding = oldBindings[target];
+    if (oldBinding == privateKeyId) {
+        preferences.end();
+        return {SshPrivateKeyBindingOutcome::Committed, ""};
+    }
+    const String key = indexedPrivateKeyIdKey(target);
+    preferences.putULong64(key.c_str(), privateKeyId);
+    std::vector<std::uint64_t> committedBindings;
+    const OperationResult committedAuthority = readSshProfilePrivateKeyIds(
+        preferences, committedBindings);
+    const bool committedProfileMatches = committedAuthority.success &&
+        target < committedBindings.size() &&
+        preferences.getType(profileIdKey.c_str()) == PT_U64 &&
+        preferences.getULong64(profileIdKey.c_str(), 0) == profileId;
+    const bool committed = committedProfileMatches &&
+        committedBindings[target] == privateKeyId;
+    const bool unchanged = committedProfileMatches &&
+        committedBindings[target] == oldBinding;
+    preferences.end();
+    if (committed) {
+        return {SshPrivateKeyBindingOutcome::Committed, ""};
+    }
+    if (unchanged) {
+        return {SshPrivateKeyBindingOutcome::Unchanged,
+                "Failed to commit SSH profile private-key binding"};
+    }
+    return {SshPrivateKeyBindingOutcome::Unknown,
+            "SSH profile private-key binding outcome is unknown; reload the profile before retrying"};
+}
+
+OperationResult loadLegacySshPrivateKeyOwner(std::uint64_t& id, bool& found)
+{
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, true)) {
+        return {false, "Failed to open legacy SSH private-key owner"};
+    }
+    const OperationResult result = readOptionalSshPrivateKeyId(
+        preferences, kLegacySshPrivateKeyOwnerKey, id, found);
+    preferences.end();
+    return result;
+}
+
+OperationResult storeLegacySshPrivateKeyOwner(std::uint64_t id)
+{
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {false, "Failed to open legacy SSH private-key owner for writing"};
+    }
+    preferences.putULong64(kLegacySshPrivateKeyOwnerKey, id);
+    const bool matches = preferences.getType(kLegacySshPrivateKeyOwnerKey) == PT_U64 &&
+        preferences.getULong64(kLegacySshPrivateKeyOwnerKey, 0) == id;
+    preferences.end();
+    return matches
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Failed to preserve the unassigned legacy SSH key record"};
+}
+
+OperationResult clearLegacySshPrivateKeyOwner()
+{
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {false, "Failed to open legacy SSH private-key owner for cleanup"};
+    }
+    const bool removed = removeExactSshPreference(
+        preferences, kLegacySshPrivateKeyOwnerKey);
+    preferences.end();
+    return removed
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Failed to clear the legacy SSH private-key owner"};
+}
+
+OperationResult migrateLegacySshPrivateKey()
+{
+    if (!SD.exists(kLegacySshPrivateKeyPath)) {
+        return {true, ""};
+    }
+    std::vector<std::uint8_t> legacyRecord;
+    OperationResult result = readSshPrivateKeyFile(
+        kLegacySshPrivateKeyPath, legacyRecord);
+    if (!result.success) {
+        return result;
+    }
+    std::vector<SshProfileSummary> profiles;
+    std::size_t selected = 0;
+    result = loadSshProfileSummaries(profiles, selected);
+    std::vector<std::uint64_t> profileKeyIds;
+    if (result.success) {
+        Preferences preferences;
+        if (!preferences.begin(kSshNamespace, true)) {
+            result = {false, "Failed to inspect legacy SSH profile key bindings"};
+        } else {
+            result = readSshProfilePrivateKeyIds(preferences, profileKeyIds);
+            preferences.end();
+        }
+    }
+    std::uint64_t ownerId = 0;
+    bool ownerFound = false;
+    if (result.success) {
+        result = loadLegacySshPrivateKeyOwner(ownerId, ownerFound);
+    }
+    std::uint64_t recordId = ownerFound ? ownerId : 0;
+    if (result.success) {
+        for (const std::uint64_t id : profileKeyIds) {
+            if (id == 0) {
+                continue;
+            }
+            if (recordId != 0 && recordId != id) {
+                result = {false, "Legacy SSH key migration found conflicting profile bindings"};
+                break;
+            }
+            recordId = id;
+        }
+    }
+    if (result.success && recordId != 0) {
+        std::vector<std::uint8_t> storedRecord;
+        result = readSshPrivateKeyRecord(recordId, storedRecord);
+        if (result.success &&
+            (storedRecord.size() != legacyRecord.size() ||
+             !std::equal(storedRecord.begin() + kSshPrivateKeyRecordHeaderBytes,
+                         storedRecord.end(),
+                         legacyRecord.begin() + kSshPrivateKeyRecordHeaderBytes))) {
+            result = {false, "Legacy SSH key does not match its committed NVS record"};
+        }
+        clearSshSecretBytes(storedRecord);
+    }
+    if (result.success && recordId == 0) {
+        result = createSshPrivateKeyRecord(legacyRecord, recordId);
+    }
+    if (result.success && profiles.empty()) {
+        result = storeLegacySshPrivateKeyOwner(recordId);
+    }
+    if (result.success && !profiles.empty()) {
+        for (std::size_t index = 0; index < profiles.size(); ++index) {
+            if (profileKeyIds[index] == 0) {
+                const SshPrivateKeyBindingResult binding =
+                    bindSshPrivateKeyToProfile(profiles[index].id, recordId);
+                result = binding.outcome == SshPrivateKeyBindingOutcome::Committed
+                    ? OperationResult{true, ""}
+                    : OperationResult{false, binding.error};
+            } else if (profileKeyIds[index] != recordId) {
+                result = {false, "Legacy SSH key migration found a conflicting profile binding"};
+            }
+            if (!result.success) {
+                break;
+            }
+        }
+        if (result.success && ownerFound) {
+            result = clearLegacySshPrivateKeyOwner();
+        }
+    }
+    clearSshSecretBytes(legacyRecord);
+    if (!result.success) {
+        return result;
+    }
+    if (!SD.remove(kLegacySshPrivateKeyPath)) {
+        return {false, "SSH key record and bindings committed, but legacy microSD key cleanup failed"};
+    }
+    return {true, ""};
+}
+
+SshProfileSummary readIndexedProfileSummary(Preferences& preferences,
+                                            std::size_t index)
+{
+    const String suffix(index);
+    return {
+        preferences.getULong64(indexedProfileIdKey(index).c_str(), 0),
+        preferences.getString((String("n") + suffix).c_str(), ""),
+        preferences.getString((String("h") + suffix).c_str(), ""),
+        preferences.getUShort((String("p") + suffix).c_str(), 22),
+        preferences.getString((String("u") + suffix).c_str(), ""),
+        preferences.getUChar((String("a") + suffix).c_str(), 0) == 1
+            ? SshAuthMode::PrivateKey : SshAuthMode::Password,
+    };
+}
+
+std::uint64_t generateUniqueSshProfileId(
+    const std::vector<SshProfileSummary>& profiles)
+{
+    for (std::size_t attempt = 0; attempt < 32; ++attempt) {
+        const std::uint64_t candidate =
+            (static_cast<std::uint64_t>(esp_random()) << 32) |
+            static_cast<std::uint64_t>(esp_random());
+        if (candidate == 0) {
+            continue;
+        }
+        bool collision = false;
+        for (const SshProfileSummary& profile : profiles) {
+            if (profile.id == candidate) {
+                collision = true;
+                break;
+            }
+        }
+        if (!collision) {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+OperationResult assignMissingSshProfileIds(
+    Preferences& preferences,
+    std::vector<SshProfileSummary>& profiles)
+{
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        if (profiles[index].id == 0) {
+            continue;
+        }
+        for (std::size_t other = index + 1; other < profiles.size(); ++other) {
+            if (profiles[index].id == profiles[other].id) {
+                return {false, "Stored SSH profile IDs are not unique"};
+            }
+        }
+    }
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        if (profiles[index].id != 0) {
+            continue;
+        }
+        const std::uint64_t id = generateUniqueSshProfileId(profiles);
+        if (id == 0) {
+            return {false, "Failed to generate a unique SSH profile ID"};
+        }
+        const String key = indexedProfileIdKey(index);
+        if (preferences.putULong64(key.c_str(), id) != sizeof(std::uint64_t) ||
+            preferences.getULong64(key.c_str(), 0) != id) {
+            return {false, "Failed to persist SSH profile ID " + String(index + 1)};
+        }
+        profiles[index].id = id;
     }
     return {true, ""};
 }
@@ -127,6 +900,7 @@ SshProfile readIndexedProfile(Preferences& preferences, std::size_t index)
         preferences.getUChar((String("a") + suffix).c_str(), 0) == 1
             ? SshAuthMode::PrivateKey : SshAuthMode::Password,
         preferences.getString((String("k") + suffix).c_str(), ""),
+        preferences.getULong64(indexedPrivateKeyIdKey(index).c_str(), 0),
     };
 }
 
@@ -134,7 +908,7 @@ bool writeIndexedProfile(Preferences& preferences, const SshProfile& profile,
                          std::size_t index)
 {
     const String suffix(index);
-    return preferences.putString((String("n") + suffix).c_str(), profile.name) == profile.name.length() &&
+    bool written = preferences.putString((String("n") + suffix).c_str(), profile.name) == profile.name.length() &&
            preferences.putString((String("h") + suffix).c_str(), profile.host) == profile.host.length() &&
            preferences.putUShort((String("p") + suffix).c_str(), profile.port) == sizeof(std::uint16_t) &&
            preferences.putString((String("u") + suffix).c_str(), profile.username) == profile.username.length() &&
@@ -143,26 +917,99 @@ bool writeIndexedProfile(Preferences& preferences, const SshProfile& profile,
                                 profile.authMode == SshAuthMode::PrivateKey ? 1 : 0) == sizeof(std::uint8_t) &&
            preferences.putString((String("k") + suffix).c_str(), profile.privateKeyPassphrase) ==
                profile.privateKeyPassphrase.length();
+    const String privateKeyIdKey = indexedPrivateKeyIdKey(index);
+    if (profile.privateKeyId == 0) {
+        written = removeExactSshPreference(preferences, privateKeyIdKey) && written;
+    } else {
+        written = preferences.putULong64(privateKeyIdKey.c_str(), profile.privateKeyId) ==
+                      sizeof(profile.privateKeyId) && written;
+    }
+    return written;
 }
 
-void removeIndexedProfile(Preferences& preferences, std::size_t index)
+bool removeIndexedProfile(Preferences& preferences, std::size_t index)
 {
     const String suffix(index);
-    preferences.remove((String("n") + suffix).c_str());
-    preferences.remove((String("h") + suffix).c_str());
-    preferences.remove((String("p") + suffix).c_str());
-    preferences.remove((String("u") + suffix).c_str());
-    preferences.remove((String("w") + suffix).c_str());
-    preferences.remove((String("a") + suffix).c_str());
-    preferences.remove((String("k") + suffix).c_str());
+    if (!removeExactSshPreference(preferences, String("n") + suffix) ||
+        !removeExactSshPreference(preferences, String("h") + suffix) ||
+        !removeExactSshPreference(preferences, String("p") + suffix) ||
+        !removeExactSshPreference(preferences, String("u") + suffix) ||
+        !removeExactSshPreference(preferences, String("w") + suffix) ||
+        !removeExactSshPreference(preferences, String("a") + suffix) ||
+        !removeExactSshPreference(preferences, String("k") + suffix) ||
+        !removeExactSshPreference(preferences, indexedProfileIdKey(index)) ||
+        !removeExactSshPreference(preferences, indexedPrivateKeyIdKey(index))) {
+        return false;
+    }
+    return true;
+}
+
+OperationResult verifyWrittenSshProfiles(
+    const std::vector<SshProfile>& profiles,
+    std::size_t selectedIndex,
+    const std::vector<std::uint64_t>& profileIds)
+{
+    std::vector<SshProfile> verified;
+    std::size_t verifiedSelected = 0;
+    const OperationResult loaded = loadSshProfiles(verified, verifiedSelected);
+    if (!loaded.success || verified.size() != profiles.size() ||
+        (!profiles.empty() && verifiedSelected != selectedIndex)) {
+        return {false, "Failed to verify SSH profiles after NVS write"};
+    }
+    std::vector<SshProfileSummary> verifiedSummaries;
+    std::size_t verifiedSummarySelected = 0;
+    const OperationResult summariesLoaded = loadSshProfileSummaries(
+        verifiedSummaries, verifiedSummarySelected);
+    if (!summariesLoaded.success || verifiedSummaries.size() != profileIds.size() ||
+        (!verifiedSummaries.empty() && verifiedSummarySelected != selectedIndex)) {
+        return {false, "Failed to verify SSH profile IDs after NVS write"};
+    }
+    for (std::size_t index = 0; index < profileIds.size(); ++index) {
+        if (verifiedSummaries[index].id != profileIds[index] ||
+            verified[index].privateKeyId != profiles[index].privateKeyId) {
+            return {false, "Failed to verify SSH profile IDs after NVS write"};
+        }
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, true)) {
+        return {false, "Failed to open SSH settings in NVS for verification"};
+    }
+    bool inactiveIdentityAbsent = true;
+    for (std::size_t index = profiles.size(); index < kMaximumSshProfiles; ++index) {
+        if (preferences.getType(indexedProfileIdKey(index).c_str()) != PT_INVALID ||
+            preferences.getType(indexedPrivateKeyIdKey(index).c_str()) != PT_INVALID) {
+            inactiveIdentityAbsent = false;
+            break;
+        }
+    }
+    preferences.end();
+    return inactiveIdentityAbsent
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Inactive SSH profile identity remains in NVS"};
 }
 
 OperationResult writeProfiles(const std::vector<SshProfile>& profiles,
-                              std::size_t selectedIndex)
+                              std::size_t selectedIndex,
+                              const std::vector<std::uint64_t>& profileIds)
 {
     if (profiles.size() > kMaximumSshProfiles ||
+        profiles.size() != profileIds.size() ||
         (!profiles.empty() && selectedIndex >= profiles.size())) {
         return {false, "SSH profile collection is invalid"};
+    }
+    for (std::size_t index = 0; index < profileIds.size(); ++index) {
+        if (profileIds[index] == 0) {
+            return {false, "SSH profile collection contains an invalid ID"};
+        }
+        for (std::size_t other = index + 1; other < profileIds.size(); ++other) {
+            if (profileIds[index] == profileIds[other]) {
+                return {false, "SSH profile collection contains duplicate IDs"};
+            }
+        }
+    }
+    const OperationResult cleaned = cleanupSshPrivateKeyRecords();
+    if (!cleaned.success) {
+        return cleaned;
     }
     Preferences preferences;
     if (!preferences.begin(kSshNamespace, false)) {
@@ -171,9 +1018,12 @@ OperationResult writeProfiles(const std::vector<SshProfile>& profiles,
     bool written = true;
     for (std::size_t index = 0; index < profiles.size(); ++index) {
         written = writeIndexedProfile(preferences, profiles[index], index) && written;
+        written = preferences.putULong64(indexedProfileIdKey(index).c_str(),
+                                         profileIds[index]) ==
+                      sizeof(std::uint64_t) && written;
     }
     for (std::size_t index = profiles.size(); index < kMaximumSshProfiles; ++index) {
-        removeIndexedProfile(preferences, index);
+        written = removeIndexedProfile(preferences, index) && written;
     }
     written = preferences.putUChar("cnt", static_cast<std::uint8_t>(profiles.size())) ==
                   sizeof(std::uint8_t) && written;
@@ -189,14 +1039,95 @@ OperationResult writeProfiles(const std::vector<SshProfile>& profiles,
     if (!written) {
         return {false, "Failed to write the complete SSH profile collection to NVS"};
     }
-    std::vector<SshProfile> verified;
-    std::size_t verifiedSelected = 0;
-    const OperationResult loaded = loadSshProfiles(verified, verifiedSelected);
-    if (!loaded.success || verified.size() != profiles.size() ||
-        (!profiles.empty() && verifiedSelected != selectedIndex)) {
-        return {false, "Failed to verify SSH profiles after NVS write"};
+    return verifyWrittenSshProfiles(profiles, selectedIndex, profileIds);
+}
+
+OperationResult writeProfilesAfterIndexedDelete(
+    const std::vector<SshProfile>& profiles,
+    std::size_t selectedIndex,
+    const std::vector<std::uint64_t>& profileIds,
+    std::size_t deletedIndex)
+{
+    if (profiles.size() >= kMaximumSshProfiles ||
+        profiles.size() != profileIds.size() ||
+        deletedIndex > profiles.size() ||
+        (!profiles.empty() && selectedIndex >= profiles.size())) {
+        return {false, "SSH profile deletion state is invalid"};
     }
-    return {true, ""};
+    Preferences authority;
+    if (!authority.begin(kSshNamespace, true)) {
+        return {false, "Failed to open SSH settings in NVS for deletion"};
+    }
+    const PreferenceType countType = authority.getType("cnt");
+    authority.end();
+    if (countType == PT_INVALID) {
+        if (!profiles.empty() || deletedIndex != 0) {
+            return {false, "Legacy SSH profile deletion state is invalid"};
+        }
+        return writeProfiles(profiles, selectedIndex, profileIds);
+    }
+    if (countType != PT_U8) {
+        return {false, "Stored SSH profile count has an invalid type"};
+    }
+    const OperationResult cleaned = cleanupSshPrivateKeyRecords();
+    if (!cleaned.success) {
+        return cleaned;
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {false, "Failed to open SSH settings in NVS for deletion"};
+    }
+    const std::size_t oldCount = profiles.size() + 1;
+    if (preferences.getType("cnt") != PT_U8 ||
+        preferences.getUChar("cnt", 0) != oldCount) {
+        preferences.end();
+        return {false, "Stored SSH profile count changed before deletion"};
+    }
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        const std::size_t storedIndex = index < deletedIndex ? index : index + 1;
+        const String storedIdKey = indexedProfileIdKey(storedIndex);
+        if (profileIds[index] == 0 ||
+            preferences.getType(storedIdKey.c_str()) != PT_U64 ||
+            preferences.getULong64(storedIdKey.c_str(), 0) != profileIds[index]) {
+            preferences.end();
+            return {false, "Stored SSH profile IDs changed before deletion"};
+        }
+    }
+    for (std::size_t index = deletedIndex; index < profiles.size(); ++index) {
+        const String destinationIdKey = indexedProfileIdKey(index);
+        const String sourceIdKey = indexedProfileIdKey(index + 1);
+        const std::uint64_t shiftedId = profileIds[index];
+        preferences.putULong64(destinationIdKey.c_str(), shiftedId);
+        if (preferences.getType(destinationIdKey.c_str()) != PT_U64 ||
+            preferences.getULong64(destinationIdKey.c_str(), 0) != shiftedId ||
+            preferences.getType(sourceIdKey.c_str()) != PT_U64 ||
+            preferences.getULong64(sourceIdKey.c_str(), 0) != shiftedId ||
+            !writeIndexedProfile(preferences, profiles[index], index)) {
+            preferences.end();
+            return {false, "Failed to shift SSH profile safely during deletion"};
+        }
+    }
+    for (std::size_t index = profiles.size(); index < kMaximumSshProfiles; ++index) {
+        if (!removeIndexedProfile(preferences, index)) {
+            preferences.end();
+            return {false, "Failed to remove inactive SSH profile state"};
+        }
+    }
+    const std::uint8_t storedSelection = profiles.empty()
+        ? 0
+        : static_cast<std::uint8_t>(selectedIndex);
+    preferences.putUChar("sel", storedSelection);
+    if (preferences.getUChar("sel", 0) != storedSelection) {
+        preferences.end();
+        return {false, "Failed to persist selected SSH profile during deletion"};
+    }
+    preferences.putUChar("cnt", static_cast<std::uint8_t>(profiles.size()));
+    if (preferences.getUChar("cnt", static_cast<std::uint8_t>(oldCount)) != profiles.size()) {
+        preferences.end();
+        return {false, "Failed to commit SSH profile deletion"};
+    }
+    preferences.end();
+    return verifyWrittenSshProfiles(profiles, selectedIndex, profileIds);
 }
 
 bool isValidSshFingerprint(const String& fingerprint)
@@ -322,11 +1253,68 @@ void closeSftpHandle(LIBSSH2_SFTP_HANDLE* handle)
 
 }  // namespace
 
+OperationResult loadSshProfileSummaries(
+    std::vector<SshProfileSummary>& profiles,
+    std::size_t& selectedIndex)
+{
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {false, "Failed to open SSH settings in NVS"};
+    }
+    const std::size_t count = preferences.getUChar("cnt", 0);
+    if (count > kMaximumSshProfiles) {
+        preferences.end();
+        return {false, "Stored SSH profile count exceeds the supported limit"};
+    }
+    std::vector<SshProfileSummary> loaded;
+    loaded.reserve(count == 0 ? 1 : count);
+    std::size_t selected = 0;
+    if (count == 0) {
+        const String host = preferences.getString("host", "");
+        if (!host.isEmpty()) {
+            loaded.push_back({
+                preferences.getULong64(indexedProfileIdKey(0).c_str(), 0),
+                host.substring(0, 32),
+                host,
+                preferences.getUShort("port", 22),
+                preferences.getString("user", ""),
+                preferences.getUChar("auth_mode", 0) == 1
+                    ? SshAuthMode::PrivateKey : SshAuthMode::Password,
+            });
+        }
+    } else {
+        selected = preferences.getUChar("sel", 0);
+        if (selected >= count) {
+            preferences.end();
+            return {false, "Stored selected SSH profile index is invalid"};
+        }
+        for (std::size_t index = 0; index < count; ++index) {
+            loaded.push_back(readIndexedProfileSummary(preferences, index));
+        }
+    }
+    for (std::size_t index = 0; index < loaded.size(); ++index) {
+        const SshProfileSummary& item = loaded[index];
+        if (!isValidSshProfileName(item.name) || !isValidSshHost(item.host) ||
+            item.port == 0 || !isValidSshUsername(item.username)) {
+            preferences.end();
+            return {false, "Stored SSH profile " + String(index + 1) + " is invalid"};
+        }
+    }
+    const OperationResult assigned = assignMissingSshProfileIds(preferences, loaded);
+    preferences.end();
+    if (!assigned.success) {
+        return assigned;
+    }
+    profiles = std::move(loaded);
+    selectedIndex = selected;
+    return {true, ""};
+}
+
 OperationResult loadSshProfile(SshProfile& profile)
 {
-    std::vector<SshProfile> profiles;
+    std::vector<SshProfileSummary> profiles;
     std::size_t selectedIndex = 0;
-    const OperationResult result = loadSshProfiles(profiles, selectedIndex);
+    const OperationResult result = loadSshProfileSummaries(profiles, selectedIndex);
     if (!result.success) {
         return result;
     }
@@ -334,7 +1322,59 @@ OperationResult loadSshProfile(SshProfile& profile)
         profile = {"", "", 22, "", "", SshAuthMode::Password, ""};
         return {true, ""};
     }
-    profile = profiles[selectedIndex];
+    const SshProfileSummary& selected = profiles[selectedIndex];
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, true)) {
+        return {false, "Failed to open SSH secrets in NVS"};
+    }
+    const std::size_t count = preferences.getUChar("cnt", 0);
+    String password;
+    String privateKeyPassphrase;
+    std::uint64_t privateKeyId = 0;
+    bool privateKeyIdFound = false;
+    if (count == 0) {
+        if (profiles.size() != 1 || selectedIndex != 0) {
+            preferences.end();
+            return {false, "Stored legacy SSH profile selection changed during load"};
+        }
+        password = preferences.getString("password", "");
+        privateKeyPassphrase = preferences.getString("key_pass", "");
+        const OperationResult keyResult = readOptionalSshPrivateKeyId(
+            preferences, indexedPrivateKeyIdKey(0),
+            privateKeyId, privateKeyIdFound);
+        if (!keyResult.success) {
+            preferences.end();
+            return keyResult;
+        }
+    } else {
+        const std::size_t storedSelected = preferences.getUChar("sel", 0);
+        if (count != profiles.size() || storedSelected != selectedIndex) {
+            preferences.end();
+            return {false, "Stored SSH profile selection changed during load"};
+        }
+        const String suffix(selectedIndex);
+        password = preferences.getString((String("w") + suffix).c_str(), "");
+        privateKeyPassphrase = preferences.getString(
+            (String("k") + suffix).c_str(), "");
+        const OperationResult keyResult = readOptionalSshPrivateKeyId(
+            preferences, indexedPrivateKeyIdKey(selectedIndex),
+            privateKeyId, privateKeyIdFound);
+        if (!keyResult.success) {
+            preferences.end();
+            return keyResult;
+        }
+    }
+    preferences.end();
+    profile = {
+        selected.name,
+        selected.host,
+        selected.port,
+        selected.username,
+        password,
+        selected.authMode,
+        privateKeyPassphrase,
+        privateKeyIdFound ? privateKeyId : 0,
+    };
     return {true, ""};
 }
 
@@ -372,6 +1412,7 @@ OperationResult loadSshProfiles(std::vector<SshProfile>& profiles,
         preferences.getUChar("auth_mode", 0) == 1
             ? SshAuthMode::PrivateKey : SshAuthMode::Password,
         preferences.getString("key_pass", ""),
+        preferences.getULong64(indexedPrivateKeyIdKey(0).c_str(), 0),
         };
         if (!legacy.host.isEmpty()) {
             SshProfile migrated = legacy;
@@ -415,30 +1456,85 @@ OperationResult saveSshProfileAt(const SshProfile& profile, std::size_t index)
     if (!loaded.success) {
         return loaded;
     }
+    if (index == profiles.size() && profiles.size() >= kMaximumSshProfiles) {
+        return {false, "SSH profile limit of five has been reached"};
+    }
     if (index > profiles.size() || index >= kMaximumSshProfiles) {
         return {false, "SSH profile index is outside the supported range"};
     }
+    std::vector<SshProfileSummary> summaries;
+    std::size_t summarySelectedIndex = 0;
+    const OperationResult summariesLoaded = loadSshProfileSummaries(
+        summaries, summarySelectedIndex);
+    if (!summariesLoaded.success) {
+        return summariesLoaded;
+    }
+    if (summaries.size() != profiles.size() ||
+        (!summaries.empty() && summarySelectedIndex != selectedIndex)) {
+        return {false, "SSH profile summary does not match stored profiles"};
+    }
+    std::vector<std::uint64_t> profileIds;
+    profileIds.reserve(summaries.size() + 1);
+    for (const SshProfileSummary& summary : summaries) {
+        profileIds.push_back(summary.id);
+    }
+    std::uint64_t legacyOwnerId = 0;
+    bool legacyOwnerFound = false;
+    if (index == profiles.size() && profiles.empty() && profile.privateKeyId == 0) {
+        const OperationResult owner = loadLegacySshPrivateKeyOwner(
+            legacyOwnerId, legacyOwnerFound);
+        if (!owner.success) {
+            return owner;
+        }
+    }
     if (index == profiles.size()) {
-        profiles.push_back(profile);
+        const std::uint64_t id = generateUniqueSshProfileId(summaries);
+        if (id == 0) {
+            return {false, "Failed to generate a unique SSH profile ID"};
+        }
+        SshProfile created = profile;
+        if (legacyOwnerFound) {
+            created.privateKeyId = legacyOwnerId;
+        }
+        profiles.push_back(created);
+        profileIds.push_back(id);
         selectedIndex = index;
     } else {
         profiles[index] = profile;
     }
-    return writeProfiles(profiles, selectedIndex);
+    const OperationResult written = writeProfiles(profiles, selectedIndex, profileIds);
+    if (written.success && legacyOwnerFound) {
+        clearLegacySshPrivateKeyOwner();
+    }
+    return written;
 }
 
 OperationResult selectSshProfile(std::size_t index)
 {
-    std::vector<SshProfile> profiles;
+    std::vector<SshProfileSummary> profiles;
     std::size_t selectedIndex = 0;
-    const OperationResult loaded = loadSshProfiles(profiles, selectedIndex);
+    const OperationResult loaded = loadSshProfileSummaries(profiles, selectedIndex);
     if (!loaded.success) {
         return loaded;
     }
     if (index >= profiles.size()) {
         return {false, "SSH profile selection is outside the stored range"};
     }
-    return writeProfiles(profiles, index);
+    if (index == selectedIndex) {
+        return {true, ""};
+    }
+    Preferences preferences;
+    if (!preferences.begin(kSshNamespace, false)) {
+        return {false, "Failed to open SSH settings in NVS for selection"};
+    }
+    const bool written = preferences.getUChar("cnt", 0) == profiles.size() &&
+        preferences.putUChar("sel", static_cast<std::uint8_t>(index)) ==
+            sizeof(std::uint8_t) &&
+        preferences.getUChar("sel", 0) == index;
+    preferences.end();
+    return written
+        ? OperationResult{true, ""}
+        : OperationResult{false, "Failed to persist selected SSH profile"};
 }
 
 OperationResult deleteSshProfile(std::size_t index)
@@ -452,7 +1548,24 @@ OperationResult deleteSshProfile(std::size_t index)
     if (index >= profiles.size()) {
         return {false, "SSH profile deletion is outside the stored range"};
     }
+    std::vector<SshProfileSummary> summaries;
+    std::size_t summarySelectedIndex = 0;
+    const OperationResult summariesLoaded = loadSshProfileSummaries(
+        summaries, summarySelectedIndex);
+    if (!summariesLoaded.success) {
+        return summariesLoaded;
+    }
+    if (summaries.size() != profiles.size() ||
+        (!summaries.empty() && summarySelectedIndex != selectedIndex)) {
+        return {false, "SSH profile summary does not match stored profiles"};
+    }
+    std::vector<std::uint64_t> profileIds;
+    profileIds.reserve(summaries.size());
+    for (const SshProfileSummary& summary : summaries) {
+        profileIds.push_back(summary.id);
+    }
     profiles.erase(profiles.begin() + static_cast<std::ptrdiff_t>(index));
+    profileIds.erase(profileIds.begin() + static_cast<std::ptrdiff_t>(index));
     if (profiles.empty()) {
         selectedIndex = 0;
     } else if (selectedIndex > index) {
@@ -460,7 +1573,8 @@ OperationResult deleteSshProfile(std::size_t index)
     } else if (selectedIndex >= profiles.size()) {
         selectedIndex = profiles.size() - 1;
     }
-    return writeProfiles(profiles, selectedIndex);
+    return writeProfilesAfterIndexedDelete(
+        profiles, selectedIndex, profileIds, index);
 }
 
 bool sshProfileIsComplete(const SshProfile& profile)
@@ -468,91 +1582,84 @@ bool sshProfileIsComplete(const SshProfile& profile)
     return isValidSshHost(profile.host) && profile.port != 0 &&
            isValidSshUsername(profile.username) &&
            ((profile.authMode == SshAuthMode::Password && !profile.password.isEmpty()) ||
-            (profile.authMode == SshAuthMode::PrivateKey && sshPrivateKeyIsInstalled()));
+            (profile.authMode == SshAuthMode::PrivateKey &&
+             sshPrivateKeyIsInstalled(profile.privateKeyId)));
 }
 
 OperationResult initializeSshStorage()
 {
     const OperationResult directory = ensureSshDirectory();
-    return directory.success
-        ? recoverAtomicSdFile(kSshKnownHostsPath)
-        : directory;
-}
-
-OperationResult installSshPrivateKey(const String& temporaryPath)
-{
-    const OperationResult directory = ensureSshDirectory();
     if (!directory.success) {
         return directory;
     }
-    File source = SD.open(temporaryPath, FILE_READ);
-    if (!source || source.isDirectory()) {
-        if (source) {
-            source.close();
-        }
-        return {false, "SSH private-key upload could not be opened"};
+    const OperationResult recovered = recoverAtomicSdFile(kSshKnownHostsPath);
+    if (!recovered.success) {
+        return recovered;
     }
-    const std::size_t size = source.size();
-    if (size < 64 || size > 16384) {
-        source.close();
-        return {false, "SSH private key must contain 64 to 16384 bytes"};
+    std::vector<SshProfileSummary> profiles;
+    std::size_t selectedIndex = 0;
+    const OperationResult loaded = loadSshProfileSummaries(profiles, selectedIndex);
+    if (!loaded.success) {
+        return loaded;
     }
-    char header[65] = {};
-    const std::size_t headerBytes = source.readBytes(header, sizeof(header) - 1);
-    source.seek(0);
-    if (headerBytes < 16 || String(header).indexOf("-----BEGIN ") < 0) {
-        source.close();
-        return {false, "SSH private key is not a PEM document"};
+    const OperationResult cleaned = cleanupSshPrivateKeyRecords();
+    if (!cleaned.success) {
+        return cleaned;
     }
-    const String replacementPath = String(kSshPrivateKeyPath) + ".new";
-    SD.remove(replacementPath);
-    File output = SD.open(replacementPath, FILE_WRITE);
-    if (!output) {
-        source.close();
-        return {false, "Failed to create temporary SSH private-key file on microSD"};
-    }
-    std::uint8_t buffer[512] = {};
-    std::size_t copied = 0;
-    while (source.available()) {
-        const std::size_t readBytes = source.read(buffer, sizeof(buffer));
-        if (readBytes == 0 || output.write(buffer, readBytes) != readBytes) {
-            source.close();
-            output.close();
-            SD.remove(replacementPath);
-            return {false, "Failed while writing SSH private key to microSD"};
-        }
-        copied += readBytes;
-    }
-    source.close();
-    output.flush();
-    output.close();
-    if (copied != size) {
-        SD.remove(replacementPath);
-        return {false, "SSH private-key copy length did not match the uploaded file"};
-    }
-    if (SD.exists(kSshPrivateKeyPath) && !SD.remove(kSshPrivateKeyPath)) {
-        SD.remove(replacementPath);
-        return {false, "Failed to replace the existing SSH private key"};
-    }
-    if (!SD.rename(replacementPath, kSshPrivateKeyPath)) {
-        SD.remove(replacementPath);
-        return {false, "Failed to activate the SSH private key on microSD"};
-    }
-    return {true, ""};
+    return migrateLegacySshPrivateKey();
 }
 
-bool sshPrivateKeyIsInstalled()
+OperationResult installSshPrivateKey(const String& temporaryPath,
+                                     std::uint64_t profileId)
 {
-    File key = SD.open(kSshPrivateKeyPath, FILE_READ);
-    if (!key || key.isDirectory()) {
-        if (key) {
-            key.close();
-        }
-        return false;
+    if (profileId == 0) {
+        return {false, "Select an SSH profile before installing its private key"};
     }
-    const bool validSize = key.size() >= 64 && key.size() <= 16384;
-    key.close();
-    return validSize;
+    std::vector<SshProfileSummary> profiles;
+    std::size_t selected = 0;
+    OperationResult result = loadSshProfileSummaries(profiles, selected);
+    bool profileFound = false;
+    if (result.success) {
+        for (const SshProfileSummary& profile : profiles) {
+            profileFound = profileFound || profile.id == profileId;
+        }
+        if (!profileFound) {
+            result = {false, "Selected SSH profile no longer exists"};
+        }
+    }
+    std::vector<std::uint8_t> record;
+    if (result.success) {
+        result = readSshPrivateKeyFile(temporaryPath, record);
+    }
+    std::uint64_t privateKeyId = 0;
+    if (result.success) {
+        result = createSshPrivateKeyRecord(record, privateKeyId);
+    }
+    if (result.success) {
+        const SshPrivateKeyBindingResult binding =
+            bindSshPrivateKeyToProfile(profileId, privateKeyId);
+        if (binding.outcome == SshPrivateKeyBindingOutcome::Committed) {
+            result = {true, ""};
+        } else {
+            result = {false, binding.error};
+            if (binding.outcome == SshPrivateKeyBindingOutcome::Unchanged) {
+                const OperationResult cleaned = cleanupSshPrivateKeyRecords();
+                if (!cleaned.success) {
+                    result.error += "; unbound key cleanup also failed: " + cleaned.error;
+                }
+            }
+        }
+    }
+    clearSshSecretBytes(record);
+    return result;
+}
+
+bool sshPrivateKeyIsInstalled(std::uint64_t privateKeyId)
+{
+    std::vector<std::uint8_t> record;
+    const OperationResult result = readSshPrivateKeyRecord(privateKeyId, record);
+    clearSshSecretBytes(record);
+    return result.success;
 }
 
 OperationResult loadTrustedSshFingerprint(const String& host,
@@ -1036,13 +2143,25 @@ OperationResult SshClient::authenticateControlled(
     } else {
         const char* passphrase = profile.privateKeyPassphrase.isEmpty()
             ? nullptr : profile.privateKeyPassphrase.c_str();
+        std::vector<std::uint8_t> privateKeyRecord;
+        const OperationResult loaded = readSshPrivateKeyRecord(
+            profile.privateKeyId, privateKeyRecord);
+        if (!loaded.success) {
+            close();
+            return loaded;
+        }
+        const char* privateKey = reinterpret_cast<const char*>(
+            privateKeyRecord.data() + kSshPrivateKeyRecordHeaderBytes);
+        const std::size_t privateKeyBytes =
+            privateKeyRecord.size() - kSshPrivateKeyRecordHeaderBytes;
         authentication = runUntilCompleteControlled(
-            [this, &profile, passphrase]() {
-                return libssh2_userauth_publickey_fromfile_ex(
+            [this, &profile, passphrase, privateKey, privateKeyBytes]() {
+                return libssh2_userauth_publickey_frommemory(
                     implementation_->session, profile.username.c_str(),
-                    static_cast<unsigned int>(profile.username.length()), nullptr,
-                    kSshPrivateKeyVfsPath, passphrase);
+                    profile.username.length(), nullptr, 0,
+                    privateKey, privateKeyBytes, passphrase);
             }, timeoutMs, isCancelled, cancelled);
+        clearSshSecretBytes(privateKeyRecord);
     }
     if (cancelled) {
         close();

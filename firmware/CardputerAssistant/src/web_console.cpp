@@ -167,6 +167,7 @@ WebPendingContinuationContext webPendingContext;
 File sshKeyUploadFile;
 String sshKeyUploadError;
 std::size_t sshKeyUploadBytes = 0;
+std::uint64_t sshKeyUploadProfileId = 0;
 constexpr const char* kSshKeyUploadPath = "/assistant/ssh/upload.tmp";
 SshClient webSshClient;
 SshProfile webSshProfile = {"", "", 22, "", "", SshAuthMode::Password, ""};
@@ -325,6 +326,7 @@ void releaseConsoleSessionState()
     }
     sshKeyUploadError = String();
     sshKeyUploadBytes = 0;
+    sshKeyUploadProfileId = 0;
     uploadName = String();
     uploadStorageName = String();
     uploadError = String();
@@ -1059,7 +1061,8 @@ OperationResult refreshSshProfiles()
     std::size_t selected = 0;
     const OperationResult result = loadSshProfiles(profiles, selected);
     if (result.success) {
-        consoleSshPrivateKeyInstalled = sshPrivateKeyIsInstalled();
+        consoleSshPrivateKeyInstalled = !profiles.empty() &&
+            sshPrivateKeyIsInstalled(profiles[selected].privateKeyId);
     }
     recordWebSdRead(millis() - startedAt);
     if (!result.success) {
@@ -4182,6 +4185,7 @@ void handleSshKeyUploadData()
     if (upload.status == UPLOAD_FILE_START) {
         sshKeyUploadError = "";
         sshKeyUploadBytes = 0;
+        sshKeyUploadProfileId = 0;
         if (!requestHasValidCsrf()) {
             sshKeyUploadError = "Authentication required";
             return;
@@ -4197,6 +4201,16 @@ void handleSshKeyUploadData()
             sshKeyUploadError = initialized.error;
             return;
         }
+        std::vector<SshProfileSummary> profiles;
+        std::size_t selected = 0;
+        const OperationResult loaded = loadSshProfileSummaries(profiles, selected);
+        if (!loaded.success || profiles.empty() || selected >= profiles.size()) {
+            sshKeyUploadError = loaded.success
+                ? String("Select an SSH profile before installing its private key")
+                : loaded.error;
+            return;
+        }
+        sshKeyUploadProfileId = profiles[selected].id;
         SD.remove(kSshKeyUploadPath);
         sshKeyUploadFile = SD.open(kSshKeyUploadPath, FILE_WRITE);
         if (!sshKeyUploadFile) {
@@ -4259,7 +4273,8 @@ void handleSshKeyUploadData()
             sshKeyUploadError = storage.error;
             return;
         }
-        const OperationResult installed = installSshPrivateKey(kSshKeyUploadPath);
+        const OperationResult installed = installSshPrivateKey(
+            kSshKeyUploadPath, sshKeyUploadProfileId);
         if (requireSdWriteAccess(0, 0).success) {
             SD.remove(kSshKeyUploadPath);
         }
