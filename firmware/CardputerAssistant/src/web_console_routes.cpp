@@ -49,8 +49,10 @@ void configureWebConsoleRoutes(WebServer& server,
         "X-CardMind-Context-Bytes",
         "X-CardMind-Output-Tokens",
         "X-CardMind-Auto-Compact",
+        "X-CardMind-Tool-Intent",
+        "X-CardMind-Tool-Policy",
     };
-    server.collectHeaders(headers, 9);
+    server.collectHeaders(headers, 11);
     server.on("/", HTTP_GET, handler(handlers, WebConsoleRouteHandler::Root));
     server.on("/login", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Login));
     server.on("/logout", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Logout));
@@ -58,7 +60,10 @@ void configureWebConsoleRoutes(WebServer& server,
     server.on("/api/console/close", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::CloseConsole));
     server.on("/api/state", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/pending", HTTP_GET,
+              handler(handlers, WebConsoleRouteHandler::Pending));
     server.on("/api/status", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
+    server.on("/api/activity", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
     server.on("/api/storage/confirm", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::StorageConfirm));
     server.on("/api/projects", HTTP_GET, handler(handlers, WebConsoleRouteHandler::State));
@@ -97,6 +102,14 @@ void configureWebConsoleRoutes(WebServer& server,
               rawHandler(handlers, WebConsoleRouteHandler::PromptRawData));
     server.on("/api/prompt/retry", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::PromptRetry));
+    server.on("/api/pending/allow-once", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::PendingAllowOnce));
+    server.on("/api/pending/allow-chat", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::PendingAllowChat));
+    server.on("/api/pending/deny", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::PendingDeny));
+    server.on("/api/pending/acknowledge", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::PendingAcknowledge));
     server.on("/api/chat/select", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::SelectChat));
     server.on("/api/chat/new", HTTP_POST,
@@ -107,6 +120,8 @@ void configureWebConsoleRoutes(WebServer& server,
     server.on("/api/chat/instructions/raw", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::InstructionsRawComplete),
               rawHandler(handlers, WebConsoleRouteHandler::InstructionsRawData));
+    server.on("/api/chat/settings", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::ChatSettings));
     server.on("/api/chat/compact", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::ChatCompact));
     server.on("/api/chat/permissions", HTTP_POST,

@@ -21,6 +21,21 @@ ToolExecutionResult toolError(const String& error)
     return {false, output, error};
 }
 
+ToolExecutionResult toolCanceled(const String& error)
+{
+    JsonDocument document;
+    document["ok"] = false;
+    document["error"] = error;
+    std::string output;
+    serializeJson(document, output);
+    return {
+        false,
+        output,
+        error,
+        ToolExecutionOutcome::Cancelled,
+    };
+}
+
 }  // namespace
 
 bool isSshToolName(const std::string& name)
@@ -44,8 +59,13 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
     if (!isSshToolName(call.name)) {
         return toolError("Unsupported SSH tool name");
     }
-    if (isCancelled()) {
-        return toolError("SSH command canceled before connection");
+    bool cancelled = false;
+    const CancelCallback latchedCancellation = [&]() {
+        cancelled = cancelled || isCancelled();
+        return cancelled;
+    };
+    if (latchedCancellation()) {
+        return toolCanceled("SSH command canceled before connection");
     }
     JsonDocument arguments;
     const DeserializationError parsed = deserializeJson(arguments, call.arguments);
@@ -67,11 +87,12 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
                                         : result.error);
     }
     SshClient client;
-    result = client.connect(profile, kSshToolTimeoutMs);
+    result = client.connectControlled(
+        profile, kSshToolTimeoutMs, latchedCancellation);
     if (!result.success) {
         profile.password = "";
         profile.privateKeyPassphrase = "";
-        return toolError(result.error);
+        return cancelled ? toolCanceled(result.error) : toolError(result.error);
     }
     const SshTrustResult trust = checkTrustedSshHost(
         profile.host, profile.port, client.fingerprint());
@@ -83,25 +104,26 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
             ? String("Selected SSH host key is not trusted; connect manually first")
             : trust.error);
     }
-    result = client.authenticate(profile, kSshToolTimeoutMs);
+    result = client.authenticateControlled(
+        profile, kSshToolTimeoutMs, latchedCancellation);
     profile.password = "";
     profile.privateKeyPassphrase = "";
     if (!result.success) {
         client.close();
-        return toolError(result.error);
+        return cancelled ? toolCanceled(result.error) : toolError(result.error);
     }
-    if (isCancelled()) {
+    if (latchedCancellation()) {
         client.close();
-        return toolError("SSH command canceled before execution");
+        return toolCanceled("SSH command canceled before execution");
     }
     std::string commandOutput;
     int exitStatus = -1;
-    result = client.executeCommand(command, commandOutput, exitStatus,
-                                   kMaximumSshCommandOutputBytes,
-                                   kSshToolTimeoutMs);
+    result = client.executeCommandControlled(
+        command, commandOutput, exitStatus, kMaximumSshCommandOutputBytes,
+        kSshToolTimeoutMs, latchedCancellation);
     client.close();
     if (!result.success) {
-        return toolError(result.error);
+        return cancelled ? toolCanceled(result.error) : toolError(result.error);
     }
     if (!isValidUtf8(commandOutput)) {
         return toolError("SSH command returned output that is not valid UTF-8");
@@ -112,7 +134,14 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
     document["output"] = commandOutput;
     std::string output;
     serializeJson(document, output);
-    return {true, output, ""};
+    return {
+        true,
+        output,
+        "",
+        ToolExecutionOutcome::Finished,
+        true,
+        exitStatus,
+    };
 }
 
 }  // namespace cardputer

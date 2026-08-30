@@ -12,16 +12,32 @@ Opening a project shows only its chats, so context is never mixed between projec
 Use Up and Down to select, Enter to open actions, and Esc to move back one level.
 Project actions can change the model and instructions or choose **Global default**,
 adjust context and response budgets, toggle automatic compaction, and manage the
-project bundle.
+project bundle. The effective model is chosen in order from the global **Default
+model**, the project override, and the optional chat override; a blank narrower
+override inherits the broader value.
 
 - Enter sends text; Up and Down scroll the transcript.
 - `Fn+1` opens Chats; its action menu can clear messages without deleting the chat.
-- `Fn+2` opens model selection.
+- `Fn+2` opens **Next capabilities**.
 - `Fn+3` switches the English/Russian keyboard layout.
 - `Fn+4` returns to the carousel, `Fn+7` creates a chat, and `Fn+8` speaks the
   latest answer when TTS is configured. Press `Esc` to stop TTS download or playback.
-- Each chat has its own messages, title, archive state, instructions, and optional SSH
-  permission. Chat instructions override conflicting project instructions.
+- Each project and chat has its own eight capability policies. **Inherit** uses the
+  broader policy; **Off**, **Ask**, and **Allow** may narrow access, but cannot raise it
+  above the global **Master access** ceiling. Chat instructions override conflicting
+  project instructions.
+- Open **Next capabilities** in chat actions to use **Auto**, **No tools**, or require
+  any combination of Web, Files, SSH, and Python for the next message. This selection
+  resets to **Auto** after send and never changes the stored chat policy. If a required
+  capability is denied or unavailable, the request fails explicitly.
+- The chat header shows compact `W`, `F`, `S`, and `P` states. **Capability status**
+  lists all eight chat policies together with their effective decisions and limiting
+  scope, so color is not the only indication.
+- An **Ask** decision shows a safe preview and offers **Allow once**, **Allow for
+  chat**, and **Deny**. File replacements include a bounded diff, and SSH includes the
+  exact command. Mandatory confirmations do not offer **Allow for chat**. A pending
+  decision cannot be replayed after a restart; acknowledge or discard it and send a
+  new message.
 - Complete raw history remains on microSD. Only the model request is reduced to the
   configured context budget. With automatic compaction enabled, CardMind summarizes
   omitted turns and includes that summary in later requests. Use **Regenerate context
@@ -40,9 +56,11 @@ Voice settings.
 
 ## Search
 
-Use `/search question` or enable Web for one prompt. Search and page extraction are
-separate tools. CardMind shows each tool stage and reports provider errors directly.
-Search is unavailable until its endpoint and key are configured.
+Choose **Web** under **Next capabilities** to require Web access for one prompt, or
+leave the selection on **Auto** and let the model choose among allowed tools. Search
+and page extraction are separate capabilities. CardMind shows each tool stage and
+reports provider errors directly. Search is unavailable until its endpoint and key
+are configured.
 
 ## Shared workspace
 
@@ -70,8 +88,9 @@ CardMind does not create automatic versions when a file is saved. A replacement 
 written to a target-specific `.tmp` file, the previous file is kept only as a
 short-lived `.bak` recovery copy, and both artifacts are removed after a verified
 commit. A rejected save keeps the current file unchanged and removes its staged data;
-after an interrupted commit, recovery preserves the last valid copy. Create an
-explicit backup when you need long-term version retention.
+after an interrupted commit, recovery preserves the last valid copy. Export the
+affected project bundle or copy the needed workspace file off the card when you need
+long-term version retention.
 
 Shared files are not exposed to a project automatically. Link a selected file to the
 active project before asking the model to read or append it. A file created by the
@@ -88,10 +107,13 @@ Tools contains notes, checklists, timer, calculator, QR display, SSH, and a comp
 system monitor. The extended two-page diagnostics view is under **Device**.
 Web Console has its own carousel card with the local address, configuration shortcut,
 and **Start Python workspace** action.
-Device contains display and power preferences, backup and restore, API setup,
-firmware update, and diagnostics. Network and Python controls have dedicated carousel
+The **AI** carousel card contains the **Default model**, API and service setup, global
+instructions, **Master access**, **Defaults for new chats**, pending confirmations, and
+recent tool activity.
+Device contains display and power preferences, API setup, firmware update, and
+diagnostics. Network and Python controls have dedicated carousel
 cards. Help lists the global shortcuts; feature screens show their local controls.
 
-Back up chats and workspace data before replacing a microSD card. A normal firmware
-update preserves NVS and microSD. A clean flash erases NVS, including Wi-Fi, service
-keys, and the installation password.
+Export needed project bundles and copy other workspace data off the card before
+replacing a microSD card. A normal firmware update preserves NVS and microSD. A clean
+flash erases NVS, including Wi-Fi, service keys, and the installation password.

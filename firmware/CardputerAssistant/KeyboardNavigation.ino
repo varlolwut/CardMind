@@ -203,10 +203,54 @@ void handleKeyboard()
                 selectedProjectId, filename);
             menuStatus = exported.success ? "Exported as " + filename : exported.error;
             renderProjectActions();
+        } else if (enterPressed && projectActionsIndex == 10) {
+            capabilityPolicyIndex = 0;
+            menuStatus = "";
+            currentScreen = Screen::ProjectToolPolicy;
+            renderProjectToolPolicy();
         } else if (enterPressed) {
             currentScreen = Screen::ProjectList;
             menuStatus = "";
             renderProjectList();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ProjectToolPolicy) {
+        if (cancelPressed ||
+            (enterPressed && capabilityPolicyIndex == cardputer::kToolCapabilityCount)) {
+            capabilityPolicyIndex = 0;
+            menuStatus = "";
+            currentScreen = Screen::ProjectActions;
+            renderProjectActions();
+        } else if (upPressed) {
+            capabilityPolicyIndex = capabilityPolicyIndex > 0
+                ? capabilityPolicyIndex - 1 : 0;
+            menuStatus = "";
+            renderProjectToolPolicy();
+        } else if (downPressed) {
+            capabilityPolicyIndex = std::min(
+                capabilityPolicyIndex + 1, cardputer::kToolCapabilityCount);
+            menuStatus = "";
+            renderProjectToolPolicy();
+        } else if (enterPressed) {
+            cardputer::ProjectDocumentResult project =
+                cardputer::loadProject(selectedProjectId);
+            if (!project.success) {
+                menuStatus = project.error;
+                renderProjectToolPolicy();
+                return;
+            }
+            project.project.toolPolicy[capabilityPolicyIndex] =
+                nextScopedToolPermission(
+                    project.project.toolPolicy[capabilityPolicyIndex]);
+            const cardputer::OperationResult saved =
+                cardputer::saveProject(project.project);
+            if (saved.success && selectedProjectId == activeProjectId) {
+                activeProjectDocument = project.project;
+            }
+            menuStatus = saved.success ? String("Project policy saved") : saved.error;
+            renderProjectToolPolicy();
         }
         return;
     }
@@ -556,28 +600,24 @@ void handleKeyboard()
                 renderChatActions();
                 return;
             }
-            cardputer::ChatDocument updated = loaded.chat;
-            if (!updated.sshToolsEnabled && !cardputer::sshToolIsAvailable()) {
-                menuStatus = "Configure and trust an SSH profile first";
-                renderChatActions();
-                return;
-            }
-            updated.sshToolsEnabled = !updated.sshToolsEnabled;
-            updated.summary.updatedAt = currentChatTimestamp();
-            const cardputer::OperationResult saved =
-                cardputer::saveProjectChatMetadata(updated);
-            if (!saved.success) {
-                menuStatus = saved.error;
-            } else {
-                selectedChatSshToolsEnabled = updated.sshToolsEnabled;
-                if (selectedChatId == activeChatId) {
-                    activeChatSshToolsEnabled = updated.sshToolsEnabled;
+            if (availableModels.empty()) {
+                refreshModels();
+                if (availableModels.empty()) {
+                    menuStatus = statusMessage;
+                    renderChatActions();
+                    return;
                 }
-                menuStatus = updated.sshToolsEnabled
-                    ? String("Model SSH access enabled")
-                    : String("Model SSH access disabled");
             }
-            renderChatActions();
+            const auto selected = std::find(
+                availableModels.begin(), availableModels.end(), loaded.chat.model);
+            modelPickerIndex = loaded.chat.model.isEmpty() ||
+                selected == availableModels.end()
+                ? 0
+                : static_cast<std::size_t>(
+                    std::distance(availableModels.begin(), selected)) + 1;
+            menuStatus = "";
+            currentScreen = Screen::ChatModelPicker;
+            renderChatModelPicker();
         } else if (enterPressed && chatActionsIndex == 3) {
             archivedChatPreviousOffsets.clear();
             const cardputer::OperationResult loaded = loadArchivedChatViewerPage(0);
@@ -643,7 +683,7 @@ void handleKeyboard()
             }
             selectedChatId = duplicated.chat.summary.id;
             selectedChatTitle = duplicated.chat.summary.title;
-            selectedChatSshToolsEnabled = duplicated.chat.sshToolsEnabled;
+            selectedChatModel = duplicated.chat.model;
             menuStatus = "Chat duplicated";
             renderChatActions();
         } else if (enterPressed && chatActionsIndex == 9) {
@@ -728,12 +768,33 @@ void handleKeyboard()
             currentScreen = Screen::RequestInstructions;
             renderRequestInstructions();
         } else if (enterPressed && chatActionsIndex == 14) {
+            capabilityPolicyIndex = 0;
+            menuStatus = "";
+            currentScreen = Screen::ChatToolPolicy;
+            renderChatToolPolicy();
+        } else if (enterPressed && chatActionsIndex == 15) {
+            chatCapabilityStatusFirstLine = 0;
+            menuStatus = "";
+            currentScreen = Screen::ChatCapabilityStatus;
+            renderChatCapabilityStatus();
+        } else if (enterPressed && chatActionsIndex == 16) {
+            if (selectedChatId != activeChatId) {
+                menuStatus = "Open this chat before setting next capabilities";
+                renderChatActions();
+                return;
+            }
+            composerCapabilitiesIndex = 0;
+            composerCapabilitiesReturnScreen = Screen::ChatActions;
+            menuStatus = "";
+            currentScreen = Screen::ComposerCapabilities;
+            renderComposerCapabilities();
+        } else if (enterPressed && chatActionsIndex == 17) {
             clearChatId = selectedChatId;
             clearChatTitle = selectedChatTitle;
             currentScreen = Screen::ClearChatConfirm;
             cardputer::showConfirmation("CLEAR MESSAGES", clearChatTitle,
                                         "ENTER clear  ESC cancel");
-        } else if (enterPressed && chatActionsIndex == 15) {
+        } else if (enterPressed && chatActionsIndex == 18) {
             deleteChatId = selectedChatId;
             deleteChatTitle = selectedChatTitle;
             deleteChatReturnScreen = Screen::ChatActions;
@@ -744,6 +805,246 @@ void handleKeyboard()
             currentScreen = Screen::ChatList;
             menuStatus = "";
             renderChatList();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ChatModelPicker) {
+        const std::vector<String> items = chatModelItems();
+        if (cancelPressed) {
+            menuStatus = "";
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (upPressed) {
+            modelPickerIndex = modelPickerIndex > 0 ? modelPickerIndex - 1 : 0;
+            renderChatModelPicker();
+        } else if (downPressed && !items.empty()) {
+            modelPickerIndex = std::min(modelPickerIndex + 1, items.size() - 1);
+            renderChatModelPicker();
+        } else if (enterPressed) {
+            cardputer::ChatDocumentResult chat =
+                cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
+            if (!chat.success) {
+                menuStatus = chat.error;
+                renderChatModelPicker();
+                return;
+            }
+            chat.chat.model = modelPickerIndex == 0
+                ? String() : availableModels[modelPickerIndex - 1];
+            chat.chat.summary.updatedAt = currentChatTimestamp();
+            const cardputer::OperationResult saved =
+                cardputer::saveProjectChatMetadata(chat.chat);
+            if (!saved.success) {
+                menuStatus = saved.error;
+                renderChatModelPicker();
+                return;
+            }
+            selectedChatModel = chat.chat.model;
+            if (selectedChatId == activeChatId) activeChatModel = chat.chat.model;
+            menuStatus = chat.chat.model.isEmpty()
+                ? String("Using project default model")
+                : String("Chat model saved");
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ChatToolPolicy) {
+        if (cancelPressed ||
+            (enterPressed && capabilityPolicyIndex == cardputer::kToolCapabilityCount)) {
+            capabilityPolicyIndex = 0;
+            menuStatus = "";
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (upPressed) {
+            capabilityPolicyIndex = capabilityPolicyIndex > 0
+                ? capabilityPolicyIndex - 1 : 0;
+            menuStatus = "";
+            renderChatToolPolicy();
+        } else if (downPressed) {
+            capabilityPolicyIndex = std::min(
+                capabilityPolicyIndex + 1, cardputer::kToolCapabilityCount);
+            menuStatus = "";
+            renderChatToolPolicy();
+        } else if (enterPressed) {
+            cardputer::ChatDocumentResult chat =
+                cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
+            if (!chat.success) {
+                menuStatus = chat.error;
+                renderChatToolPolicy();
+                return;
+            }
+            chat.chat.toolPolicy[capabilityPolicyIndex] =
+                nextScopedToolPermission(
+                    chat.chat.toolPolicy[capabilityPolicyIndex]);
+            chat.chat.summary.updatedAt = currentChatTimestamp();
+            const cardputer::OperationResult saved =
+                cardputer::saveProjectChatMetadata(chat.chat);
+            if (saved.success && selectedChatId == activeChatId) {
+                activeChatToolPolicy = chat.chat.toolPolicy;
+            }
+            menuStatus = saved.success ? String("Chat policy saved") : saved.error;
+            renderChatToolPolicy();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ChatCapabilityStatus) {
+        if (cancelPressed) {
+            chatCapabilityStatusFirstLine = 0;
+            currentScreen = Screen::ChatActions;
+            renderChatActions();
+        } else if (upPressed) {
+            chatCapabilityStatusFirstLine = chatCapabilityStatusFirstLine > 0
+                ? chatCapabilityStatusFirstLine - 1 : 0;
+            renderChatCapabilityStatus();
+        } else if (downPressed &&
+                   chatCapabilityStatusFirstLine + 8 <
+                       chatCapabilityStatusLineCount) {
+            ++chatCapabilityStatusFirstLine;
+            renderChatCapabilityStatus();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ComposerCapabilities) {
+        constexpr std::size_t itemCount =
+            cardputer::kToolCapabilityGroupCount + 3;
+        if (cancelPressed ||
+            (enterPressed && composerCapabilitiesIndex == itemCount - 1)) {
+            composerCapabilitiesIndex = 0;
+            menuStatus = "";
+            currentScreen = composerCapabilitiesReturnScreen;
+            if (currentScreen == Screen::ChatActions) {
+                renderChatActions();
+            } else {
+                render();
+            }
+        } else if (upPressed) {
+            composerCapabilitiesIndex = composerCapabilitiesIndex > 0
+                ? composerCapabilitiesIndex - 1 : 0;
+            menuStatus = "";
+            renderComposerCapabilities();
+        } else if (downPressed) {
+            composerCapabilitiesIndex = std::min(
+                composerCapabilitiesIndex + 1, itemCount - 1);
+            menuStatus = "";
+            renderComposerCapabilities();
+        } else if (enterPressed && composerCapabilitiesIndex == 0) {
+            composerToolIntent = kAutomaticToolMessageIntent;
+            menuStatus = "Auto selected";
+            renderComposerCapabilities();
+        } else if (enterPressed && composerCapabilitiesIndex == 1) {
+            composerToolIntent = {cardputer::ToolMessageIntentMode::NoTools, 0};
+            menuStatus = "No tools selected";
+            renderComposerCapabilities();
+        } else if (enterPressed) {
+            const std::uint8_t groupBit = static_cast<std::uint8_t>(
+                1U << (composerCapabilitiesIndex - 2));
+            std::uint8_t groups = composerToolIntent.mode ==
+                    cardputer::ToolMessageIntentMode::Required
+                ? composerToolIntent.requiredGroups : 0;
+            groups ^= groupBit;
+            composerToolIntent = groups == 0
+                ? kAutomaticToolMessageIntent
+                : cardputer::ToolMessageIntent{
+                      cardputer::ToolMessageIntentMode::Required, groups};
+            menuStatus = "Next request: " + composerCapabilitiesLabel();
+            renderComposerCapabilities();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::PendingToolPreview) {
+        if (cancelPressed) {
+            pendingToolPreviewFirstLine = 0;
+            clearPendingToolPreviewCache();
+            currentScreen = pendingToolReturnScreen;
+            if (currentScreen == Screen::Chat) render();
+            else renderAiMenu();
+        } else if (upPressed) {
+            pendingToolPreviewFirstLine = pendingToolPreviewFirstLine > 0
+                ? pendingToolPreviewFirstLine - 1 : 0;
+            renderPendingToolPreview();
+        } else if (downPressed &&
+                   pendingToolPreviewFirstLine + 8 < pendingToolPreviewLineCount) {
+            ++pendingToolPreviewFirstLine;
+            renderPendingToolPreview();
+        } else if (enterPressed) {
+            cardputer::PendingToolCallResult pending =
+                cardputer::loadPendingToolCall();
+            if (!pending.success || !pending.found) {
+                menuStatus = pending.success
+                    ? String("No pending confirmation") : pending.error;
+                currentScreen = pendingToolReturnScreen;
+                if (currentScreen == Screen::Chat) {
+                    statusMessage = menuStatus;
+                    render();
+                } else {
+                    renderAiMenu();
+                }
+                return;
+            }
+            pendingToolActionsIndex = 0;
+            menuStatus = "";
+            currentScreen = Screen::PendingToolActions;
+            std::string().swap(pending.pending.continuation.call.arguments);
+            renderPendingToolActions();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::PendingToolActions) {
+        const std::vector<String> items = pendingToolActionItems();
+        if (cancelPressed ||
+            (enterPressed && pendingToolActionsIndex == items.size() - 1)) {
+            pendingToolActionsIndex = 0;
+            menuStatus = "";
+            if (pendingToolPreviewLines.empty()) {
+                openPendingToolPreview();
+            } else {
+                currentScreen = Screen::PendingToolPreview;
+                renderPendingToolPreview();
+            }
+        } else if (upPressed) {
+            pendingToolActionsIndex = pendingToolActionsIndex > 0
+                ? pendingToolActionsIndex - 1 : 0;
+            menuStatus = "";
+            renderPendingToolActions();
+        } else if (downPressed && !items.empty()) {
+            pendingToolActionsIndex = std::min(
+                pendingToolActionsIndex + 1, items.size() - 1);
+            menuStatus = "";
+            renderPendingToolActions();
+        } else if (enterPressed) {
+            cardputer::PendingToolCallResult pending =
+                cardputer::loadPendingToolCall();
+            if (!pending.success || !pending.found) {
+                showPendingDecisionError(
+                    pending.success ? String("No pending confirmation") : pending.error);
+                return;
+            }
+            std::string().swap(pending.pending.continuation.call.arguments);
+            const bool resumable =
+                pendingToolPreviewActionable &&
+                pending.pending.state == cardputer::PendingToolCallState::Awaiting &&
+                devicePendingContextMatches(pending.pending) &&
+                pendingIdentityMatchesCurrent(pending.pending) &&
+                cardputer::pendingToolCallIsResumableThisBoot(
+                    pending.pending.pendingId);
+            if (!resumable) {
+                acknowledgeInterruptedPendingTool();
+            } else if (pending.pending.reason ==
+                       cardputer::PendingToolConfirmationReason::PolicyAsk) {
+                if (pendingToolActionsIndex == 0) allowPendingToolOnce();
+                else if (pendingToolActionsIndex == 1) allowPendingToolForChat();
+                else denyPendingTool();
+            } else if (pendingToolActionsIndex == 0) {
+                allowPendingToolOnce();
+            } else {
+                denyPendingTool();
+            }
         }
         return;
     }
@@ -1108,15 +1409,113 @@ void handleKeyboard()
             if (aiMenuIndex == 0) {
                 openModelPicker(Screen::AiMenu);
             } else if (aiMenuIndex == 1) {
+                cardputer::markOperation("provisioning");
+                cardputer::runProvisioningPortal(settings);
+                cachedSshToolAvailable = sshStorageReady &&
+                    cardputer::sshToolIsAvailable();
+                cardputer::markOperation("idle");
+                menuStatus = "Configuration portal closed";
+                renderAiMenu();
+            } else if (aiMenuIndex == 2) {
                 globalInstructionsInput = settings.globalInstructions.c_str();
                 globalInstructionsStatus = "";
                 currentScreen = Screen::GlobalInstructions;
                 renderGlobalInstructions();
+            } else if (aiMenuIndex == 3) {
+                capabilityPolicyIndex = 0;
+                menuStatus = "";
+                currentScreen = Screen::GlobalMasterPolicy;
+                renderGlobalMasterPolicy();
+            } else if (aiMenuIndex == 4) {
+                capabilityPolicyIndex = 0;
+                menuStatus = "";
+                currentScreen = Screen::NewChatDefaultsPolicy;
+                renderNewChatDefaultsPolicy();
+            } else if (aiMenuIndex == 5) {
+                pendingToolReturnScreen = Screen::AiMenu;
+                openPendingToolPreview();
+            } else if (aiMenuIndex == 6) {
+                openToolActivity();
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
                 renderCarousel();
             }
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::GlobalMasterPolicy) {
+        if (cancelPressed ||
+            (enterPressed && capabilityPolicyIndex == cardputer::kToolCapabilityCount)) {
+            capabilityPolicyIndex = 0;
+            menuStatus = "";
+            currentScreen = Screen::AiMenu;
+            renderAiMenu();
+        } else if (upPressed) {
+            capabilityPolicyIndex = capabilityPolicyIndex > 0
+                ? capabilityPolicyIndex - 1 : 0;
+            menuStatus = "";
+            renderGlobalMasterPolicy();
+        } else if (downPressed) {
+            capabilityPolicyIndex = std::min(
+                capabilityPolicyIndex + 1, cardputer::kToolCapabilityCount);
+            menuStatus = "";
+            renderGlobalMasterPolicy();
+        } else if (enterPressed) {
+            cardputer::Settings updated = settings;
+            updated.masterToolPolicy[capabilityPolicyIndex] = nextToolPermission(
+                updated.masterToolPolicy[capabilityPolicyIndex]);
+            const cardputer::OperationResult saved = cardputer::saveSettings(updated);
+            if (saved.success) settings = updated;
+            menuStatus = saved.success ? String("Master access saved") : saved.error;
+            renderGlobalMasterPolicy();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::NewChatDefaultsPolicy) {
+        if (cancelPressed ||
+            (enterPressed && capabilityPolicyIndex == cardputer::kToolCapabilityCount)) {
+            capabilityPolicyIndex = 0;
+            menuStatus = "";
+            currentScreen = Screen::AiMenu;
+            renderAiMenu();
+        } else if (upPressed) {
+            capabilityPolicyIndex = capabilityPolicyIndex > 0
+                ? capabilityPolicyIndex - 1 : 0;
+            menuStatus = "";
+            renderNewChatDefaultsPolicy();
+        } else if (downPressed) {
+            capabilityPolicyIndex = std::min(
+                capabilityPolicyIndex + 1, cardputer::kToolCapabilityCount);
+            menuStatus = "";
+            renderNewChatDefaultsPolicy();
+        } else if (enterPressed) {
+            cardputer::Settings updated = settings;
+            updated.newChatToolPolicy[capabilityPolicyIndex] =
+                nextScopedToolPermission(
+                    updated.newChatToolPolicy[capabilityPolicyIndex]);
+            const cardputer::OperationResult saved = cardputer::saveSettings(updated);
+            if (saved.success) settings = updated;
+            menuStatus = saved.success ? String("New-chat default saved") : saved.error;
+            renderNewChatDefaultsPolicy();
+        }
+        return;
+    }
+
+    if (currentScreen == Screen::ToolActivity) {
+        if (cancelPressed) {
+            currentScreen = Screen::AiMenu;
+            renderAiMenu();
+        } else if (upPressed) {
+            toolActivityFirstLine = toolActivityFirstLine > 0
+                ? toolActivityFirstLine - 1 : 0;
+            renderToolActivity();
+        } else if (downPressed &&
+                   toolActivityFirstLine + 8 < toolActivityLines.size()) {
+            ++toolActivityFirstLine;
+            renderToolActivity();
         }
         return;
     }
@@ -1225,37 +1624,6 @@ void handleKeyboard()
         return;
     }
 
-    if (currentScreen == Screen::RestoreBackupConfirm) {
-        if (cancelPressed) {
-            currentScreen = Screen::DeviceMenu;
-            menuStatus = "Restore canceled";
-            renderDeviceMenu();
-        } else if (enterPressed) {
-            cardputer::showBusyScreen("RESTORE BACKUP", "Validating and restoring...");
-            cardputer::markOperation("backup_restore");
-            String restoredActiveChatId;
-            cardputer::OperationResult result = cardputer::restoreLocalBackup(
-                settings, restoredActiveChatId);
-            if (result.success) {
-                result = refreshChatList();
-            }
-            if (result.success) {
-                result = activateChat(restoredActiveChatId);
-            }
-            if (result.success) {
-                result = applyDisplayAndCpuSettings(settings);
-            }
-            if (result.success) {
-                result = applyWifiPowerSetting(settings);
-            }
-            cardputer::markOperation("idle");
-            menuStatus = result.success ? String("Backup restored") : result.error;
-            currentScreen = Screen::DeviceMenu;
-            renderDeviceMenu();
-        }
-        return;
-    }
-
     if (currentScreen == Screen::VoiceMenu) {
         const std::size_t itemCount = voiceMenuItems().size();
         if (cancelPressed) {
@@ -1301,6 +1669,8 @@ void handleKeyboard()
             } else if (voiceMenuIndex == 2) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
+                cachedSshToolAvailable = sshStorageReady &&
+                    cardputer::sshToolIsAvailable();
                 cardputer::markOperation("idle");
             } else {
                 currentScreen = Screen::MainCarousel;
@@ -1429,6 +1799,8 @@ void handleKeyboard()
             } else if (webConsoleMenuIndex == 5) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
+                cachedSshToolAvailable = sshStorageReady &&
+                    cardputer::sshToolIsAvailable();
                 cardputer::markOperation("idle");
                 menuStatus = "Configuration portal closed";
                 renderWebConsoleMenu();
@@ -1629,31 +2001,15 @@ void handleKeyboard()
                     : result.error;
                 renderDeviceMenu();
             } else if (deviceMenuIndex == 5) {
-                cardputer::OperationResult result = saveCurrentChat();
-                if (result.success) {
-                    cardputer::showBusyScreen("BACKUP", "Copying chats and metadata...");
-                    cardputer::markOperation("backup_create");
-                    result = cardputer::createLocalBackup(settings, activeChatId);
-                    cardputer::markOperation("idle");
-                }
-                menuStatus = result.success ? String("Local backup updated") : result.error;
-                renderDeviceMenu();
-            } else if (deviceMenuIndex == 6) {
-                currentScreen = Screen::RestoreBackupConfirm;
-                render();
-            } else if (deviceMenuIndex == 7) {
-                String summary;
-                const cardputer::OperationResult result = cardputer::localBackupSummary(summary);
-                menuStatus = result.success ? summary : result.error;
-                renderDeviceMenu();
-            } else if (deviceMenuIndex == 8) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
+                cachedSshToolAvailable = sshStorageReady &&
+                    cardputer::sshToolIsAvailable();
                 cardputer::markOperation("idle");
                 const cardputer::OperationResult result = applyDisplayAndCpuSettings(settings);
                 menuStatus = result.success ? String("Settings portal closed") : result.error;
                 renderDeviceMenu();
-            } else if (deviceMenuIndex == 9) {
+            } else if (deviceMenuIndex == 6) {
                 ensureNetworkReady();
                 if (WiFi.status() != WL_CONNECTED || std::time(nullptr) < 1700000000) {
                     menuStatus = statusMessage;
@@ -1678,7 +2034,7 @@ void handleKeyboard()
                     currentScreen = Screen::FirmwareUpdateConfirm;
                     render();
                 }
-            } else if (deviceMenuIndex == 10) {
+            } else if (deviceMenuIndex == 7) {
                 diagnosticsReturnScreen = Screen::DeviceMenu;
                 diagnosticsIndex = 0;
                 currentScreen = Screen::Diagnostics;
@@ -1707,8 +2063,6 @@ void handleKeyboard()
         } else if (enterPressed) {
             if (filesMenuIndex == 0) {
                 openWorkspaceFileList();
-            } else if (filesMenuIndex == 1) {
-                openChatImportList();
             } else {
                 currentScreen = Screen::MainCarousel;
                 menuStatus = "";
@@ -1754,35 +2108,7 @@ void handleKeyboard()
                 }
                 return;
             }
-            if (workspaceListMode == WorkspaceListMode::ImportChat) {
-                if (workspaceFileIndex == 0) {
-                    menuStatus = "Select a .chat.jsonl bundle";
-                    renderWorkspaceFileList();
-                    return;
-                }
-                const String filename = workspaceFiles[workspaceFileIndex - 1].name;
-                cardputer::markOperation("chat_import");
-                const cardputer::ChatDocumentResult imported =
-                    cardputer::importChatBundleFromWorkspace(filename);
-                cardputer::markOperation("idle");
-                if (!imported.success) {
-                    menuStatus = imported.error;
-                    renderWorkspaceFileList();
-                    return;
-                }
-                const cardputer::OperationResult refreshed = refreshChatList();
-                const cardputer::OperationResult activated = refreshed.success
-                    ? activateChat(imported.chat.summary.id)
-                    : refreshed;
-                if (!activated.success) {
-                    menuStatus = activated.error;
-                    renderWorkspaceFileList();
-                    return;
-                }
-                currentScreen = Screen::Chat;
-                setTransientStatus("Chat imported", 2000);
-                render();
-            } else if (workspaceListMode == WorkspaceListMode::ImportProject) {
+            if (workspaceListMode == WorkspaceListMode::ImportProject) {
                 if (workspaceFileIndex == 0) {
                     menuStatus = "Select a project bundle";
                     renderWorkspaceFileList();
@@ -1881,11 +2207,11 @@ void handleKeyboard()
                     result = playDocumentSpeechText(
                         joinedViewerLines(fileViewerFirstLine,
                                           fileViewerFirstLine + kFileViewerPageLines - 1),
-                        "Reading current page");
+                        "Reading visible section");
                     cardputer::markOperation("idle");
                 }
                 menuStatus = result.success
-                    ? (result.error.isEmpty() ? String("Current page spoken") : result.error)
+                    ? (result.error.isEmpty() ? String("Visible section spoken") : result.error)
                     : result.error;
                 renderFileActions();
             } else if (fileActionsIndex == 3) {
@@ -2100,7 +2426,7 @@ void handleKeyboard()
         } else if (clearDraftPressed) {
             fileEditorInput.clear();
             fileEditorCursor = 0;
-            fileEditorStatus = "Page cleared; ENTER to save";
+            fileEditorStatus = "Visible section cleared; ENTER to save";
             renderFileEditor();
         } else if (backspacePressed) {
             if (fileEditorCursor > 0) {
@@ -2114,7 +2440,7 @@ void handleKeyboard()
             renderFileEditor();
         } else if (keys.fn && enterPressed) {
             if (fileEditorInput.size() >= kFileEditorMaximumBytes) {
-                fileEditorStatus = "Editor limit: 4096 bytes";
+                fileEditorStatus = "Visible section is full";
             } else {
                 fileEditorInput = cardputer::insertUtf8At(
                     fileEditorInput, fileEditorCursor, "\n");
@@ -2152,7 +2478,7 @@ void handleKeyboard()
                     ? cardputer::mapKeyToRussian(character)
                     : std::string(1, character);
                 if (fileEditorInput.size() + text.size() > kFileEditorMaximumBytes) {
-                    fileEditorStatus = "Editor limit: 4096 bytes";
+                    fileEditorStatus = "Visible section is full";
                     break;
                 }
                 fileEditorInput = cardputer::insertUtf8At(
@@ -2242,8 +2568,8 @@ void handleKeyboard()
                 const std::string text = keyboardLayout == cardputer::KeyboardLayout::Russian
                     ? cardputer::mapKeyToRussian(character)
                     : std::string(1, character);
-                if (fileFindInput.size() + text.size() > 128) {
-                    fileFindStatus = "Search limit: 128 bytes";
+                if (fileFindInput.size() + text.size() > 1024) {
+                    fileFindStatus = "Search limit: 1024 bytes";
                     break;
                 }
                 fileFindInput += text;
@@ -2393,7 +2719,10 @@ void handleKeyboard()
         return;
     } else if (keys.fn && keys.f2) {
         menuStatus = "";
-        openModelPicker(Screen::Chat);
+        composerCapabilitiesIndex = 0;
+        composerCapabilitiesReturnScreen = Screen::Chat;
+        currentScreen = Screen::ComposerCapabilities;
+        renderComposerCapabilities();
         return;
     } else if (keys.fn && keys.f3) {
         keyboardLayout = keyboardLayout == cardputer::KeyboardLayout::English

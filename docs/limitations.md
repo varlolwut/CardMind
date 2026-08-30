@@ -5,7 +5,7 @@
 - Cardputer ADV uses ESP32-S3FN8: 8 MB flash, 512 KB internal SRAM, and no PSRAM.
 - Wi-Fi is 2.4 GHz only.
 - Display resolution is 240 × 135 pixels.
-- Persistent chats, workspace files, audio, logs, and backups require microSD.
+- Persistent chats, workspace files, audio, and logs require microSD.
 - Release builds pin the M5Stack ESP32 board package to 3.2.1. Version 3.3.9 is not
   supported because it produces a silent microphone stream on Cardputer ADV with the
   pinned M5Unified audio implementation.
@@ -14,8 +14,9 @@
 
 - Projects, chats, and Shared workspace files use paginated microSD indexes rather than
   a small in-memory count. A 500-file workspace is exercised by the hardware release
-  suite without making 500 a product limit. Per-file bookmark metadata currently
-  supports up to 4,096 bookmarked files.
+  suite without making 500 a product limit. Bookmark metadata rejects more than
+  4,096 entries; that validation ceiling is not a tested operating point on this
+  no-PSRAM device.
 - Request context is configurable per project from 8 KiB to 256 KiB. The default is
   32 KiB. Complete raw history stays on microSD and does not have a fixed 16- or
   64-message ceiling.

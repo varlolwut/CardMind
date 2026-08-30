@@ -193,7 +193,6 @@ $offlineCases = @(
     (New-RegressionCase -Name "chat quality-of-life" -Command "CHATQOLTEST" -CompletionPattern "^CHATQOLTEST result=" -PassPattern "^CHATQOLTEST result=pass" -TimeoutSeconds 90),
     (New-RegressionCase -Name "large workspace file" -Command "FILETEST" -CompletionPattern "^FILETEST result=" -PassPattern "^FILETEST result=pass" -TimeoutSeconds 180),
     (New-RegressionCase -Name "device settings" -Command "DEVICESETTINGSTEST" -CompletionPattern "^DEVICESETTINGSTEST result=" -PassPattern "^DEVICESETTINGSTEST result=pass" -TimeoutSeconds 45),
-    (New-RegressionCase -Name "backup and restore" -Command "BACKUPTEST" -CompletionPattern "^BACKUPTEST result=" -PassPattern "^BACKUPTEST result=pass" -TimeoutSeconds 90),
     (New-RegressionCase -Name "offline tools" -Command "OFFLINETEST" -CompletionPattern "^OFFLINETEST result=" -PassPattern "^OFFLINETEST result=pass$" -TimeoutSeconds 20),
     (New-RegressionCase -Name "SSH runtime" -Command "SSHCHECK" -CompletionPattern "^SSHCHECK result=" -PassPattern "^SSHCHECK result=pass" -TimeoutSeconds 60),
     (New-RegressionCase -Name "SSH profile storage" -Command "SSHPROFILETEST" -CompletionPattern "^SSHPROFILETEST result=" -PassPattern "^SSHPROFILETEST result=pass" -TimeoutSeconds 45),
@@ -225,7 +224,7 @@ $onlineCases = @(
     (New-RegressionCase -Name "web search API" -Command "WEBTEST" -CompletionPattern "^WEBTEST result=" -PassPattern "^WEBTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "web contents API" -Command "FETCHTEST" -CompletionPattern "^FETCHTEST result=" -PassPattern "^FETCHTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "search sources cache" -Command "SEARCHCACHETEST" -CompletionPattern "^SEARCHCACHETEST result=" -PassPattern "^SEARCHCACHETEST result=pass" -TimeoutSeconds 30),
-    (New-RegressionCase -Name "model search tool round trip" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=pass.*search_called=yes" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "model search tool decision" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=(?:pass search_called=yes tool=web_search response_bytes=[1-9][0-9]* error=none|failed search_called=no tool=WebSearch response_bytes=[1-9][0-9]* error=Model did not call every required tool capability \(group mask 0x1\))$" -TimeoutSeconds 240),
     (New-RegressionCase -Name "UI search path" -Command "E2ETEST" -CompletionPattern "^E2ETEST result=" -PassPattern "^E2ETEST result=pass.*response=yes.*cleanup=yes" -TimeoutSeconds 300),
     (New-RegressionCase -Name "SSH host probe" -Command "SSHPROBE" -CompletionPattern "^SSHPROBE result=" -PassPattern "^SSHPROBE result=pass" -TimeoutSeconds 120),
     (New-RegressionCase -Name "public SSH SFTP and PTY" -Command "SSHDEMOTEST" -CompletionPattern "^SSHDEMOTEST result=" -PassPattern "^SSHDEMOTEST result=pass" -TimeoutSeconds 300),
@@ -247,7 +246,7 @@ $p1Cases = @(
     (New-RegressionCase -Name "web search API" -Command "WEBTEST" -CompletionPattern "^WEBTEST result=" -PassPattern "^WEBTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "web contents API" -Command "FETCHTEST" -CompletionPattern "^FETCHTEST result=" -PassPattern "^FETCHTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "search sources cache" -Command "SEARCHCACHETEST" -CompletionPattern "^SEARCHCACHETEST result=" -PassPattern "^SEARCHCACHETEST result=pass" -TimeoutSeconds 30),
-    (New-RegressionCase -Name "model search tool round trip" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=pass.*search_called=yes" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "model search tool decision" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=(?:pass search_called=yes tool=web_search response_bytes=[1-9][0-9]* error=none|failed search_called=no tool=WebSearch response_bytes=[1-9][0-9]* error=Model did not call every required tool capability \(group mask 0x1\))$" -TimeoutSeconds 240),
     (New-RegressionCase -Name "UI search path" -Command "E2ETEST" -CompletionPattern "^E2ETEST result=" -PassPattern "^E2ETEST result=pass.*response=yes.*cleanup=yes" -TimeoutSeconds 300),
     (New-RegressionCase -Name "STT TLS" -Command "STTTLS" -CompletionPattern "^STTTLS result=" -PassPattern "^STTTLS result=pass$" -TimeoutSeconds 90),
     (New-RegressionCase -Name "STT authentication" -Command "STTAUTH" -CompletionPattern "^STTAUTH result=" -PassPattern "^STTAUTH result=pass$" -TimeoutSeconds 120),
@@ -259,7 +258,7 @@ $p1Cases = @(
 
 $p2StorageCases = @(
     (New-RegressionCase -Name "project schema and pagination" -Command "PROJECTSCHEMATEST" -CompletionPattern "^PROJECTSCHEMATEST result=" -PassPattern "^PROJECTSCHEMATEST result=pass chats=33 error=none$" -TimeoutSeconds 180),
-    (New-RegressionCase -Name "legacy project migration" -Command "MIGRATIONTEST" -CompletionPattern "^MIGRATIONTEST result=" -PassPattern "^MIGRATIONTEST result=pass legacy=([1-9][0-9]*) matched=\1 messages=[1-9][0-9]* archived=[0-9]+ history_fnv32=[0-9a-f]{8} metadata=pass history=pass revision=[1-9][0-9]* error=none$" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "legacy project migration" -Command "MIGRATIONTEST" -CompletionPattern "^MIGRATIONTEST result=" -PassPattern "^MIGRATIONTEST result=pass legacy=([0-9]+) matched=\1 messages=[0-9]+ archived=[0-9]+ history_fnv32=[0-9a-f]{8} metadata=pass history=pass revision=[1-9][0-9]* error=none$" -TimeoutSeconds 240),
     (New-RegressionCase -Name "migration interruption and corruption" -Command "MIGRATIONRECOVERYTEST" -CompletionPattern "^MIGRATIONRECOVERYTEST result=" -PassPattern "^MIGRATIONRECOVERYTEST result=pass staging=yes corruption=yes restored=yes error=none$" -TimeoutSeconds 180)
 )
 

@@ -15,10 +15,15 @@ std::vector<String> voiceMenuItems()
 std::vector<String> aiMenuItems()
 {
     return {
-        "Model: " + settings.model,
+        "Default model: " + settings.model,
+        "API and services setup",
         settings.globalInstructions.isEmpty()
             ? String("Global instructions: OFF")
             : String("Global instructions: ON"),
+        "Master access",
+        "Defaults for new chats",
+        "Pending confirmations",
+        "Activity",
         "Back to carousel",
     };
 }
@@ -117,9 +122,6 @@ std::vector<String> deviceMenuItems()
         "Power: " + powerProfileLabel(settings.powerProfile),
         "Chat archive quota: " +
             projectChatHistoryQuotaLabel(settings.projectChatHistoryQuotaBytes),
-        "Create local backup",
-        "Restore local backup...",
-        "Backup information",
         "API and services setup",
         "Firmware update",
         "Diagnostics",
@@ -131,7 +133,6 @@ std::vector<String> filesMenuItems()
 {
     return {
         "Browse SD workspace",
-        "Import chat bundle",
         "Back to carousel",
     };
 }
@@ -256,8 +257,8 @@ std::vector<String> fileActionItems()
     const String mode = cardputer::documentReaderModeLabel(fileReaderMode).c_str();
     return {
         "View as " + mode,
-        "Edit current page",
-        "Read current page",
+        "Edit visible section",
+        "Read visible section",
         "Read selected lines...",
         "Read entire document",
         "Find text...",
@@ -287,7 +288,7 @@ std::vector<cardputer::CarouselCard> carouselCards()
         {"CONNECTIVITY", "NETWORK", networkSubtitle, 0xB7E6, cardputer::CarouselIcon::Network},
         {"WORKSPACE", "FILES", "Edit · Read · Export", 0x4DFF, cardputer::CarouselIcon::Files},
         {"BROWSER CONTROL", "WEB CONSOLE", "Chat · Files · Terminal", 0xFB4D, cardputer::CarouselIcon::Web},
-        {"SYSTEM", "DEVICE", "Settings · Backup · Update", 0xFFE0, cardputer::CarouselIcon::Device},
+        {"SYSTEM", "DEVICE", "Settings · API · Update", 0xFFE0, cardputer::CarouselIcon::Device},
         {"UTILITIES", "TOOLS", "Notes · SSH · Monitor", 0x07FF, cardputer::CarouselIcon::Tools},
         {"REFERENCE", "HELP", "Controls · About · Support", 0xF81F, cardputer::CarouselIcon::Help},
     };
@@ -421,7 +422,7 @@ std::vector<String> controlsHelpItems()
         "BACKSPACE  Delete character",
         "CTRL+BACKSPACE  Clear draft",
         "FN+1  Chats",
-        "FN+2  Select model",
+        "FN+2  Next capabilities",
         "FN+3  English / Russian",
         "FN+4  Main menu",
         "Menu: plain arrow keys",
@@ -460,6 +461,46 @@ void renderAiMenu()
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
 }
 
+void renderToolActivity()
+{
+    const String position = toolActivityLines.empty()
+        ? String("0/0")
+        : String(toolActivityFirstLine + 1) + "/" + String(toolActivityLines.size());
+    cardputer::showReadOnlyTextViewer(
+        "TOOL ACTIVITY", toolActivityLines, toolActivityFirstLine, position);
+}
+
+void openToolActivity()
+{
+    const cardputer::ToolActivitiesResult loaded =
+        cardputer::loadRecentToolActivities();
+    if (!loaded.success) {
+        menuStatus = loaded.error;
+        renderAiMenu();
+        return;
+    }
+    toolActivityLines.clear();
+    for (const cardputer::ToolActivityRecord& activity : loaded.activities) {
+        toolActivityLines.push_back(
+            std::string(activity.tool.c_str()) + " · " +
+            cardputer::toolActivityStatusName(activity.status));
+        toolActivityLines.push_back(
+            std::string(cardputer::toolActivityTargetName(activity.target)) +
+            " · " + std::to_string(activity.durationMs) + " ms");
+        String result = String(activity.outputBytes) + " B";
+        if (activity.exitStatus.present) {
+            result += " · exit " + String(activity.exitStatus.value);
+        }
+        toolActivityLines.push_back(result.c_str());
+    }
+    if (toolActivityLines.empty()) {
+        toolActivityLines.push_back("No tool activity yet");
+    }
+    toolActivityFirstLine = 0;
+    currentScreen = Screen::ToolActivity;
+    renderToolActivity();
+}
+
 void renderGlobalInstructions()
 {
     cardputer::showTextEditor(
@@ -467,6 +508,22 @@ void renderGlobalInstructions()
         cardputer::kMaximumChatInstructionsBytes, globalInstructionsStatus,
         "Applied to every chat",
         "ENTER save  FN+DEL clear  ESC back");
+}
+
+void renderGlobalMasterPolicy()
+{
+    cardputer::showSelectionList(
+        "MASTER ACCESS", capabilityPolicyItems(settings.masterToolPolicy),
+        capabilityPolicyIndex,
+        menuStatus.isEmpty() ? String("ENTER change  ESC AI") : menuStatus);
+}
+
+void renderNewChatDefaultsPolicy()
+{
+    cardputer::showSelectionList(
+        "NEW CHAT DEFAULTS", capabilityPolicyItems(settings.newChatToolPolicy),
+        capabilityPolicyIndex,
+        menuStatus.isEmpty() ? String("ENTER change  ESC AI") : menuStatus);
 }
 
 void renderRequestInstructions()

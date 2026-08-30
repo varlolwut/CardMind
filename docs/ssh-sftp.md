@@ -32,8 +32,19 @@ network path between CardMind and the SSH server.
 
 ## Model access
 
-Open a chat's details on the Cardputer or in the Web console to grant that chat
-permission to run SSH commands. The permission is off by default, belongs only to
-that chat, and is preserved when the chat is duplicated. Imported project bundles
-always reset it to disabled. CardMind refuses model-initiated SSH until a complete
-profile exists and its current host fingerprint has already been trusted.
+Capability settings govern model actions only; they do not disable the standalone
+terminal or SFTP browser. Global **Master access**, project policy, and chat policy
+contain separate rows for **SSH read**, **SSH mutate**, and **SFTP read/write**. A
+narrower scope may reduce access but cannot grant more authority than its parent.
+
+The current model SSH action is classified as SSH mutate. CardMind refuses it until a
+complete profile exists and its current host fingerprint has already been trusted.
+Before execution it shows the exact command and always requires **Allow once** or
+**Deny**, even when SSH mutate is set to **Allow**; mandatory confirmation cannot be
+saved for the chat. SSH read and model SFTP are currently unavailable, so their policy
+rows cannot cause an operation to execute. Manual SFTP remains available through the
+Device and Web console.
+
+If power is lost or CardMind restarts while a decision is pending, the stored request
+is shown as interrupted and cannot be approved or replayed. Imported project bundles
+force each chat's SSH read and SSH mutate policies to **Off**.

@@ -8,7 +8,7 @@ installation entry point; details live here so they can be maintained independen
 - [Getting started](getting-started.md): release installation, first boot, Wi-Fi,
   provider setup, and the first prompt.
 - [User guide](user-guide.md): carousel, keyboard controls, chats, voice, search,
-  files, tools, backup, and updates.
+  files, tools, and updates.
 - [Projects and Shared workspace](projects-workspace.md): project isolation, settings
   precedence, context compaction, shared-file links, migration, and project bundles.
 - [Configuration](configuration.md): chat, STT, TTS, search, network, model, and

@@ -1,6 +1,7 @@
 #include "storage.h"
 
 #include "text_utils.h"
+#include "tool_policy_codec.h"
 
 #include <Preferences.h>
 
@@ -11,7 +12,102 @@ namespace {
 
 constexpr const char* kNamespace = "assistant";
 constexpr const char* kSdVolumeIdentityKey = "sd_volume_id";
+constexpr const char* kToolPolicyKey = "tool_policy";
 constexpr std::size_t kSdVolumeIdentityBytes = 16;
+constexpr std::size_t kGlobalToolPolicyRecordLength =
+    1 + (2 * kEncodedToolPolicyLength);
+
+struct EncodedGlobalToolPoliciesResult {
+    bool success;
+    String value;
+    String error;
+};
+
+struct DecodedGlobalToolPoliciesResult {
+    bool success;
+    ToolPermissionPolicy master;
+    ScopedToolPermissionPolicy newChat;
+    String error;
+};
+
+EncodedGlobalToolPoliciesResult encodeGlobalToolPolicies(
+    const ToolPermissionPolicy& master,
+    const ScopedToolPermissionPolicy& newChat)
+{
+    const ToolPolicyEncodeResult encodedMaster =
+        encodeToolPermissionPolicy(master);
+    if (encodedMaster.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            "",
+            String("Cannot store Master access: ") +
+                toolPolicyCodecErrorText(encodedMaster.error),
+        };
+    }
+    const ToolPolicyEncodeResult encodedNewChat =
+        encodeScopedToolPermissionPolicy(newChat);
+    if (encodedNewChat.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            "",
+            String("Cannot store default policy for new chats: ") +
+                toolPolicyCodecErrorText(encodedNewChat.error),
+        };
+    }
+    const String value = String(encodedMaster.encoded.value.data()) +
+        "|" + encodedNewChat.encoded.value.data();
+    return {true, value, ""};
+}
+
+DecodedGlobalToolPoliciesResult decodeGlobalToolPolicies(
+    const String& value)
+{
+    const ToolPermissionPolicy defaultMaster =
+        defaultGlobalToolPermissionPolicy();
+    const ScopedToolPermissionPolicy defaultNewChat =
+        defaultNewChatToolPermissionPolicy();
+    if (value.length() != kGlobalToolPolicyRecordLength) {
+        return {
+            false,
+            defaultMaster,
+            defaultNewChat,
+            "Stored global tool policy has an invalid length",
+        };
+    }
+    if (value[kEncodedToolPolicyLength] != '|') {
+        return {
+            false,
+            defaultMaster,
+            defaultNewChat,
+            "Stored global tool policy has an invalid separator",
+        };
+    }
+    const ToolPermissionPolicyDecodeResult decodedMaster =
+        decodeToolPermissionPolicy(value.c_str(), kEncodedToolPolicyLength);
+    if (decodedMaster.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            defaultMaster,
+            defaultNewChat,
+            String("Stored Master access is invalid: ") +
+                toolPolicyCodecErrorText(decodedMaster.error),
+        };
+    }
+    const ScopedToolPermissionPolicyDecodeResult decodedNewChat =
+        decodeScopedToolPermissionPolicy(
+            value.c_str() + 1 + kEncodedToolPolicyLength,
+            kEncodedToolPolicyLength);
+    if (decodedNewChat.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            defaultMaster,
+            defaultNewChat,
+            String("Stored default policy for new chats is invalid: ") +
+                toolPolicyCodecErrorText(decodedNewChat.error),
+        };
+    }
+    return {true, decodedMaster.policy, decodedNewChat.policy, ""};
+}
 
 bool isValidSdVolumeIdentity(const String& identity)
 {
@@ -94,6 +190,41 @@ OperationResult loadSettings(Settings& settings)
         preferences.getUChar("power", 1),
         preferences.getUInt("chat_quota", 0),
     };
+    const PreferenceType policyType = preferences.getType(kToolPolicyKey);
+    if (policyType == PT_INVALID) {
+        const EncodedGlobalToolPoliciesResult encoded = encodeGlobalToolPolicies(
+            loaded.masterToolPolicy, loaded.newChatToolPolicy);
+        if (!encoded.success) {
+            preferences.end();
+            return {false, encoded.error};
+        }
+        OperationResult migration = verifyStoredLength(
+            preferences.putString(kToolPolicyKey, encoded.value),
+            encoded.value.length(),
+            "global tool policy");
+        if (migration.success) {
+            migration = verifyStoredValue(
+                preferences.getString(kToolPolicyKey, ""),
+                encoded.value,
+                "global tool policy");
+        }
+        if (!migration.success) {
+            preferences.end();
+            return {false, migration.error};
+        }
+    } else if (policyType != PT_STR) {
+        preferences.end();
+        return {false, "Stored global tool policy has the wrong NVS type"};
+    } else {
+        const DecodedGlobalToolPoliciesResult decoded =
+            decodeGlobalToolPolicies(preferences.getString(kToolPolicyKey, ""));
+        if (!decoded.success) {
+            preferences.end();
+            return {false, decoded.error};
+        }
+        loaded.masterToolPolicy = decoded.master;
+        loaded.newChatToolPolicy = decoded.newChat;
+    }
     preferences.end();
     loaded.apiKey.trim();
     loaded.sttApiKey.trim();
@@ -179,6 +310,12 @@ OperationResult saveSettings(const Settings& settings)
     }
     if (!isValidProjectChatHistoryQuota(settings.projectChatHistoryQuotaBytes)) {
         return {false, "Chat history quota must be 0 or at least 2 MiB"};
+    }
+    const EncodedGlobalToolPoliciesResult encodedToolPolicies =
+        encodeGlobalToolPolicies(
+            settings.masterToolPolicy, settings.newChatToolPolicy);
+    if (!encodedToolPolicies.success) {
+        return {false, encodedToolPolicies.error};
     }
 
     Preferences preferences;
@@ -267,6 +404,12 @@ OperationResult saveSettings(const Settings& settings)
         result = {false, "Failed to store project chat history quota"};
     }
     if (result.success) {
+        result = verifyStoredLength(
+            preferences.putString(kToolPolicyKey, encodedToolPolicies.value),
+            encodedToolPolicies.value.length(),
+            "global tool policy");
+    }
+    if (result.success) {
         result = verifyStoredValue(preferences.getString("ssid", ""), settings.wifiSsid, "Wi-Fi SSID");
     }
     if (result.success) {
@@ -344,6 +487,12 @@ OperationResult saveSettings(const Settings& settings)
     if (result.success &&
         preferences.getUInt("chat_quota", 1) != settings.projectChatHistoryQuotaBytes) {
         result = {false, "Failed to verify project chat history quota after NVS write"};
+    }
+    if (result.success) {
+        result = verifyStoredValue(
+            preferences.getString(kToolPolicyKey, ""),
+            encodedToolPolicies.value,
+            "global tool policy");
     }
     preferences.end();
     return result;

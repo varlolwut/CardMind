@@ -9,6 +9,7 @@
 #include <esp_random.h>
 
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <utility>
@@ -141,9 +142,14 @@ OperationResult validateProjectDocument(const ProjectDocument& project)
     if (!result.success) {
         return result;
     }
-    result = validateOptionalProjectString(project.toolPolicy, "Project tool policy", 120);
-    if (!result.success) {
-        return result;
+    const ToolPolicyEncodeResult encodedToolPolicy =
+        encodeScopedToolPermissionPolicy(project.toolPolicy);
+    if (encodedToolPolicy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Project tool policy is invalid: ") +
+                toolPolicyCodecErrorText(encodedToolPolicy.error),
+        };
     }
     return validateOptionalProjectString(project.sshProfile, "Project SSH profile", 120);
 }
@@ -236,7 +242,24 @@ ProjectDocumentResult parseProjectDocumentCore(File& file)
     project.activeChatId = document["active_chat_id"].as<const char*>();
     project.model = document["model"].as<const char*>();
     project.apiProfile = document["api_profile"].as<const char*>();
-    project.toolPolicy = document["tool_policy"].as<const char*>();
+    const char* const encodedToolPolicy = document["tool_policy"].as<const char*>();
+    const std::size_t encodedToolPolicyLength = std::strlen(encodedToolPolicy);
+    if (encodedToolPolicyLength == 0) {
+        project.toolPolicy = inheritedToolPermissionPolicy();
+    } else {
+        const ScopedToolPermissionPolicyDecodeResult decodedToolPolicy =
+            decodeScopedToolPermissionPolicy(
+                encodedToolPolicy, encodedToolPolicyLength);
+        if (decodedToolPolicy.error != ToolPolicyCodecError::None) {
+            return {
+                false,
+                {},
+                String("Project tool policy is invalid: ") +
+                    toolPolicyCodecErrorText(decodedToolPolicy.error),
+            };
+        }
+        project.toolPolicy = decodedToolPolicy.policy;
+    }
     project.sshProfile = document["ssh_profile"].as<const char*>();
     project.contextByteBudget = document["context_byte_budget"].as<std::uint32_t>();
     project.maximumOutputTokens = document["maximum_output_tokens"].as<std::uint32_t>();
@@ -264,6 +287,15 @@ ProjectDocumentResult parseProjectDocument(File& file, const String& path)
 OperationResult writeProjectDocumentWithSummary(const ProjectDocument& project,
                                                 const ProjectSummary& summary)
 {
+    const ToolPolicyEncodeResult encodedToolPolicy =
+        encodeScopedToolPermissionPolicy(project.toolPolicy);
+    if (encodedToolPolicy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Project tool policy is invalid: ") +
+                toolPolicyCodecErrorText(encodedToolPolicy.error),
+        };
+    }
     JsonDocument document;
     document["version"] = kProjectStorageFormatVersion;
     document["id"] = summary.id;
@@ -277,7 +309,7 @@ OperationResult writeProjectDocumentWithSummary(const ProjectDocument& project,
     document["active_chat_id"] = project.activeChatId.c_str();
     document["model"] = project.model.c_str();
     document["api_profile"] = project.apiProfile.c_str();
-    document["tool_policy"] = project.toolPolicy.c_str();
+    document["tool_policy"] = encodedToolPolicy.encoded.value.data();
     document["ssh_profile"] = project.sshProfile.c_str();
     document["context_byte_budget"] = project.contextByteBudget;
     document["maximum_output_tokens"] = project.maximumOutputTokens;
@@ -294,7 +326,10 @@ OperationResult writeProjectDocument(const ProjectDocument& project)
 
 ProjectDocumentResult loadProjectCore(const String& id)
 {
-    File file = SD.open(projectMetadataPath(id), FILE_READ);
+    const String path = projectMetadataPath(id);
+    const OperationResult recovered = recoverAtomicSdFile(path);
+    if (!recovered.success) return {false, {}, recovered.error};
+    File file = SD.open(path, FILE_READ);
     if (!file) return {false, {}, "Project metadata does not exist for id " + id};
     ProjectDocumentResult result = parseProjectDocumentCore(file);
     file.close();
@@ -784,11 +819,16 @@ ProjectDocumentResult loadProject(const String& id)
     if (!isValidChatId(id.c_str())) {
         return {false, {}, "Cannot load project: invalid project id"};
     }
-    File file = SD.open(projectMetadataPath(id), FILE_READ);
+    const String path = projectMetadataPath(id);
+    const OperationResult recovered = recoverAtomicSdFile(path);
+    if (!recovered.success) {
+        return {false, {}, recovered.error};
+    }
+    File file = SD.open(path, FILE_READ);
     if (!file) {
         return {false, {}, "Project metadata does not exist for id " + id};
     }
-    ProjectDocumentResult result = parseProjectDocument(file, projectMetadataPath(id));
+    ProjectDocumentResult result = parseProjectDocument(file, path);
     file.close();
     if (result.success && result.project.summary.id != id) {
         return {false, {}, "Project directory id does not match project metadata"};

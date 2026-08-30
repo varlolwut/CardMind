@@ -2,6 +2,8 @@
 
 #include "app_types.h"
 
+#include <functional>
+
 namespace cardputer {
 
 enum class SshAuthMode {
@@ -68,6 +70,10 @@ bool sshProfileIsComplete(const SshProfile& profile);
 OperationResult initializeSshStorage();
 OperationResult installSshPrivateKey(const String& temporaryPath);
 bool sshPrivateKeyIsInstalled();
+OperationResult loadTrustedSshFingerprint(const String& host,
+                                          std::uint16_t port,
+                                          String& fingerprint,
+                                          bool& found);
 SshTrustResult checkTrustedSshHost(const String& host, std::uint16_t port,
                                    const String& fingerprint);
 OperationResult trustSshHost(const String& host, std::uint16_t port,
@@ -83,8 +89,16 @@ public:
     ~SshClient();
 
     OperationResult connect(const SshProfile& profile, std::uint32_t timeoutMs);
+    OperationResult connectControlled(
+        const SshProfile& profile,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
     OperationResult authenticate(const SshProfile& profile,
                                  std::uint32_t timeoutMs);
+    OperationResult authenticateControlled(
+        const SshProfile& profile,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
     OperationResult openTerminal(std::uint32_t columns, std::uint32_t rows,
                                  std::uint32_t timeoutMs);
     OperationResult resizeTerminal(std::uint32_t columns, std::uint32_t rows,
@@ -97,6 +111,13 @@ public:
                                    int& exitStatus,
                                    std::size_t maximumOutputBytes,
                                    std::uint32_t timeoutMs);
+    OperationResult executeCommandControlled(
+        const String& command,
+        std::string& output,
+        int& exitStatus,
+        std::size_t maximumOutputBytes,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
     OperationResult openSftp(std::uint32_t timeoutMs);
     SftpEntriesResult listSftpDirectory(const String& path,
                                         std::uint32_t timeoutMs);

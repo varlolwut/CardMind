@@ -9,6 +9,7 @@
 #include <SD.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 namespace cardputer {
@@ -21,7 +22,7 @@ constexpr std::size_t kProjectBundleHeaderLineBytes =
 constexpr std::size_t kProjectBundleSharedLinkLineBytes = 6 * 512 + 256;
 constexpr std::size_t kProjectBundleChatHeaderLineBytes =
     6 * (16 + kMaximumProjectTitleBytes + kMaximumProjectChatInstructionsBytes +
-         kMaximumProjectChatDraftBytes + kMaximumProjectChatSummaryBytes) + 2048;
+         kMaximumProjectChatDraftBytes + kMaximumProjectChatSummaryBytes + 240) + 2048;
 
 bool isValidProjectBundleFilename(const String& filename)
 {
@@ -36,7 +37,8 @@ String projectBundlePath(const String& filename)
 }
 
 JsonDocument buildProjectHeader(const ProjectDocument& project,
-                                std::uint32_t linkCount)
+                                std::uint32_t linkCount,
+                                const char* encodedToolPolicy)
 {
     JsonDocument header;
     header["record"] = "project";
@@ -48,7 +50,7 @@ JsonDocument buildProjectHeader(const ProjectDocument& project,
     header["active_chat_id"] = project.activeChatId;
     header["model"] = project.model;
     header["api_profile"] = project.apiProfile;
-    header["tool_policy"] = project.toolPolicy;
+    header["tool_policy"] = encodedToolPolicy;
     header["ssh_profile"] = project.sshProfile;
     header["context_byte_budget"] = project.contextByteBudget;
     header["maximum_output_tokens"] = project.maximumOutputTokens;
@@ -220,7 +222,17 @@ OperationResult exportProjectBundle(const String& projectId, const String& filen
     if (!chats.success) {
         return {false, chats.error};
     }
-    JsonDocument header = buildProjectHeader(loaded.project, links.count);
+    const ToolPolicyEncodeResult encodedToolPolicy =
+        encodeScopedToolPermissionPolicy(loaded.project.toolPolicy);
+    if (encodedToolPolicy.error != ToolPolicyCodecError::None) {
+        return {
+            false,
+            String("Project bundle tool policy is invalid: ") +
+                toolPolicyCodecErrorText(encodedToolPolicy.error),
+        };
+    }
+    JsonDocument header = buildProjectHeader(
+        loaded.project, links.count, encodedToolPolicy.encoded.value.data());
     const std::uint64_t expectedBytes = measureJson(header) + 1 + links.bytes + chats.bytes;
     if (expectedBytes > kMaximumProjectBundleBytes) {
         return {false, "Project bundle exceeds the supported 32-bit file range"};
@@ -307,6 +319,24 @@ ProjectDocumentResult importProjectBundle(const String& filename)
         input.close();
         return {false, {}, "Project bundle header is invalid or unsupported"};
     }
+    const char* const encodedToolPolicy = header["tool_policy"].as<const char*>();
+    const std::size_t encodedToolPolicyLength = std::strlen(encodedToolPolicy);
+    ScopedToolPermissionPolicy importedToolPolicy = inheritedToolPermissionPolicy();
+    if (encodedToolPolicyLength != 0) {
+        const ScopedToolPermissionPolicyDecodeResult decodedToolPolicy =
+            decodeScopedToolPermissionPolicy(
+                encodedToolPolicy, encodedToolPolicyLength);
+        if (decodedToolPolicy.error != ToolPolicyCodecError::None) {
+            input.close();
+            return {
+                false,
+                {},
+                String("Project bundle tool policy is invalid: ") +
+                    toolPolicyCodecErrorText(decodedToolPolicy.error),
+            };
+        }
+        importedToolPolicy = decodedToolPolicy.policy;
+    }
     const ProjectDocumentResult created = createProject(header["title"].as<const char*>());
     if (!created.success) {
         input.close();
@@ -319,7 +349,7 @@ ProjectDocumentResult importProjectBundle(const String& filename)
     imported.activeChatId = header["active_chat_id"].as<const char*>();
     imported.model = header["model"].as<const char*>();
     imported.apiProfile = header["api_profile"].as<const char*>();
-    imported.toolPolicy = header["tool_policy"].as<const char*>();
+    imported.toolPolicy = importedToolPolicy;
     imported.sshProfile = header["ssh_profile"].as<const char*>();
     imported.contextByteBudget = header["context_byte_budget"].as<std::uint32_t>();
     imported.maximumOutputTokens = header["maximum_output_tokens"].as<std::uint32_t>();
@@ -366,6 +396,10 @@ ProjectDocumentResult importProjectBundle(const String& filename)
         }
         JsonDocument record;
         const DeserializationError recordError = deserializeJson(record, line.line);
+        const JsonVariantConst encodedChatToolPolicy = record["tool_policy"];
+        const bool hasCanonicalChatToolPolicy = !encodedChatToolPolicy.isUnbound();
+        const JsonVariantConst chatModel = record["model"];
+        const bool hasChatModel = !chatModel.isUnbound();
         if (recordError || !record["record"].is<const char*>() ||
             String(record["record"].as<const char*>()) != "chat" ||
             !record["id"].is<const char*>() || !record["title"].is<const char*>() ||
@@ -374,10 +408,38 @@ ProjectDocumentResult importProjectBundle(const String& filename)
             !record["pinned"].is<bool>() || !record["archived"].is<bool>() ||
             !record["instructions"].is<const char*>() || !record["draft"].is<const char*>() ||
             !record["ssh_tools_enabled"].is<bool>() ||
+            (hasCanonicalChatToolPolicy &&
+             !encodedChatToolPolicy.is<const char*>()) ||
+            (hasChatModel && !chatModel.is<const char*>()) ||
             !record["context_summary"].is<const char*>() ||
             !record["summarized_message_count"].is<std::uint32_t>()) {
             result = {false, "Project bundle contains an invalid chat header"};
             break;
+        }
+        const bool legacySshEnabled = record["ssh_tools_enabled"].as<bool>();
+        ScopedToolPermissionPolicy chatToolPolicy =
+            migrateLegacyChatToolPermissionPolicy(legacySshEnabled);
+        if (hasCanonicalChatToolPolicy) {
+            const char* const encodedPolicy = encodedChatToolPolicy.as<const char*>();
+            const ScopedToolPermissionPolicyDecodeResult decodedPolicy =
+                decodeScopedToolPermissionPolicy(
+                    encodedPolicy, std::strlen(encodedPolicy));
+            if (decodedPolicy.error != ToolPolicyCodecError::None) {
+                result = {
+                    false,
+                    String("Project bundle chat tool policy is invalid: ") +
+                        toolPolicyCodecErrorText(decodedPolicy.error),
+                };
+                break;
+            }
+            if (legacySshToolsEnabled(decodedPolicy.policy) != legacySshEnabled) {
+                result = {
+                    false,
+                    "Project bundle chat tool policy conflicts with its SSH compatibility flag",
+                };
+                break;
+            }
+            chatToolPolicy = decodedPolicy.policy;
         }
         ChatDocument chat;
         chat.summary.id = record["id"].as<const char*>();
@@ -388,7 +450,10 @@ ProjectDocumentResult importProjectBundle(const String& filename)
         chat.summary.archived = record["archived"].as<bool>();
         chat.instructions = record["instructions"].as<const char*>();
         chat.draft = record["draft"].as<const char*>();
-        chat.sshToolsEnabled = false;
+        chat.toolPolicy = chatToolPolicy;
+        if (hasChatModel) {
+            chat.model = chatModel.as<const char*>();
+        }
         chat.contextSummary = record["context_summary"].as<const char*>();
         chat.summarizedMessageCount =
             record["summarized_message_count"].as<std::uint32_t>();
