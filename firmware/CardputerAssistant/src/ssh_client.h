@@ -205,6 +205,18 @@ public:
         bool overwrite,
         std::uint32_t timeoutMs,
         const std::function<bool()>& isCancelled);
+    SftpMutationResult downloadSftpFileControlled(
+        const String& remotePath,
+        const String& workspaceName,
+        bool overwrite,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
+    SftpMutationResult uploadSftpFileControlled(
+        const String& workspaceName,
+        const String& remotePath,
+        bool overwrite,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled);
     OperationResult downloadSftpFile(const String& remotePath,
                                      const String& workspaceName,
                                      std::uint32_t timeoutMs);

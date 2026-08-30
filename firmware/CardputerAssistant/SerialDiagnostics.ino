@@ -5309,6 +5309,8 @@ void runUiBenchmark()
                   static_cast<unsigned int>(largestHeapAfter));
 }
 
+cardputer::OperationResult runSftpTransferRemoteTest(bool& cleanupComplete);
+
 void handleSerialCommand(const String& command)
 {
     if (command == "PING") {
@@ -5800,6 +5802,28 @@ void handleSerialCommand(const String& command)
         cardputer::markOperation("idle");
         Serial.printf(
             "MODELSFTPTEST result=%s elapsed_ms=%u heap=%u minimum_heap=%u largest_heap=%u stack_free=%u cleanup=%s error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(elapsedMs),
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(ESP.getMinFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            cleanupComplete ? "yes" : "no",
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "SFTPTRANSFERTEST") {
+        ensureNetworkReady();
+        cardputer::markOperation("sftp_transfer_test");
+        const std::uint32_t startedAt = millis();
+        bool cleanupComplete = false;
+        const cardputer::OperationResult result =
+            runSftpTransferRemoteTest(cleanupComplete);
+        const std::uint32_t elapsedMs = millis() - startedAt;
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SFTPTRANSFERTEST result=%s elapsed_ms=%u heap=%u minimum_heap=%u largest_heap=%u stack_free=%u cleanup=%s error=%s\n",
             result.success ? "pass" : "failed",
             static_cast<unsigned int>(elapsedMs),
             static_cast<unsigned int>(ESP.getFreeHeap()),

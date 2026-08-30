@@ -54,7 +54,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-04 | Configurable model SSH command timeout/output policy while retaining the existing 1,024-byte direct command cap | Timeout/output policy is explicit; the user-removed 8 KiB increase is not implemented | completed |
 | P4-05 | Single-pass streamed SD command log, bounded model summary/reference, cancellation, and downloadable output | Output is written once while streaming to SD; the model receives only a bounded summary/reference; a long foreground command cancels and its log downloads without background execution | completed |
 | P4-06 | Paged model SFTP list/read/write/move through existing `SftpReadWrite` and Phase 3 permission/confirmation boundaries | Model listing is bounded/paged; `Ask` confirms every model SFTP call; `Allow` still confirms overwrite/delete/move onto an existing target; overwrite defaults deny and no prior remote target is truncated/deleted before confirmed safe replacement; manual Device/Web SFTP remains direct-user authority | completed |
-| P4-07 | Existing streaming CardMind workspace transfer to/from selected remote host | Both directions preserve workspace policy, total foreground deadline and cooperative cancel; overwrite defaults deny and replacement never destroys the prior target before confirmation | pending |
+| P4-07 | Existing streaming CardMind workspace transfer to/from selected remote host | Both directions preserve workspace policy, total foreground deadline and cooperative cancel; overwrite defaults deny and replacement never destroys the prior target before confirmation | completed |
 | P4-08 | Small fixed built-in Safe Actions set for logs, service state, containers, disk and processes | Reviewed fixed actions obey existing Off/Ask/ceiling/host-key/timeout/audit boundaries; no presets, editor, macros, persistence schema or action framework | pending |
 | P4-09 | Removed by user: Web terminal tabs; existing single terminal remains | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-10 | Removed by user: configurable Device terminal-history rotation and new viewer; existing terminal.log/old.log remains | Scope closed by explicit user decision; not implemented | removed_by_user |
@@ -1204,3 +1204,118 @@ state, API, timeout, output-storage or channel-management contract changes.
   points for free heap and largest block, with only a 396-byte lower global minimum than P4-05, and
   no reset, freeze or persistent session.
 - P4-06 completed at 2026-08-31 01:37:01 +03:00. P4-07 and later behavior remain pending.
+
+## P4-07 design gate
+
+**Status:** completed
+**Started:** 2026-08-31 01:45:15 +03:00.
+
+### Scope lock
+
+- ROADMAP clause: add file transfer between the CardMind workspace and the selected remote host.
+- Architect decision (2026-08-31): `LLM-accessible` covers only the four P4-06 SFTP tools. P4-07 is a reusable backend for an explicit direct-user transfer in either direction through the selected trusted SSH profile/session.
+- P4-07 owns workspace/path-policy enforcement, bounded streaming, one foreground deadline covering the complete transfer, cooperative cancellation, overwrite-default-deny, safe replacement, and explicit failure/unknown cleanup outcomes.
+- P4-16 and P4-17 own Device/Web controls, user-visible destination/overwrite confirmation, stable IDs, and their end-to-end journeys. Until those rows, the new backend may be exercised directly by a proportional diagnostic but is not claimed as integrated UI behavior.
+- P4-06 remains the owner of model SFTP list/read/write/move and its existing `SftpReadWrite` permission path.
+
+### Explicit non-goals
+
+- No model schema/catalog entry, pending call, multi-capability policy, model audit/confirmation path, or model-visible transfer result.
+- No new transfer framework, job/background executor, retry queue, durable manifest, reconnect/resume, or generic recovery engine.
+- No Device/Web asset or route changes in this row, and no change to manual terminal authority.
+- No pre-delete, `TRUNC`, or destructive fallback against the destination; no retry after an outcome-unknown rename.
+- Do not rewrite the already accepted P4-06 SFTP operations or re-prove generic P2 SD atomic-storage behavior.
+
+### Existing boundary inventory
+
+- Device SFTP upload/download and authenticated Web routes currently call `SshClient::uploadSftpFile` / `downloadSftpFile`; the SSH demo and serial diagnostics also consume the existing download path. These consumers remain unchanged until P4-16/P4-17.
+- The existing upload streams a workspace file directly to a remote final path with create/truncate semantics and therefore cannot satisfy the P4-07 safe-replacement contract.
+- The existing download streams to the workspace atomic `.tmp` sidecar and commits through `commitWorkspaceBinaryTemporary`, but refreshes its timeout after progress and has no cooperative-cancel contract.
+- Reusable P4-06 primitives already provide a monotonic remaining-deadline calculation, collision-owned same-directory remote temporary names, exclusive temporary creation, no-overwrite rename, POSIX replacement rename, and typed mutation outcomes including outcome unknown.
+- Existing SD primitives own workspace path validation/parent creation, capacity checks, deterministic temporary/backup recovery, target-to-backup switching, failed-commit restoration, and exact backup cleanup.
+- Installed libssh2 is the pinned 1.11.1 source already evidenced by P4-06. Ordinary SFTP rename is the no-overwrite operation; overwrite uses the negotiated POSIX rename extension. There is no unlink/truncate fallback.
+- No background, reboot, project/chat, model, or audit consumer exists for direct-user transfer. Cleanup is owned synchronously by the transfer call; deterministic local sidecar recovery remains owned by the existing workspace initialization/recovery path.
+
+### Minimal reviewed design candidate
+
+- Add exactly two explicit controlled `SshClient` operations, upload and download, with `overwrite`, total `timeout_ms`, and cooperative `is_cancelled` inputs. Reuse the existing typed SFTP mutation outcome rather than adding a transfer framework.
+- Both operations require the caller's already selected, connected, host-key-verified SSH session. They do not select a profile, acquire broader authority, or expose credentials/authority internals.
+- A single absolute deadline is created on entry and is never refreshed after progress. Every open/read/write/close/rename/cleanup wait consumes only its remaining budget.
+- Upload validates the workspace source and remote destination, streams through the existing bounded buffer into an exclusively created collision-owned same-directory remote temporary file, closes it, then performs exactly one no-overwrite rename or confirmed POSIX replacement rename. The final path is never opened, truncated, unlinked, or pre-deleted.
+- Download validates the remote source and workspace destination, first runs the existing bounded recovery for that destination, then denies the recovered existing target unless overwrite is explicit. It streams into the exact-owned SD temporary sidecar and verifies/flushes it. With overwrite denied it checks the final target again immediately before commit and aborts with exact-temp cleanup if a target appeared; only then may it call the existing safe workspace replacement primitive. Before commit, the prior target is unchanged.
+- Cancellation or known failure before rename/commit closes handles and removes only the exact-owned temporary object. Cleanup failure is explicit and cannot be converted to success.
+- Exclusive remote-temp creation is also an outcome-bearing mutation. If cancellation arrives while its nonblocking request is pending, the same request may be resolved and an owned handle closed/removed only while the original total deadline still has budget. If the deadline expires or ownership cannot be resolved, return `outcomeUnknown`; do not extend the deadline or delete a path whose ownership is ambiguous.
+- Keep the existing `SftpMutationResult`: `outcomeUnknown` carries authority uncertainty, while the error reports the exact cleanup disposition as `cleanup=removed`, `cleanup=failed`, or `cleanup=not_attempted` for every interrupted/unknown remote-temp path. It does not expose credentials or the random temporary path.
+- If a remote rename request may have been accepted but its final status is unavailable, return outcome unknown, do not retry, and do not claim which remote object is authoritative. Cleanup is reported `not_attempted`: a successful rename releases ownership of the temporary pathname, so probing or unlinking it afterward could delete an unrelated file created in that race.
+- Existing direct-user wrappers and UI consumers are not silently redirected in this row; P4-16/P4-17 will invoke the controlled operations only after explicit destination/overwrite interaction.
+
+### Side-effect and recovery table
+
+| Window | Durable state before | Permitted effect | Required outcome / owner |
+|---|---|---|---|
+| Upload before exclusive temp create | Remote final unchanged | None | Explicit failure/cancel; no cleanup |
+| Upload temp open/partial/closed | Remote final unchanged | Exact random same-directory temp only | Close and remove exact temp on known failure/cancel; cleanup failure explicit |
+| Upload temp create request pending at cancel/deadline | Exact random pathname may or may not have been created | Resolve only within remaining original deadline | Confirmed owned handle may be closed/unlinked; otherwise outcome unknown with explicit cleanup disposition; no deadline extension |
+| Upload rename sent, final status unavailable | Final may be old or new; temp may or may not remain | One rename request only | Outcome unknown; no retry or destructive fallback; report `cleanup=not_attempted` |
+| Upload rename confirmed | New final authoritative | Atomic server rename | Success; exact temp absent |
+| CardMind reset after remote temp create and before confirmed rename | Remote final unchanged; exact random temp may persist | No replay or automatic scan | No safe automatic owner exists without forbidden durable metadata. Replay and wildcard deletion are forbidden; the remote-host operator owns manual inspection/removal. CardMind reports this bounded residual risk and does not claim crash cleanup |
+| Download before/while SD temp write | Prior workspace target unchanged | Existing atomic `.tmp` sidecar only | Remove exact temp on known failure/cancel; SD removal/cleanup failure explicit |
+| Download atomic commit interrupted | Existing target/`.tmp`/`.bak` state only | Existing target-to-backup and temp-to-target sequence | Existing bounded workspace recovery/restoration owns next access/reboot |
+| Download commit confirmed | New workspace target authoritative | Existing safe replacement | Success; exact temp/backup cleanup required or cleanup failure explicit |
+
+### Frozen minimal proof matrix
+
+- Static/host: the two controlled operations use one non-refreshing deadline and cooperative cancel checks; upload never opens the final path with `TRUNC`, unlinks it, or pre-deletes it; only an exclusive same-directory temp is streamed; download commits only through the existing workspace atomic primitive.
+- Static/host: no model schema/catalog/pending/policy/audit path and no Device/Web asset/route changes; existing callers remain unchanged for P4-16/P4-17.
+- Exact-core build/upload after review GO.
+- Focused real-device diagnostic through one selected trusted profile: stream payloads larger than one buffer in both directions and compare exact bytes; no-overwrite preserves existing remote and local targets; explicit overwrite safely replaces them; cooperative cancellation leaves prior targets unchanged.
+- One proportional deadline-expiry scenario must return within the configured total deadline tolerance, preserve both prior targets, issue no retry, and expose the exact remote-temp cleanup disposition. The test-level fixture owner performs any separately required exact cleanup without changing the production deadline contract.
+- The diagnostic collision-checks every fixture, owns only its random remote paths and exact workspace paths/sidecars, cleans them after success and failure, repeats cleanup to prove idempotency, and restores prior profile selection/workspace inventory.
+- Observe elapsed time, free heap, largest block, stack margin, reset reason, SD readiness/ownership, and compare active-SSH resources with the retained active-SSH baseline rather than the idle 70-KiB floor.
+
+### Forbidden effects
+
+- No model authority or LLM-addressable transfer path; no credential/private-key/password/passphrase bytes or storage paths in results, diagnostics, serial, logs, Web/API reads, or Git.
+- No destination mutation before explicit overwrite is supplied; no partial local/remote final file; no retry of unknown rename; no deletion outside exact-owned temporary/fixture paths.
+- No reset/freeze, persistent worker, unbounded RAM growth, changed user profile/selection, changed unrelated workspace/remote data, or retained diagnostic artifacts.
+
+### Expected write set and review gate
+
+- Production: `firmware/CardputerAssistant/src/ssh_client.h`, `firmware/CardputerAssistant/src/ssh_client.cpp` only.
+- Proportional retained diagnostic only if required by the frozen proof: existing `firmware/CardputerAssistant/CardputerAssistant.ino`, `firmware/CardputerAssistant/SshTools.ino`, and `firmware/CardputerAssistant/SerialDiagnostics.ino`; no new harness/framework file.
+- Evidence/status only: `.agents/P4_TRACEABILITY.md`.
+- Independent pre-edit design review: initial consolidated verdict STOP on local no-overwrite ordering, pending-create ambiguity, post-reset remote-temp ownership, and missing timeout proof. All four were resolved above without a new schema/framework; the reviewer's single combined follow-up returned GO on 2026-08-31. Reviewer lifecycle closed; production may proceed only with the locked write set and proof.
+
+### Independent code-review STOP and failure ownership
+
+- Fresh read-only review of the stable five-file diff returned STOP before build/device evidence. All findings are active-row defects; no completed row is reopened.
+- Backend: interrupted libssh2 open/stat/read/write/close/rename state could remain pending and bind a later operation to stale state. Correction owner: P4-07 must resolve within the original deadline or invalidate and close the entire SSH session before return.
+- Backend: relative helper deadlines rebased a remaining-budget snapshot. Correction owner: P4-07 needs one absolute-deadline wait helper used only by the new transfer methods.
+- Backend: local cleanup could claim removal without rechecking expected-card access, and known-size remote growth was not checked per block against the SD floor. Correction owner: P4-07 cleanup/stream boundary.
+- Diagnostic: remote-directory ownership was asserted before confirmed `mkdir`, creating a race that could delete another actor's directory. Correction owner: P4-07 diagnostic; ownership begins only after confirmed create.
+- Diagnostic: broad failure checks could false-pass cancel/timeout/no-overwrite and did not exercise controlled-download cancellation. Correction owner: P4-07 diagnostic assertions and exact cleanup observation.
+- Build/device evidence remains blocked. Apply one coherent correction batch, rerun cheap static checks, then give this code reviewer its single combined blocker follow-up.
+
+### Code-review correction outcome and cheap evidence
+
+- One coherent correction batch added an absolute-deadline wait used only by the two P4-07 methods, invalidated the full SSH session after unresolved libssh2 state, revalidated expected-card cleanup access, rejected post-stat growth before SD write, checked the operational floor per block, moved fixture ownership after confirmed `mkdir`, and made cancel/timeout/no-overwrite assertions specific.
+- `git diff --check`: pass. Working diff remains exactly the five locked P4-07 paths; Architect-owned `.codex/` remains untracked and untouched.
+- `P4_07_BACKEND_STATIC`: pass; both controlled methods have one absolute deadline, contain no relative controlled wait and no final-path `TRUNC`, and include session invalidation plus expected-card cleanup/growth guards.
+- `P4_07_DIAGNOSTIC_STATIC`: pass; remote ownership is post-create, controlled-download cancellation is present, and cancel/timeout accept only confirmed removal or explicit not-attempted with a closed session.
+- The same fresh code reviewer used its single blocker follow-up and returned GO with no remaining mandatory findings. Reviewer lifecycle closed. Exact build/device evidence may start.
+- First exact compile attempt stopped before image generation because Arduino did not synthesize a cross-INO declaration for `runSftpTransferRemoteTest`. Classified as a P4-07 diagnostic integration defect; production transfer code was not implicated. Minimal correction: one explicit internal forward declaration in the existing serial diagnostic file, then one justified rebuild.
+
+### Verified build, Device, resources, and cleanup evidence
+
+- Exact pinned compile after the diagnostic declaration correction: pass. M5Stack core `3.2.1`, exact FQBN `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`, sketch `3,424,714` bytes, global RAM `65,628` bytes.
+- Parsed `build.options.json`: pass; exact FQBN present, one unique resolved M5Stack hardware path at `3.2.1`, no other core version. One COM8 upload completed with every flash hash verified and normal hard reset; NVS and microSD were not erased.
+- Firmware image `CardputerAssistant.ino.bin`: `3,424,896` bytes, SHA-256 `34A8064380970D5A342E770306FDFF9204FDF1BE8602A15DF3300763454DB59C`.
+- Focused real-device `SFTPTRANSFERTEST`: pass in `86,749 ms`. Through the selected trusted profile it transferred an exact `65,536`-byte bounded-stream payload in both directions, denied and preserved existing remote/local targets, performed explicit safe overwrite, exercised upload and download cancellation, enforced the bounded total-deadline assertion with no retry, and verified subsequent same-session use or explicit reconnect after invalidation.
+- Exact-owned cleanup: `cleanup=yes`. The diagnostic collision-checked one random remote directory and four workspace filenames, asserted ownership only after confirmed remote-directory creation, removed only that directory's contents and exact local final/`.tmp`/`.bak` paths, and repeated absence checks in two cleanup passes. Profile selection/inventory and unrelated remote/workspace data were not mutated by the test path.
+- Device result resources: free heap `121,412`, minimum heap `42,672`, largest block `56,308`, stack margin `7,876` bytes. Post-test `STATUS`: free heap `121,676`, largest block `56,308`, minimum heap `42,672`, stack margin `7,876`, `microsd_state=ready`, chats `2`, history `2`, reset reason `1`.
+- Resource comparison: post-test idle heap remains above the 70-KiB general floor; free heap/largest block/stack are above the retained P4-06 post-test values (`117,540` / `53,236` / `7,860`). The minimum remains above the existing active-SSH free-heap baseline (`39,664`) despite the broader multi-transfer diagnostic. No reset, freeze, SD ownership change, or Device/Web latency path change occurred; P4-07 adds no active UI consumer.
+- One-off serial wrapper reported a failure only after both valid evidence lines because it matched obsolete field names `sd`/`reset` instead of observed `microsd`/`reset_reason`. Classified as a harness-only assertion defect; the passing diagnostic, confirmed cleanup, ready expected card, and normal reset reason were already observed, so the transfer experiment was not repeated.
+- Forbidden effects: no model schema/catalog/pending/policy/audit changes, no model transfer authority, no Device/Web control changes, no final-path truncate/pre-delete, no unknown rename retry, and no credential/key/password/passphrase or private storage-path output.
+- Residual risk retained honestly: a device reset after remote-temp creation can leave an inert random same-directory temp that CardMind cannot safely rediscover without forbidden durable metadata. Automatic replay/wildcard deletion is forbidden; remote-host operator inspection owns that rare crash residual. P4-16/P4-17 own direct-user controls and explicit overwrite interaction.
+
+**Completed:** 2026-08-31 02:50:53 +03:00. P4-08 and later behavior remain pending.
