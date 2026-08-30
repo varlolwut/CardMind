@@ -88,14 +88,17 @@ SshCommandArgumentsResult parseSshCommandArguments(
             return {false, "", 0, 0, "SSH tool arguments contain an unknown field"};
         }
     }
-    const String command = input["command"].as<const char*>();
-    if (command.isEmpty() || command.length() > 1024 ||
-        !isValidUtf8(command.c_str())) {
+    const JsonString commandValue = input["command"].as<JsonString>();
+    if (commandValue.isNull() || commandValue.size() == 0 ||
+        commandValue.size() > 1024 ||
+        std::strlen(commandValue.c_str()) != commandValue.size() ||
+        !isValidUtf8(commandValue.c_str())) {
         return {
             false, "", 0, 0,
-            "SSH command must be valid UTF-8 between 1 and 1024 bytes",
+            "SSH command must be valid UTF-8 between 1 and 1024 bytes without NUL characters",
         };
     }
+    const String command(commandValue.c_str());
     const bool hasTimeout = input.containsKey("timeout_ms");
     const bool hasOutputLimit = input.containsKey("max_inline_output_bytes");
     if ((hasTimeout && !input["timeout_ms"].is<std::uint32_t>()) ||

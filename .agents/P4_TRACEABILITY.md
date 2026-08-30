@@ -576,6 +576,20 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
 **Status:** completed
 **Started:** 2026-08-30 21:24:34 +03:00.
 
+### Approved reopen gate
+
+- Architect approved reopening only because installed ESP32 core `3.2.1`
+  `String::indexOf('\0')` resolves through `strchr` and therefore matches the terminating NUL for
+  every non-empty `String`; the observed literal `ls -lR /pub` was rejected before channel open.
+- The correction is limited to length-aware embedded-NUL validation on ArduinoJson `7.2.1`
+  `JsonString` before constructing `String`, removal of the impossible lower-layer NUL predicate,
+  and focused normal-command/embedded-NUL evidence. Timeout, output policy, direct command cap and
+  all P4-05 behavior remain unchanged.
+- Frozen proof: an ordinary non-empty command parses and reaches execution; a JSON command
+  containing `\u0000` fails before connection; existing option defaults/bounds/unknown-field and
+  overflow-clear observations still pass. Forbidden effects are any timeout/output-policy change,
+  P4-05 implementation change, persistence/UI change or broader validation rewrite.
+
 ### Locked clauses and observable contract
 
 - Model-issued `ssh_command` gains only optional `timeout_ms` (`1,000..60,000`, default `60,000`)
@@ -685,3 +699,23 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
   freeze or unexpected reset. No Device fixture existed, and the exact-owned WSL ELF was removed.
 - P4-04 completed at 2026-08-30 22:18:57 +03:00 after approximately 54 minutes. P4-05 is now the
   only active row.
+
+### Approved reopen correction evidence
+
+- Static invariants and `git diff --check` passed: exactly one length-aware `JsonString` NUL check
+  exists at the parser boundary, the broken lower-layer `String::indexOf('\0')` predicate is absent,
+  and the existing diagnostic includes the decoded `\u0000` rejection case.
+- A fresh independent read-only code reviewer returned GO with no correctness, security or scope
+  blockers and was closed without follow-up or reuse.
+- The exact pinned build passed with FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`, resolved M5Stack ESP32 core
+  `3.2.1`, 3,340,590 sketch bytes and 65,628 global bytes. The uploaded image is 3,340,784 bytes
+  with SHA-256 `8082E6D923BB7D8C48C977A73655F802FCEF27AF3F739EEFA26C83AA0B24690F`; every flash segment
+  reported hash verification and COM8 returned after reset.
+- On that image, `SSHOPTIONSTEST` passed the ordinary command, decoded embedded-NUL rejection,
+  unchanged option limits and overflow-clear path: free heap 122,488 bytes, largest block 60,404
+  bytes and stack margin 7,860 bytes. Immediate `STATUS` remained responsive with microSD ready,
+  two preserved chats/two history entries, reset reason 1, free heap 122,752 bytes, minimum heap
+  111,200 bytes and the same largest block/stack margin. No fixture or persisted state was created.
+- The approved correction completed at 2026-08-30 23:34:49 +03:00. P4-05 remains paused until this
+  row's standalone commit is pushed and its remote SHA is verified.

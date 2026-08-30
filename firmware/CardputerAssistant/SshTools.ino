@@ -397,6 +397,7 @@ cardputer::OperationResult runSshCommandOptionsTest()
         "{\"command\":\"true\",\"max_inline_output_bytes\":0}",
         "{\"command\":\"true\",\"max_inline_output_bytes\":16385}",
         "{\"command\":\"true\",\"timeout_ms\":\"1000\"}",
+        "{\"command\":\"echo\\u0000mutate\"}",
         "{\"command\":\"true\",\"unexpected\":1}",
     };
     for (const char* invalidArguments : kInvalidArguments) {

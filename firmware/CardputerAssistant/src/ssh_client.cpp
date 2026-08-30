@@ -2317,7 +2317,7 @@ OperationResult SshClient::executeCommandControlled(
     if (implementation_->channel != nullptr) {
         return {false, "SSH session already has an open channel"};
     }
-    if (command.isEmpty() || command.length() > 1024 || command.indexOf('\0') >= 0) {
+    if (command.isEmpty() || command.length() > 1024) {
         return {false, "SSH command must contain 1 to 1024 bytes without NUL characters"};
     }
     if (maximumOutputBytes == 0 || maximumOutputBytes > 16384) {
