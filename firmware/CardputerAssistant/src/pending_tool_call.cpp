@@ -1,5 +1,7 @@
 #include "pending_tool_call.h"
 
+#include "ssh_command_options.h"
+
 #include "file_workspace.h"
 #include "json_string_reader.h"
 #include "pending_tool_preview.h"
@@ -355,17 +357,44 @@ CanonicalToolArgumentsResult canonicalizeParsedToolArguments(
             break;
         }
         case ToolSchemaId::SshCommand: {
-            static constexpr const char* kFields[] = {"command"};
-            if (!hasExactFields(input, kFields, 1) ||
+            if (input.size() < 1 || input.size() > 3 ||
                 !input["command"].is<const char*>()) {
-                return failArguments("ssh_command requires exactly one string field: command");
+                return failArguments(
+                    "ssh_command requires command and only its optional timeout/output fields");
+            }
+            for (JsonPairConst field : input) {
+                const char* name = field.key().c_str();
+                if (std::strcmp(name, "command") != 0 &&
+                    std::strcmp(name, "timeout_ms") != 0 &&
+                    std::strcmp(name, "max_inline_output_bytes") != 0) {
+                    return failArguments("ssh_command contains an unknown field");
+                }
             }
             const std::string command = input["command"].as<const char*>();
             if (command.empty() || command.size() > 1024 || !isValidUtf8(command)) {
                 return failArguments(
                     "SSH command must be valid UTF-8 between 1 and 1024 bytes");
             }
+            const bool hasTimeout = input.containsKey("timeout_ms");
+            const bool hasOutputLimit = input.containsKey("max_inline_output_bytes");
+            if ((hasTimeout && !input["timeout_ms"].is<std::uint32_t>()) ||
+                (hasOutputLimit &&
+                 !input["max_inline_output_bytes"].is<std::size_t>())) {
+                return failArguments("SSH command timeout/output options must be integers");
+            }
+            const std::uint32_t timeoutMs = hasTimeout
+                ? input["timeout_ms"].as<std::uint32_t>()
+                : kDefaultSshCommandTimeoutMs;
+            const std::size_t maximumOutputBytes = hasOutputLimit
+                ? input["max_inline_output_bytes"].as<std::size_t>()
+                : kDefaultSshCommandInlineOutputBytes;
+            if (!isValidSshCommandTimeout(timeoutMs) ||
+                !isValidSshCommandInlineOutputLimit(maximumOutputBytes)) {
+                return failArguments("SSH command timeout/output options are outside current limits");
+            }
             normalized["command"] = command;
+            normalized["timeout_ms"] = timeoutMs;
+            normalized["max_inline_output_bytes"] = maximumOutputBytes;
             break;
         }
         case ToolSchemaId::Count:

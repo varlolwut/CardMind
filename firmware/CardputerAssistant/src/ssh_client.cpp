@@ -1,5 +1,7 @@
 #include "ssh_client.h"
 
+#include "ssh_command_options.h"
+
 #include "file_workspace.h"
 #include "sd_storage.h"
 #include "text_utils.h"
@@ -2373,10 +2375,16 @@ OperationResult SshClient::executeCommandControlled(
                 reinterpret_cast<char*>(buffer), sizeof(buffer));
             if (bytes > 0) {
                 const std::size_t count = static_cast<std::size_t>(bytes);
-                if (count > maximumOutputBytes - output.size()) {
-                    return {false, "SSH command output exceeded the configured 16384-byte limit"};
+                if (!appendSshCommandOutput(
+                        output, reinterpret_cast<const char*>(buffer), count,
+                        maximumOutputBytes)) {
+                    return {
+                        false,
+                        String("SSH command output exceeded the configured ") +
+                            String(static_cast<unsigned long>(maximumOutputBytes)) +
+                            "-byte inline limit",
+                    };
                 }
-                output.append(reinterpret_cast<const char*>(buffer), count);
                 progressed = true;
             } else if (bytes < 0 && bytes != LIBSSH2_ERROR_EAGAIN) {
                 return {false, sessionError(implementation_->session,

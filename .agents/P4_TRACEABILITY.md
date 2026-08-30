@@ -51,8 +51,8 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-01 | Existing indexed NVS SSH profile store capped at five, stable opaque non-secret uint64 IDs, public summaries, selected-profile JIT secret load, and ID-only legacy compatibility | Five profiles and IDs persist and a sixth is rejected before any write; IDs survive edit/select/delete/reboot and move with profiles; summaries read and return no w/k; selected runtime reads only exact selected w/k; legacy count zero through five adds only missing i0 through i4 and count above five stays unchanged | completed |
 | P4-02 | Opaque private-key records and explicit profile-to-key ID binding | No shared mutable key slot; key material remains write-only and unreachable through model/file/read APIs | completed |
 | P4-03 | Conservative model SSH classification in the existing Phase 3 policy/runtime path | Every arbitrary shell `ssh_command` remains `SshMutate`; `SshRead` is available only to exact fixed reviewed safe actions or strict non-shell templates; no regex/prefix shell classifier exists; manual Device/Web terminal authority is unchanged | completed |
-| P4-04 | Configurable model SSH command timeout/output policy while retaining the existing 1,024-byte direct command cap | Timeout/output policy is explicit; the user-removed 8 KiB increase is not implemented | in_progress |
-| P4-05 | Single-pass streamed SD command log, bounded model summary/reference, cancellation, and downloadable output | Output is written once while streaming to SD; the model receives only a bounded summary/reference; a long foreground command cancels and its log downloads without background execution | pending |
+| P4-04 | Configurable model SSH command timeout/output policy while retaining the existing 1,024-byte direct command cap | Timeout/output policy is explicit; the user-removed 8 KiB increase is not implemented | completed |
+| P4-05 | Single-pass streamed SD command log, bounded model summary/reference, cancellation, and downloadable output | Output is written once while streaming to SD; the model receives only a bounded summary/reference; a long foreground command cancels and its log downloads without background execution | in_progress |
 | P4-06 | Paged model SFTP list/read/write/move through existing `SftpReadWrite` and Phase 3 permission/confirmation boundaries | Model listing is bounded/paged; `Ask` confirms every model SFTP call; `Allow` still confirms overwrite/delete/move onto an existing target; overwrite defaults deny and no prior remote target is truncated/deleted before confirmed safe replacement; manual Device/Web SFTP remains direct-user authority | pending |
 | P4-07 | Existing streaming CardMind workspace transfer to/from selected remote host | Both directions preserve workspace policy, total foreground deadline and cooperative cancel; overwrite defaults deny and replacement never destroys the prior target before confirmation | pending |
 | P4-08 | Small fixed built-in Safe Actions set for logs, service state, containers, disk and processes | Reviewed fixed actions obey existing Off/Ask/ceiling/host-key/timeout/audit boundaries; no presets, editor, macros, persistence schema or action framework | pending |
@@ -570,3 +570,118 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
 - No assignment of `ssh_command` to `SshRead`, no bypass of Off/Ask/global/project/chat ceilings,
   confirmation, preview, authority identity, audit or cancel.
 - No model policy applied to explicit manual Device/Web terminals and no P4-08 implementation.
+
+## P4-04 design gate
+
+**Status:** completed
+**Started:** 2026-08-30 21:24:34 +03:00.
+
+### Locked clauses and observable contract
+
+- Model-issued `ssh_command` gains only optional `timeout_ms` (`1,000..60,000`, default `60,000`)
+  and `max_inline_output_bytes` (`1..16,384`, default `16,384`). The command remains bounded to
+  1,024 bytes. Unknown fields, wrong JSON types and out-of-range values fail before connection.
+- `timeout_ms` is one total deadline starting immediately before connection and covering connect,
+  host-key lookup, authentication and command completion. User cancellation remains a distinct
+  canceled outcome; deadline expiry is an explicit failed outcome.
+- `max_inline_output_bytes` is the combined stdout/stderr cap returned to the model. P4-04 keeps one
+  bounded inline buffer; overflow fails explicitly and returns no partial output. P4-05 alone owns
+  one-pass SD logging and bounded summary/reference behavior.
+- Values are per call. There is no Settings/storage/migration owner and no Device/Web control.
+  Manual Device/Web terminal behavior is unchanged.
+
+### Producer, consumer and failure inventory
+
+- `api_client.cpp` builds the model schema. `pending_tool_call.cpp` validates exact allowed fields,
+  normalizes omitted values to explicit defaults and binds the full canonical object to mandatory
+  confirmation. Preview continues to show the exact command bytes.
+- `ssh_tool.cpp` performs the independent runtime parse, loads only the selected profile, starts the
+  total clock immediately before `connectControlled()`, and reuses one latched callback across
+  connect/authenticate/execute. One first-observed terminal state is latched as `None`,
+  `UserCancelled` or `TimedOut`; user cancellation wins if both are first observed in the same poll.
+  The state is polled after every controlled stage returns regardless of that stage's result and
+  immediately after host-key lookup before interpreting its result. Only `UserCancelled` maps to a
+  canceled outcome, `TimedOut` maps to explicit failure, and a lower-stage error is preserved only
+  while the terminal state remains `None`.
+- `ssh_client.cpp` already combines stdout and stderr into one buffer and receives explicit timeout
+  and output limits. The only lower-boundary correction is to use the row-owned combined-size check,
+  clear the partial buffer before returning overflow, and report the actual configured cap.
+- There is no persistence, reboot recovery, SD owner, crash replay, cleanup fixture or vendor API
+  change. libssh2 and WiFiClient continue through the existing controlled operations.
+
+### Minimal design and expected write set
+
+- Add one small `ssh_command_options.h` contract with constants and pure validation/deadline/output-
+  fit helpers. This is not a general execution-budget or output framework.
+- Update only `api_client.cpp`, `pending_tool_call.cpp`, `ssh_tool.h/.cpp`, `ssh_client.cpp`, focused
+  `tests/host_tests.cpp`, and, only for a small no-network parser/default/bounds Device observation,
+  the existing `CardputerAssistant.ino`, `SshTools.ino` and `SerialDiagnostics.ino` diagnostic path.
+- The row-owned commit also includes this trace update. It includes no P4-05 behavior or generated
+  build/test artifacts.
+
+### Frozen minimal proof
+
+| Observation | Required result |
+| --- | --- |
+| Defaults and exact shape | Command-only input normalizes to 60,000/16,384; optional fields may appear independently; unknown/mistyped fields fail |
+| Bounds | 1,000 and 60,000 ms plus 1 and 16,384 bytes pass; adjacent out-of-range values fail before any connection |
+| Total deadline | One wrap-safe elapsed clock is shared across all model SSH stages; deadline expiry is failure, user cancellation remains canceled |
+| Inline output | Combined stdout/stderr at the cap succeeds; the first byte beyond it clears partial output and fails with the configured limit |
+| Interfaces/non-goals | Model schema documents both fields/defaults/bounds; command preview/mandatory confirmation bind normalized arguments; no Settings/UI/manual-terminal/P4-05 change |
+
+- After design GO: strict host tests first, then one fresh read-only code review. After code-review GO,
+  run one exact pinned build/upload and the smallest existing serial diagnostic exercising the same
+  parser/default/bounds/deadline/output-fit helpers without network, profile or SD mutation; record
+  idle resource/status evidence. No remote fixture or broad SSH regression is required for this
+  non-persistent parameter-boundary row.
+
+### Forbidden effects
+
+- No persisted maximum, Device/Web control, generic budget abstraction, dynamic inline allocation
+  above 16,384 bytes, truncation-success mode, SD log/reference, background work or retry.
+- No change to manual terminal/SFTP authority, timeout or transport behavior; no command-length
+  increase; no return of partial stdout/stderr after overflow.
+
+### Design-review blocker and bounded correction
+
+- The independent reviewer returned `STOP` on the initial callback-only wording because blocking
+  TCP connect, channel/read timeout or host-key lookup can return after the total deadline without
+  polling the callback, allowing a lower-stage error to mask the required timeout outcome.
+- The corrected first-observed terminal-state contract above closes that gap without changing lower
+  SSH APIs or adding a budget framework. The same reviewer used its one focused follow-up and
+  returned `GO`: cancellation/timeout precedence is deterministic, and the terminal state is
+  latched during and after every controlled stage and after host-key lookup. The reviewer was then
+  closed and will not be reused.
+
+### Implementation and code-review evidence
+
+- The coherent P4-04 diff adds only per-call schema/canonical/runtime options, one SSH-specific
+  deadline/output helper, direct combined-output clearing, and a no-network serial diagnostic.
+  It adds no persistence, Settings, Device/Web controls, manual-terminal change or P4-05 logging.
+- `git diff --check` passed. The strict WSL host suite passed with the exact-owned ELF removed from
+  `/tmp`; its first invocation did not compile because the shell expanded an empty output variable,
+  and the corrected literal-path invocation passed without a production-code change.
+- A fresh read-only code reviewer initially found a missing owning `<cstring>` include and proof
+  that exercised only pure helpers. One correction added that include, made the tested append/clear
+  primitive the exact `SshClient` path, and added `SSHOPTIONSTEST` over the production parser with
+  no profile, network, storage or fixture effects. The strict host suite passed again.
+- The reviewer used its single combined follow-up and returned `GO`: both blockers are closed and
+  no mandatory defect or scope expansion was introduced. The reviewer was then closed and will
+  not be reused. Exact pinned build/upload and Device evidence remain before closure.
+- The exact pinned build passed with FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom` and the unique resolved
+  M5Stack core `3.2.1`: 3,324,886 sketch bytes and 65,612 global bytes. The uploaded image is
+  3,325,072 bytes with SHA-256
+  `2AEA99E4683200B10894F331D32A3C4A7BF968B4EC0E6C1F500A234268CC3A66`; every flash segment
+  reported hash verification and COM8 returned after reset.
+- On the uploaded firmware, `SSHOPTIONSTEST` passed the production parser defaults, exact limits,
+  malformed/unknown/type rejection and production combined-output clear path without network,
+  profile, NVS or SD mutation. It reported free heap 124,040 bytes, largest block 61,428 bytes and
+  stack margin 7,860 bytes.
+- Immediate idle `STATUS` reported microSD ready, the preserved two chats/two history entries,
+  reset reason 1, free heap 124,304 bytes, largest block 61,428 bytes, minimum heap 113,320 bytes
+  and stack margin 7,860 bytes. Against the retained P3 idle baseline, free heap is +1,544 bytes,
+  largest block +3,072 bytes and stack margin -8 bytes; the 70-KiB idle floor is preserved with no
+  freeze or unexpected reset. No Device fixture existed, and the exact-owned WSL ELF was removed.
+- P4-04 completed at 2026-08-30 22:18:57 +03:00 after approximately 54 minutes. P4-05 is now the
+  only active row.

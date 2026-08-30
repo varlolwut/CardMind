@@ -373,6 +373,49 @@ cardputer::OperationResult runSshProfileStorageTest()
     if (!cleanedAgain.success) return cleanedAgain;
     return testResult;
 }
+cardputer::OperationResult runSshCommandOptionsTest()
+{
+    const cardputer::SshCommandArgumentsResult defaults =
+        cardputer::parseSshCommandArguments("{\"command\":\"printf ok\"}");
+    if (!defaults.success || defaults.command != "printf ok" ||
+        defaults.timeoutMs != cardputer::kDefaultSshCommandTimeoutMs ||
+        defaults.maximumInlineOutputBytes !=
+            cardputer::kDefaultSshCommandInlineOutputBytes) {
+        return {false, "SSH command option defaults are incorrect"};
+    }
+    const cardputer::SshCommandArgumentsResult boundaries =
+        cardputer::parseSshCommandArguments(
+            "{\"command\":\"true\",\"timeout_ms\":1000,"
+            "\"max_inline_output_bytes\":1}");
+    if (!boundaries.success || boundaries.timeoutMs != 1000 ||
+        boundaries.maximumInlineOutputBytes != 1) {
+        return {false, "SSH command option boundary values were not preserved"};
+    }
+    static constexpr const char* kInvalidArguments[] = {
+        "{\"command\":\"true\",\"timeout_ms\":999}",
+        "{\"command\":\"true\",\"timeout_ms\":60001}",
+        "{\"command\":\"true\",\"max_inline_output_bytes\":0}",
+        "{\"command\":\"true\",\"max_inline_output_bytes\":16385}",
+        "{\"command\":\"true\",\"timeout_ms\":\"1000\"}",
+        "{\"command\":\"true\",\"unexpected\":1}",
+    };
+    for (const char* invalidArguments : kInvalidArguments) {
+        const cardputer::SshCommandArgumentsResult rejected =
+            cardputer::parseSshCommandArguments(invalidArguments);
+        if (rejected.success || rejected.error.isEmpty()) {
+            return {false, "SSH command option validation accepted an invalid object"};
+        }
+    }
+    std::string output = "abc";
+    if (!cardputer::appendSshCommandOutput(output, "de", 2, 5) ||
+        output != "abcde" ||
+        cardputer::appendSshCommandOutput(output, "f", 1, 5) ||
+        !output.empty()) {
+        return {false, "SSH command overflow did not clear partial output"};
+    }
+    return {true, ""};
+}
+
 cardputer::OperationResult runSshSessionTest(bool testSftp)
 {
     cardputer::SshProfile profile;

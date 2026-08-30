@@ -5728,6 +5728,19 @@ void handleSerialCommand(const String& command)
                       result.success ? "none" : result.error.c_str());
         return;
     }
+    if (command == "SSHOPTIONSTEST") {
+        cardputer::markOperation("ssh_options_test");
+        const cardputer::OperationResult result = runSshCommandOptionsTest();
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SSHOPTIONSTEST result=%s heap=%u largest_heap=%u stack_free=%u error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
     if (command == "SSHSESSIONTEST" || command == "SFTPTEST") {
         ensureNetworkReady();
         cardputer::markOperation(command == "SFTPTEST" ? "sftp_test" : "ssh_session_test");

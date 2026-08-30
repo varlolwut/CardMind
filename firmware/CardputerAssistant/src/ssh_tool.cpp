@@ -1,15 +1,15 @@
 #include "ssh_tool.h"
 
 #include "ssh_client.h"
+#include "ssh_command_options.h"
 #include "text_utils.h"
 
 #include <ArduinoJson.h>
 
+#include <cstring>
+
 namespace cardputer {
 namespace {
-
-constexpr std::size_t kMaximumSshCommandOutputBytes = 16384;
-constexpr std::uint32_t kSshToolTimeoutMs = 60000;
 
 ToolExecutionResult toolError(const String& error)
 {
@@ -36,6 +36,17 @@ ToolExecutionResult toolCanceled(const String& error)
     };
 }
 
+ToolExecutionResult terminalStateResult(SshCommandTerminalState state,
+                                        std::uint32_t timeoutMs,
+                                        const String& stage)
+{
+    if (state == SshCommandTerminalState::UserCancelled) {
+        return toolCanceled(String("SSH command canceled ") + stage);
+    }
+    return toolError(String("SSH command timed out after ") + String(timeoutMs) +
+                     " ms " + stage);
+}
+
 }  // namespace
 
 bool isSshToolName(const std::string& name)
@@ -53,31 +64,78 @@ bool sshToolIsAvailable()
     return available;
 }
 
+SshCommandArgumentsResult parseSshCommandArguments(
+    const std::string& argumentsJson)
+{
+    JsonDocument arguments;
+    const DeserializationError parsed = deserializeJson(arguments, argumentsJson);
+    if (parsed || !arguments.is<JsonObject>()) {
+        return {false, "", 0, 0, "SSH tool arguments must be a JSON object"};
+    }
+    const JsonObjectConst input = arguments.as<JsonObjectConst>();
+    if (input.size() < 1 || input.size() > 3 ||
+        !input["command"].is<const char*>()) {
+        return {
+            false, "", 0, 0,
+            "SSH tool arguments require command and only its optional timeout/output fields",
+        };
+    }
+    for (JsonPairConst field : input) {
+        const char* name = field.key().c_str();
+        if (std::strcmp(name, "command") != 0 &&
+            std::strcmp(name, "timeout_ms") != 0 &&
+            std::strcmp(name, "max_inline_output_bytes") != 0) {
+            return {false, "", 0, 0, "SSH tool arguments contain an unknown field"};
+        }
+    }
+    const String command = input["command"].as<const char*>();
+    if (command.isEmpty() || command.length() > 1024 ||
+        !isValidUtf8(command.c_str())) {
+        return {
+            false, "", 0, 0,
+            "SSH command must be valid UTF-8 between 1 and 1024 bytes",
+        };
+    }
+    const bool hasTimeout = input.containsKey("timeout_ms");
+    const bool hasOutputLimit = input.containsKey("max_inline_output_bytes");
+    if ((hasTimeout && !input["timeout_ms"].is<std::uint32_t>()) ||
+        (hasOutputLimit &&
+         !input["max_inline_output_bytes"].is<std::size_t>())) {
+        return {false, "", 0, 0, "SSH command timeout/output options must be integers"};
+    }
+    const std::uint32_t timeoutMs = hasTimeout
+        ? input["timeout_ms"].as<std::uint32_t>()
+        : kDefaultSshCommandTimeoutMs;
+    const std::size_t maximumOutputBytes = hasOutputLimit
+        ? input["max_inline_output_bytes"].as<std::size_t>()
+        : kDefaultSshCommandInlineOutputBytes;
+    if (!isValidSshCommandTimeout(timeoutMs) ||
+        !isValidSshCommandInlineOutputLimit(maximumOutputBytes)) {
+        return {
+            false, "", 0, 0,
+            "SSH command timeout/output options are outside current limits",
+        };
+    }
+    return {true, command, timeoutMs, maximumOutputBytes, ""};
+}
+
 ToolExecutionResult executeSshTool(const ToolCall& call,
                                    const CancelCallback& isCancelled)
 {
     if (!isSshToolName(call.name)) {
         return toolError("Unsupported SSH tool name");
     }
-    bool cancelled = false;
-    const CancelCallback latchedCancellation = [&]() {
-        cancelled = cancelled || isCancelled();
-        return cancelled;
-    };
-    if (latchedCancellation()) {
+    if (isCancelled()) {
         return toolCanceled("SSH command canceled before connection");
     }
-    JsonDocument arguments;
-    const DeserializationError parsed = deserializeJson(arguments, call.arguments);
-    if (parsed || !arguments.is<JsonObject>() ||
-        !arguments["command"].is<const char*>() || arguments.as<JsonObject>().size() != 1) {
-        return toolError("SSH tool arguments require exactly one string field: command");
+    const SshCommandArgumentsResult arguments =
+        parseSshCommandArguments(call.arguments);
+    if (!arguments.success) {
+        return toolError(arguments.error);
     }
-    const String command = arguments["command"].as<const char*>();
-    if (command.isEmpty() || command.length() > 1024 ||
-        !isValidUtf8(command.c_str())) {
-        return toolError("SSH command must be valid UTF-8 between 1 and 1024 bytes");
-    }
+    const String& command = arguments.command;
+    const std::uint32_t timeoutMs = arguments.timeoutMs;
+    const std::size_t maximumOutputBytes = arguments.maximumInlineOutputBytes;
     SshProfile profile;
     OperationResult result = loadSshProfile(profile);
     if (!result.success || !sshProfileIsComplete(profile)) {
@@ -86,16 +144,42 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
         return toolError(result.success ? String("Selected SSH profile is incomplete")
                                         : result.error);
     }
+    SshCommandTerminalState terminalState = SshCommandTerminalState::None;
+    const std::uint32_t startedAt = millis();
+    const CancelCallback observeTerminalState = [&]() {
+        terminalState = observeSshCommandTerminalState(
+            terminalState, isCancelled(), startedAt, millis(), timeoutMs);
+        return terminalState != SshCommandTerminalState::None;
+    };
+    if (observeTerminalState()) {
+        profile.password = "";
+        profile.privateKeyPassphrase = "";
+        return terminalStateResult(terminalState, timeoutMs, "before connection");
+    }
     SshClient client;
     result = client.connectControlled(
-        profile, kSshToolTimeoutMs, latchedCancellation);
+        profile, timeoutMs, observeTerminalState);
+    observeTerminalState();
+    if (terminalState != SshCommandTerminalState::None) {
+        client.close();
+        profile.password = "";
+        profile.privateKeyPassphrase = "";
+        return terminalStateResult(terminalState, timeoutMs, "during connection");
+    }
     if (!result.success) {
         profile.password = "";
         profile.privateKeyPassphrase = "";
-        return cancelled ? toolCanceled(result.error) : toolError(result.error);
+        return toolError(result.error);
     }
     const SshTrustResult trust = checkTrustedSshHost(
         profile.host, profile.port, client.fingerprint());
+    observeTerminalState();
+    if (terminalState != SshCommandTerminalState::None) {
+        client.close();
+        profile.password = "";
+        profile.privateKeyPassphrase = "";
+        return terminalStateResult(terminalState, timeoutMs, "during host-key verification");
+    }
     if (!trust.success || !trust.found || !trust.matches) {
         client.close();
         profile.password = "";
@@ -105,27 +189,35 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
             : trust.error);
     }
     result = client.authenticateControlled(
-        profile, kSshToolTimeoutMs, latchedCancellation);
+        profile, timeoutMs, observeTerminalState);
+    observeTerminalState();
     profile.password = "";
     profile.privateKeyPassphrase = "";
+    if (terminalState != SshCommandTerminalState::None) {
+        client.close();
+        return terminalStateResult(terminalState, timeoutMs, "during authentication");
+    }
     if (!result.success) {
         client.close();
-        return cancelled ? toolCanceled(result.error) : toolError(result.error);
-    }
-    if (latchedCancellation()) {
-        client.close();
-        return toolCanceled("SSH command canceled before execution");
+        return toolError(result.error);
     }
     std::string commandOutput;
     int exitStatus = -1;
     result = client.executeCommandControlled(
-        command, commandOutput, exitStatus, kMaximumSshCommandOutputBytes,
-        kSshToolTimeoutMs, latchedCancellation);
+        command, commandOutput, exitStatus, maximumOutputBytes,
+        timeoutMs, observeTerminalState);
+    observeTerminalState();
     client.close();
+    if (terminalState != SshCommandTerminalState::None) {
+        std::string().swap(commandOutput);
+        return terminalStateResult(terminalState, timeoutMs, "during execution");
+    }
     if (!result.success) {
-        return cancelled ? toolCanceled(result.error) : toolError(result.error);
+        std::string().swap(commandOutput);
+        return toolError(result.error);
     }
     if (!isValidUtf8(commandOutput)) {
+        std::string().swap(commandOutput);
         return toolError("SSH command returned output that is not valid UTF-8");
     }
     JsonDocument document;

@@ -1,5 +1,7 @@
 #include "api_client.h"
 
+#include "ssh_command_options.h"
+
 #include "instruction_policy.h"
 #include "text_utils.h"
 
@@ -257,6 +259,24 @@ void addToolSchema(JsonArray tools, ToolSchemaId schema)
             parameters["properties"]["command"]["type"] = "string";
             parameters["properties"]["command"]["description"] =
                 "A single UTF-8 shell command, up to 1024 bytes.";
+            parameters["properties"]["timeout_ms"]["type"] = "integer";
+            parameters["properties"]["timeout_ms"]["minimum"] =
+                kMinimumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["maximum"] =
+                kMaximumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["default"] =
+                kDefaultSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["description"] =
+                "One total deadline in milliseconds from connection start through command completion.";
+            parameters["properties"]["max_inline_output_bytes"]["type"] = "integer";
+            parameters["properties"]["max_inline_output_bytes"]["minimum"] =
+                kMinimumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["maximum"] =
+                kMaximumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["default"] =
+                kDefaultSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["description"] =
+                "Maximum combined stdout and stderr bytes returned inline; overflow fails without partial output.";
             JsonArray required = parameters["required"].to<JsonArray>();
             required.add("command");
             break;

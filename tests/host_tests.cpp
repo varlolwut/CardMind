@@ -6,6 +6,7 @@
 #include "../firmware/CardputerAssistant/src/offline_tools.h"
 #include "../firmware/CardputerAssistant/src/pending_tool_preview.h"
 #include "../firmware/CardputerAssistant/src/ssh_terminal.h"
+#include "../firmware/CardputerAssistant/src/ssh_command_options.h"
 #include "../firmware/CardputerAssistant/src/tool_catalog.h"
 #include "../firmware/CardputerAssistant/src/tool_policy.h"
 #include "../firmware/CardputerAssistant/src/tool_policy_codec.h"
@@ -1835,6 +1836,58 @@ void testOfflineCalculator()
             "Calculator result formatting failed");
 }
 
+void testSshCommandOptions()
+{
+    const auto require = [](bool condition, const char* message) {
+        if (!condition) {
+            throw std::runtime_error(message);
+        }
+    };
+    using cardputer::SshCommandTerminalState;
+    require(cardputer::isValidSshCommandTimeout(1000),
+            "minimum SSH command timeout must be valid");
+    require(cardputer::isValidSshCommandTimeout(60000),
+            "maximum SSH command timeout must be valid");
+    require(!cardputer::isValidSshCommandTimeout(999) &&
+                !cardputer::isValidSshCommandTimeout(60001),
+            "SSH command timeout bounds must be exact");
+    require(cardputer::isValidSshCommandInlineOutputLimit(1) &&
+                cardputer::isValidSshCommandInlineOutputLimit(16384),
+            "SSH command output boundary values must be valid");
+    require(!cardputer::isValidSshCommandInlineOutputLimit(0) &&
+                !cardputer::isValidSshCommandInlineOutputLimit(16385),
+            "SSH command output bounds must be exact");
+    require(cardputer::kDefaultSshCommandTimeoutMs == 60000 &&
+                cardputer::kDefaultSshCommandInlineOutputBytes == 16384,
+            "SSH command defaults must match the public contract");
+
+    constexpr std::uint32_t startedAt = UINT32_MAX - 500U;
+    require(!cardputer::sshCommandDeadlineExpired(startedAt, 498U, 1000U) &&
+                cardputer::sshCommandDeadlineExpired(startedAt, 499U, 1000U),
+            "SSH command deadline must remain correct across millis wraparound");
+    require(cardputer::observeSshCommandTerminalState(
+                SshCommandTerminalState::None, true, startedAt, 499U, 1000U) ==
+                SshCommandTerminalState::UserCancelled,
+            "user cancellation must win when cancellation and timeout are first observed together");
+    require(cardputer::observeSshCommandTerminalState(
+                SshCommandTerminalState::TimedOut, true, startedAt, 499U, 1000U) ==
+                SshCommandTerminalState::TimedOut,
+            "the first observed SSH terminal state must remain latched");
+
+    require(cardputer::sshCommandOutputFits(10000, 6384, 16384),
+            "combined SSH output must fit exactly at the inline limit");
+    require(!cardputer::sshCommandOutputFits(10000, 6385, 16384) &&
+                !cardputer::sshCommandOutputFits(16385, 0, 16384),
+            "combined SSH output must reject overflow without unsigned underflow");
+    std::string output = "abc";
+    require(cardputer::appendSshCommandOutput(output, "de", 2, 5) &&
+                output == "abcde",
+            "SSH output append must preserve combined stream order at the exact cap");
+    require(!cardputer::appendSshCommandOutput(output, "f", 1, 5) &&
+                output.empty(),
+            "SSH output overflow must clear all partial output");
+}
+
 }  // namespace
 
 int main()
@@ -1871,6 +1924,7 @@ int main()
         testWorkspaceRouting();
         testWebSearchRouting();
         testSshTerminalFiltering();
+        testSshCommandOptions();
         testDocumentReader();
         testOfflineCalculator();
         std::cout << "host_tests: PASS\n";
