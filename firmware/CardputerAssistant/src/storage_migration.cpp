@@ -271,7 +271,7 @@ OperationResult compareLegacyMigration(const String& projectId,
             migrated.chat.summary.revision != 1 ||
             migrated.chat.instructions != source.chat.instructions ||
             migrated.chat.draft != source.chat.draft ||
-            migrated.chat.sshToolsEnabled != source.chat.sshToolsEnabled ||
+            migrated.chat.toolPolicy != source.chat.toolPolicy ||
             !migrated.chat.contextSummary.empty() ||
             migrated.chat.summarizedMessageCount != 0) {
             return {false, "Migrated chat metadata does not match legacy chat " + summary.id};

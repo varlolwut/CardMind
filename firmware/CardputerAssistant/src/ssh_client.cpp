@@ -555,35 +555,82 @@ bool sshPrivateKeyIsInstalled()
     return validSize;
 }
 
-SshTrustResult checkTrustedSshHost(const String& host, std::uint16_t port,
-                                   const String& fingerprint)
+OperationResult loadTrustedSshFingerprint(const String& host,
+                                          std::uint16_t port,
+                                          String& fingerprint,
+                                          bool& found)
 {
-    if (!isValidSshHost(host) || port == 0 || !isValidSshFingerprint(fingerprint)) {
-        return {false, false, false, "", "SSH trust lookup received invalid host data"};
+    fingerprint = "";
+    found = false;
+    if (!isValidSshHost(host) || port == 0) {
+        return {false, "SSH trust lookup received invalid host data"};
     }
     File file = SD.open(kSshKnownHostsPath, FILE_READ);
     if (!file) {
-        return {true, false, false, "", ""};
+        return {true, ""};
     }
     if (file.isDirectory() || file.size() > kMaximumKnownHostsBytes) {
         file.close();
-        return {false, false, false, "", "SSH known-hosts file is invalid or too large"};
+        return {false, "SSH known-hosts file is invalid or too large"};
     }
     const String prefix = knownHostPrefix(host, port);
     while (file.available()) {
         String line = file.readStringUntil('\n');
         line.trim();
         if (line.startsWith(prefix)) {
-            const String trusted = line.substring(prefix.length());
+            fingerprint = line.substring(prefix.length());
             file.close();
-            if (!isValidSshFingerprint(trusted)) {
-                return {false, true, false, "", "Stored SSH host fingerprint is invalid"};
+            if (!isValidSshFingerprint(fingerprint)) {
+                fingerprint = "";
+                return {false, "Stored SSH host fingerprint is invalid"};
             }
-            return {true, true, trusted == fingerprint, trusted, ""};
+            found = true;
+            return {true, ""};
         }
     }
     file.close();
-    return {true, false, false, "", ""};
+    return {true, ""};
+}
+
+namespace {
+
+template <typename Attempt>
+int runUntilCompleteControlled(
+    Attempt attempt,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled,
+    bool& cancelled)
+{
+    const std::uint32_t deadline = millis() + timeoutMs;
+    int result = LIBSSH2_ERROR_EAGAIN;
+    while (result == LIBSSH2_ERROR_EAGAIN &&
+           static_cast<std::int32_t>(deadline - millis()) > 0) {
+        if (isCancelled()) {
+            cancelled = true;
+            return LIBSSH2_ERROR_TIMEOUT;
+        }
+        result = attempt();
+        delay(5);
+    }
+    return result == LIBSSH2_ERROR_EAGAIN ? LIBSSH2_ERROR_TIMEOUT : result;
+}
+
+}  // namespace
+
+SshTrustResult checkTrustedSshHost(const String& host, std::uint16_t port,
+                                   const String& fingerprint)
+{
+    if (!isValidSshFingerprint(fingerprint)) {
+        return {false, false, false, "", "SSH trust lookup received invalid host data"};
+    }
+    String trusted;
+    bool found = false;
+    const OperationResult loaded = loadTrustedSshFingerprint(
+        host, port, trusted, found);
+    if (!loaded.success) {
+        return {false, found, false, "", loaded.error};
+    }
+    return {true, found, found && trusted == fingerprint, trusted, ""};
 }
 
 OperationResult trustSshHost(const String& host, std::uint16_t port,
@@ -863,6 +910,15 @@ SshClient::~SshClient()
 
 OperationResult SshClient::connect(const SshProfile& profile, std::uint32_t timeoutMs)
 {
+    const std::function<bool()> isCancelled = []() { return false; };
+    return connectControlled(profile, timeoutMs, isCancelled);
+}
+
+OperationResult SshClient::connectControlled(
+    const SshProfile& profile,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
     if (implementation_ == nullptr) {
         return {false, "Failed to allocate SSH client state"};
     }
@@ -871,6 +927,12 @@ OperationResult SshClient::connect(const SshProfile& profile, std::uint32_t time
     }
     if (timeoutMs < 1000 || timeoutMs > 120000) {
         return {false, "SSH timeout must be between 1000 and 120000 ms"};
+    }
+    if (!isCancelled) {
+        return {false, "SSH connection requires a cancellation callback"};
+    }
+    if (isCancelled()) {
+        return {false, "SSH connection canceled by user"};
     }
     close();
     if (libssh2_init(0) != 0) {
@@ -882,6 +944,10 @@ OperationResult SshClient::connect(const SshProfile& profile, std::uint32_t time
                                            static_cast<int32_t>(timeoutMs))) {
         close();
         return {false, "TCP connection to SSH host failed"};
+    }
+    if (isCancelled()) {
+        close();
+        return {false, "SSH connection canceled by user"};
     }
     implementation_->allocator.failedAllocationBytes = 0;
     const std::size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -907,11 +973,16 @@ OperationResult SshClient::connect(const SshProfile& profile, std::uint32_t time
         close();
         return {false, error};
     }
-    const int handshake = runUntilComplete(
+    bool cancelled = false;
+    const int handshake = runUntilCompleteControlled(
         [this]() {
             return libssh2_session_handshake(
                 implementation_->session, implementation_->network.fd());
-        }, timeoutMs);
+        }, timeoutMs, isCancelled, cancelled);
+    if (cancelled) {
+        close();
+        return {false, "SSH connection canceled by user"};
+    }
     if (handshake != 0) {
         const String error = sessionError(
             implementation_->session, "SSH handshake", handshake);
@@ -932,29 +1003,50 @@ OperationResult SshClient::connect(const SshProfile& profile, std::uint32_t time
 OperationResult SshClient::authenticate(const SshProfile& profile,
                                         std::uint32_t timeoutMs)
 {
+    const std::function<bool()> isCancelled = []() { return false; };
+    return authenticateControlled(profile, timeoutMs, isCancelled);
+}
+
+OperationResult SshClient::authenticateControlled(
+    const SshProfile& profile,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
     if (implementation_ == nullptr || implementation_->session == nullptr) {
         return {false, "SSH session is not connected"};
     }
+    if (!isCancelled) {
+        return {false, "SSH authentication requires a cancellation callback"};
+    }
+    if (isCancelled()) {
+        close();
+        return {false, "SSH authentication canceled by user"};
+    }
     int authentication = 0;
+    bool cancelled = false;
     if (profile.authMode == SshAuthMode::Password) {
-        authentication = runUntilComplete(
+        authentication = runUntilCompleteControlled(
             [this, &profile]() {
                 return libssh2_userauth_password_ex(
                     implementation_->session, profile.username.c_str(),
                     static_cast<unsigned int>(profile.username.length()),
                     profile.password.c_str(),
                     static_cast<unsigned int>(profile.password.length()), nullptr);
-            }, timeoutMs);
+            }, timeoutMs, isCancelled, cancelled);
     } else {
         const char* passphrase = profile.privateKeyPassphrase.isEmpty()
             ? nullptr : profile.privateKeyPassphrase.c_str();
-        authentication = runUntilComplete(
+        authentication = runUntilCompleteControlled(
             [this, &profile, passphrase]() {
                 return libssh2_userauth_publickey_fromfile_ex(
                     implementation_->session, profile.username.c_str(),
                     static_cast<unsigned int>(profile.username.length()), nullptr,
                     kSshPrivateKeyVfsPath, passphrase);
-            }, timeoutMs);
+            }, timeoutMs, isCancelled, cancelled);
+    }
+    if (cancelled) {
+        close();
+        return {false, "SSH authentication canceled by user"};
     }
     if (authentication != 0) {
         const String error = sessionError(
@@ -1082,6 +1174,20 @@ OperationResult SshClient::executeCommand(const String& command,
                                           std::size_t maximumOutputBytes,
                                           std::uint32_t timeoutMs)
 {
+    const std::function<bool()> isCancelled = []() { return false; };
+    return executeCommandControlled(
+        command, output, exitStatus, maximumOutputBytes, timeoutMs,
+        isCancelled);
+}
+
+OperationResult SshClient::executeCommandControlled(
+    const String& command,
+    std::string& output,
+    int& exitStatus,
+    std::size_t maximumOutputBytes,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled)
+{
     output.clear();
     exitStatus = -1;
     if (implementation_ == nullptr || implementation_->session == nullptr) {
@@ -1099,9 +1205,18 @@ OperationResult SshClient::executeCommand(const String& command,
     if (timeoutMs < 1000 || timeoutMs > 120000) {
         return {false, "SSH command timeout must be between 1000 and 120000 ms"};
     }
+    if (!isCancelled) {
+        return {false, "SSH command requires a cancellation callback"};
+    }
+    if (isCancelled()) {
+        return {false, "SSH command canceled by user"};
+    }
     const std::uint32_t deadline = millis() + timeoutMs;
     while (implementation_->channel == nullptr &&
            static_cast<std::int32_t>(deadline - millis()) > 0) {
+        if (isCancelled()) {
+            return {false, "SSH command canceled by user"};
+        }
         implementation_->channel = libssh2_channel_open_session(implementation_->session);
         if (implementation_->channel == nullptr &&
             libssh2_session_last_errno(implementation_->session) != LIBSSH2_ERROR_EAGAIN) {
@@ -1114,10 +1229,14 @@ OperationResult SshClient::executeCommand(const String& command,
     if (implementation_->channel == nullptr) {
         return {false, "SSH command channel open timed out"};
     }
-    const int started = runUntilComplete(
+    bool cancelled = false;
+    const int started = runUntilCompleteControlled(
         [this, &command]() {
             return libssh2_channel_exec(implementation_->channel, command.c_str());
-        }, timeoutMs);
+        }, timeoutMs, isCancelled, cancelled);
+    if (cancelled) {
+        return {false, "SSH command canceled by user"};
+    }
     if (started != 0) {
         return {false, sessionError(implementation_->session,
                                     "SSH command execution", started)};
@@ -1125,6 +1244,9 @@ OperationResult SshClient::executeCommand(const String& command,
     std::uint8_t buffer[1024] = {};
     const std::uint32_t readDeadline = millis() + timeoutMs;
     while (static_cast<std::int32_t>(readDeadline - millis()) > 0) {
+        if (isCancelled()) {
+            return {false, "SSH command canceled by user"};
+        }
         bool progressed = false;
         for (int streamId = 0; streamId <= 1; ++streamId) {
             const ssize_t bytes = libssh2_channel_read_ex(

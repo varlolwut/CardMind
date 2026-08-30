@@ -394,10 +394,13 @@ bool extractSseData(const std::string& line, std::string& data)
     return true;
 }
 
-bool isValidUtf8(const std::string& value)
+bool isValidUtf8(const char* value, std::size_t size)
 {
+    if (value == nullptr) {
+        return false;
+    }
     std::size_t index = 0;
-    while (index < value.size()) {
+    while (index < size) {
         const auto first = static_cast<std::uint8_t>(value[index]);
         std::size_t length = 0;
         std::uint32_t codePoint = 0;
@@ -416,7 +419,7 @@ bool isValidUtf8(const std::string& value)
         } else {
             return false;
         }
-        if (index + length > value.size()) {
+        if (index + length > size) {
             return false;
         }
         for (std::size_t offset = 1; offset < length; ++offset) {
@@ -437,6 +440,11 @@ bool isValidUtf8(const std::string& value)
         index += length;
     }
     return true;
+}
+
+bool isValidUtf8(const std::string& value)
+{
+    return isValidUtf8(value.data(), value.size());
 }
 
 std::string buildVersionedApiUrl(const std::string& baseUrl, const std::string& versionedPath)
@@ -599,6 +607,17 @@ std::size_t firstMessageWithinByteBudget(const std::vector<Message>& messages,
     return firstRetained;
 }
 
+std::size_t firstUnsummarizedTailMessage(const ChatDocument& chat)
+{
+    const std::uint32_t tailCount = static_cast<std::uint32_t>(chat.messages.size());
+    const std::uint32_t tailStart = chat.summary.messageCount > tailCount
+        ? chat.summary.messageCount - tailCount : 0;
+    return chat.summarizedMessageCount > tailStart
+        ? std::min<std::uint32_t>(
+              tailCount, chat.summarizedMessageCount - tailStart)
+        : 0;
+}
+
 }  // namespace
 
 ContextWindowResult fitMessagesToByteBudget(const std::vector<Message>& messages,
@@ -670,10 +689,13 @@ std::uint32_t resolveRequestOutputTokens(std::uint32_t projectTokens,
 ResolvedProjectRequestPolicy resolveProjectRequestPolicy(
     const Settings& settings,
     const ProjectDocument& project,
+    const ChatDocument& chat,
     std::uint32_t requestOutputTokens)
 {
     return {
-        project.model.length() == 0 ? settings.model : project.model,
+        chat.model.length() != 0
+            ? chat.model
+            : (project.model.length() == 0 ? settings.model : project.model),
         project.contextByteBudget,
         resolveRequestOutputTokens(
             project.maximumOutputTokens, requestOutputTokens),
@@ -758,15 +780,20 @@ std::vector<Message> unsummarizedChatTail(const ChatDocument& chat)
     if (chat.messages.empty()) {
         return {};
     }
-    const std::uint32_t tailCount = static_cast<std::uint32_t>(chat.messages.size());
-    const std::uint32_t tailStart = chat.summary.messageCount > tailCount
-        ? chat.summary.messageCount - tailCount : 0;
-    const std::uint32_t coveredInTail = chat.summarizedMessageCount > tailStart
-        ? std::min<std::uint32_t>(
-              tailCount, chat.summarizedMessageCount - tailStart)
-        : 0;
     return std::vector<Message>(
-        chat.messages.begin() + coveredInTail, chat.messages.end());
+        chat.messages.begin() + firstUnsummarizedTailMessage(chat),
+        chat.messages.end());
+}
+
+std::vector<Message> takeUnsummarizedChatTail(ChatDocument chat)
+{
+    if (chat.messages.empty()) {
+        return {};
+    }
+    chat.messages.erase(
+        chat.messages.begin(),
+        chat.messages.begin() + firstUnsummarizedTailMessage(chat));
+    return std::move(chat.messages);
 }
 
 ContextSummaryPromptResult buildContextSummaryPrompt(

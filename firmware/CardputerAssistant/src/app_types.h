@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "tool_policy_codec.h"
+
 #ifdef ARDUINO
 #include <Arduino.h>
 #else
@@ -40,6 +42,8 @@ struct Settings {
     std::uint16_t keyboardRepeatMs;
     std::uint8_t powerProfile;
     std::uint32_t projectChatHistoryQuotaBytes;
+    ToolPermissionPolicy masterToolPolicy = defaultGlobalToolPermissionPolicy();
+    ScopedToolPermissionPolicy newChatToolPolicy = defaultNewChatToolPermissionPolicy();
 };
 
 struct Message {
@@ -58,10 +62,16 @@ struct ModelsResult {
     String error;
 };
 
+enum class ChatCompletionOutcome : std::uint8_t {
+    Finished,
+    AwaitingConfirmation,
+};
+
 struct ChatResult {
     bool success;
     std::string response;
     String error;
+    ChatCompletionOutcome outcome = ChatCompletionOutcome::Finished;
 };
 
 struct ToolCall {
@@ -70,10 +80,19 @@ struct ToolCall {
     std::string arguments;
 };
 
+enum class ToolExecutionOutcome : std::uint8_t {
+    Finished,
+    AwaitingConfirmation,
+    Cancelled,
+};
+
 struct ToolExecutionResult {
     bool success;
     std::string output;
     String error;
+    ToolExecutionOutcome outcome = ToolExecutionOutcome::Finished;
+    bool hasExitStatus = false;
+    int exitStatus = 0;
 };
 
 struct WorkspaceFile {
@@ -130,10 +149,11 @@ struct ChatDocument {
     std::vector<Message> messages;
     std::string instructions;
     std::string draft;
-    bool sshToolsEnabled = false;
+    ScopedToolPermissionPolicy toolPolicy = defaultNewChatToolPermissionPolicy();
     String projectId;
     std::string contextSummary;
     std::uint32_t summarizedMessageCount = 0;
+    String model;
 };
 
 struct WorkspaceFilesPageResult {
@@ -172,7 +192,7 @@ struct ProjectDocument {
     String activeChatId;
     String model;
     String apiProfile;
-    String toolPolicy;
+    ScopedToolPermissionPolicy toolPolicy = inheritedToolPermissionPolicy();
     String sshProfile;
     std::uint32_t contextByteBudget = 32768;
     std::uint32_t maximumOutputTokens = 1024;

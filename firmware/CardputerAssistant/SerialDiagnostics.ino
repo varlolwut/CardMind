@@ -1,5 +1,33 @@
 namespace {
 
+cardputer::ToolPermissionPolicy diagnosticMasterToolPolicy()
+{
+    return {
+        cardputer::ToolPermission::Ask,
+        cardputer::ToolPermission::Allow,
+        cardputer::ToolPermission::Off,
+        cardputer::ToolPermission::Ask,
+        cardputer::ToolPermission::Allow,
+        cardputer::ToolPermission::Ask,
+        cardputer::ToolPermission::Off,
+        cardputer::ToolPermission::Allow,
+    };
+}
+
+cardputer::ScopedToolPermissionPolicy diagnosticScopedToolPolicy()
+{
+    return {
+        cardputer::ScopedToolPermission::Inherit,
+        cardputer::ScopedToolPermission::Off,
+        cardputer::ScopedToolPermission::Ask,
+        cardputer::ScopedToolPermission::Allow,
+        cardputer::ScopedToolPermission::Ask,
+        cardputer::ScopedToolPermission::Allow,
+        cardputer::ScopedToolPermission::Off,
+        cardputer::ScopedToolPermission::Inherit,
+    };
+}
+
 bool runPureSelfTest()
 {
     const bool utf8Backspace = cardputer::removeLastUtf8CodePoint("Aя") == "A";
@@ -140,21 +168,47 @@ void runWebSearchRoundTripTest()
     const std::vector<cardputer::Message> testHistory = {
         {"user", "/search Call web_search exactly once with JSON query \"Cardputer Zero\", then summarize its result."},
     };
-    const cardputer::ChatToolPolicy toolPolicy = cardputer::resolveChatToolPolicy(
-        settings, testHistory.front().content, false, false);
+    cardputer::Settings requestSettings = settings;
+    requestSettings.masterToolPolicy =
+        cardputer::defaultGlobalToolPermissionPolicy();
+    cardputer::ProjectDocument project = {};
+    project.toolPolicy = cardputer::inheritedToolPermissionPolicy();
+    cardputer::ChatDocument chat = {};
+    chat.toolPolicy = cardputer::inheritedToolPermissionPolicy();
+    const std::uint8_t webGroup = static_cast<std::uint8_t>(
+        1U << static_cast<std::uint8_t>(cardputer::ToolCapabilityGroup::Web));
+    const bool webStorageWritable = cardputer::requireSdWriteAccess(
+        0, cardputer::kStorageOperationalFloorBytes).success;
+    const cardputer::ToolRequestPlan requestPlan =
+        cardputer::resolveChatToolRequestPlan(
+            requestSettings, project, chat,
+            {cardputer::ToolMessageIntentMode::Required, webGroup},
+            false, false, webStorageWritable, false);
+    const String planError = toolRequestPlanError(requestPlan);
+    if (!planError.isEmpty()) {
+        Serial.printf(
+            "SEARCHTEST result=failed search_called=no tool=none response_bytes=0 error=%s\n",
+            planError.c_str());
+        return;
+    }
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
-        settings, testHistory, "", false, [](const std::string&) {},
-        [&searchCalled, &observedToolName, &toolPolicy](const cardputer::ToolCall& call) {
+        requestSettings, testHistory, "", requestPlan, [](const std::string&) {},
+        [&requestSettings, &searchCalled, &observedToolName,
+         &requestPlan](const cardputer::ToolCall& call) {
             if (observedToolName.isEmpty()) {
                 observedToolName = String(call.name.c_str());
             }
-            if (cardputer::isWebSearchToolName(call.name)) {
+            const cardputer::ToolExecutionResult execution =
+                cardputer::routeToolCall(
+                requestSettings, requestPlan, call, []() { return false; });
+            if (call.name == "web_search" && execution.success) {
                 searchCalled = true;
-                return cardputer::executeWebSearchTool(
-                    settings, call, []() { return false; });
             }
-            return cardputer::routeToolCall(
-                settings, toolPolicy, call, []() { return false; });
+            return execution;
+        },
+        [](const cardputer::PendingToolContinuation&) {
+            return cardputer::OperationResult{
+                false, "SEARCHTEST did not authorize confirmation"};
         }, []() { return false; });
     const String safeError = serialSafeError(result.error, 180);
     Serial.printf("SEARCHTEST result=%s search_called=%s tool=%s response_bytes=%u error=%s\n",
@@ -201,7 +255,8 @@ void runStorageTest()
     cardputer::ChatDocument document = created.chat;
     document.messages = {{"user", "test"}, {"assistant", "OK"}};
     document.instructions = "Reply briefly.";
-    document.sshToolsEnabled = true;
+    document.toolPolicy = cardputer::setLegacySshToolsEnabled(
+        document.toolPolicy, true);
     Serial.println("STORAGETEST stage=chat_save");
     const cardputer::OperationResult saved = cardputer::saveChat(document);
     Serial.println("STORAGETEST stage=chat_load");
@@ -210,7 +265,8 @@ void runStorageTest()
         : cardputer::ChatDocumentResult{false, {}, saved.error};
     const bool chatVerified = loaded.success && loaded.chat.messages.size() == 2 &&
         loaded.chat.messages[1].content == "OK" &&
-        loaded.chat.instructions == "Reply briefly." && loaded.chat.sshToolsEnabled;
+        loaded.chat.instructions == "Reply briefly." &&
+        cardputer::legacySshToolsEnabled(loaded.chat.toolPolicy);
     Serial.println("STORAGETEST stage=chat_delete");
     const cardputer::OperationResult chatCleanup = cardputer::deleteChat(document.summary.id);
     if (!chatVerified || !chatCleanup.success) {
@@ -286,7 +342,12 @@ void runHotfixInputLatencyTest()
     for (std::uint32_t index = 0; index < kFullIterations; ++index) {
         cardputer::showChat(
             benchmarkHistory, "", inputBuffer, keyboardLayout, activeChatTitle,
-            statusMessage, 0, WiFi.status() == WL_CONNECTED, batteryLevel,
+            statusMessage, 0,
+            {cardputer::ChatCapabilityState::Inherit,
+             cardputer::ChatCapabilityState::Inherit,
+             cardputer::ChatCapabilityState::Inherit,
+             cardputer::ChatCapabilityState::Inherit},
+            WiFi.status() == WL_CONNECTED, batteryLevel,
             batteryCharging);
     }
     const std::uint32_t fullElapsedUs = micros() - fullStartedAt;
@@ -2079,7 +2140,8 @@ void runProjectSchemaTest()
     String activeChatId;
     for (std::size_t index = 0; result.success && index < kTestChatCount; ++index) {
         const cardputer::ChatDocumentResult chat = cardputer::createProjectChat(
-            projectId, "Schema chat " + String(index + 1));
+            projectId, "Schema chat " + String(index + 1),
+            cardputer::defaultNewChatToolPermissionPolicy());
         if (!chat.success) {
             result = {false, chat.error};
             break;
@@ -2185,12 +2247,19 @@ void runProjectParityTest()
         SD.remove(bundlePath);
     }
     cardputer::OperationResult result = {true, ""};
+    const cardputer::ScopedToolPermissionPolicy projectPolicy =
+        diagnosticScopedToolPolicy();
+    const cardputer::ScopedToolPermissionPolicy chatPolicy =
+        cardputer::setLegacySshToolsEnabled(
+            diagnosticScopedToolPolicy(), true);
     cardputer::ProjectDocumentResult source = cardputer::createProject("Parity source");
     if (!source.success) {
         result = {false, source.error};
     }
     cardputer::ChatDocumentResult chat = result.success
-        ? cardputer::createProjectChat(source.project.summary.id, "Parity chat")
+        ? cardputer::createProjectChat(
+              source.project.summary.id, "Parity chat",
+              chatPolicy)
         : cardputer::ChatDocumentResult{false, {}, result.error};
     if (result.success && !chat.success) {
         result = {false, chat.error};
@@ -2220,6 +2289,7 @@ void runProjectParityTest()
         source.project.maximumOutputTokens = 2048;
         source.project.automaticCompaction = false;
         source.project.activeChatId = chat.chat.summary.id;
+        source.project.toolPolicy = projectPolicy;
         result = cardputer::saveProject(source.project);
     }
     if (result.success) {
@@ -2253,7 +2323,9 @@ void runProjectParityTest()
                            storedDuplicate.project.instructions != "Parity instructions" ||
                            storedDuplicate.project.contextByteBudget != 65536 ||
                            storedDuplicate.project.maximumOutputTokens != 2048 ||
-                           storedDuplicate.project.automaticCompaction)) {
+                           storedDuplicate.project.automaticCompaction ||
+                           storedDuplicate.project.toolPolicy != projectPolicy ||
+                           duplicateChat.chat.toolPolicy != chatPolicy)) {
         result = {false, "Duplicated project content verification failed"};
     }
     if (result.success) {
@@ -2271,9 +2343,13 @@ void runProjectParityTest()
     const cardputer::SharedFileLinkResult importedLink = result.success
         ? cardputer::projectHasSharedFileLink(imported.project.summary.id, sharedName)
         : cardputer::SharedFileLinkResult{false, false, result.error};
+    const cardputer::ScopedToolPermissionPolicy importedChatPolicy =
+        cardputer::setLegacySshToolsEnabled(chatPolicy, false);
     if (result.success && (!importedChat.success || importedChat.chat.messages.size() != 2 ||
                            !importedLink.success || !importedLink.linked ||
-                           imported.project.instructions != "Parity instructions")) {
+                           imported.project.instructions != "Parity instructions" ||
+                           imported.project.toolPolicy != projectPolicy ||
+                           importedChat.chat.toolPolicy != importedChatPolicy)) {
         result = {false, "Imported project content verification failed"};
     }
     bool uiRoutesReady = false;
@@ -2283,8 +2359,10 @@ void runProjectParityTest()
             result = refreshed;
         } else {
             openProjectActions(source.project.summary);
-            const bool renameRoute = projectActionItems().size() == 11 &&
-                projectActionItems()[6] == "Rename project";
+            const std::vector<String> actions = projectActionItems();
+            const bool renameRoute = actions.size() == 12 &&
+                actions[6] == "Rename project" &&
+                actions[10] == "Capability policies";
             openProjectImportList();
             const bool importRoute = currentScreen == Screen::WorkspaceFileList &&
                 workspaceListMode == WorkspaceListMode::ImportProject;
@@ -2751,7 +2829,8 @@ cardputer::OperationResult validateP2SharedPartialProject(
             loaded.project.activeChatId.isEmpty() &&
             loaded.project.model.isEmpty() &&
             loaded.project.apiProfile.isEmpty() &&
-            loaded.project.toolPolicy.isEmpty() &&
+            loaded.project.toolPolicy ==
+                cardputer::inheritedToolPermissionPolicy() &&
             loaded.project.sshProfile.isEmpty() &&
             loaded.project.contextByteBudget == 32768 &&
             loaded.project.maximumOutputTokens == 1024 &&
@@ -2982,9 +3061,7 @@ cardputer::ToolExecutionResult runP2SharedProjectTool(
     const String& projectId,
     const cardputer::ToolCall& call)
 {
-    const cardputer::ChatToolPolicy policy = {true, false, false};
-    return cardputer::routeProjectToolCall(
-        settings, policy, projectId, call, []() { return false; });
+    return cardputer::executeProjectWorkspaceTool(projectId, call);
 }
 
 void runP2SharedCleanup(const String& nonce)
@@ -3214,10 +3291,13 @@ void runProjectChatIsolationTest()
         result = {false, project.error};
     }
     const std::vector<String> titles = {"Alpha", "Beta", "Gamma"};
+    const cardputer::ScopedToolPermissionPolicy policy =
+        diagnosticScopedToolPolicy();
     std::vector<cardputer::ChatDocument> expected;
     for (std::size_t index = 0; result.success && index < titles.size(); ++index) {
         cardputer::ChatDocumentResult created = cardputer::createProjectChat(
-            project.project.summary.id, titles[index]);
+            project.project.summary.id, titles[index],
+            policy);
         if (!created.success) {
             result = {false, created.error};
             break;
@@ -3225,7 +3305,6 @@ void runProjectChatIsolationTest()
         created.chat.instructions = "instruction-" + std::to_string(index);
         created.chat.draft = "draft-" + std::to_string(index);
         created.chat.contextSummary = "summary-" + std::to_string(index);
-        created.chat.sshToolsEnabled = index == 2;
         result = cardputer::saveProjectChatMetadata(created.chat);
         if (result.success) {
             result = cardputer::appendProjectChatMessages(
@@ -3247,7 +3326,7 @@ void runProjectChatIsolationTest()
             loaded.chat.instructions != "instruction-" + suffix ||
             loaded.chat.draft != "draft-" + suffix ||
             loaded.chat.contextSummary != "summary-" + suffix ||
-            loaded.chat.sshToolsEnabled != (index == 2) ||
+            loaded.chat.toolPolicy != policy ||
             loaded.chat.messages.size() != 2 ||
             loaded.chat.messages[0].content != "question-" + suffix ||
             loaded.chat.messages[1].content != "answer-" + suffix) {
@@ -3286,7 +3365,9 @@ void runRetryPersistenceTest()
     const cardputer::ProjectDocumentResult project = cardputer::createProject(
         "Retry persistence");
     const cardputer::ChatDocumentResult chat = project.success
-        ? cardputer::createProjectChat(project.project.summary.id, "Retry target")
+        ? cardputer::createProjectChat(
+              project.project.summary.id, "Retry target",
+              cardputer::defaultNewChatToolPermissionPolicy())
         : cardputer::ChatDocumentResult{false, {}, project.error};
     if (!project.success || !chat.success) {
         result = {false, project.success ? chat.error : project.error};
@@ -3353,7 +3434,9 @@ void runCompactionPersistenceTest()
     const cardputer::ProjectDocumentResult project = cardputer::createProject(
         "Compaction persistence");
     const cardputer::ChatDocumentResult chat = project.success
-        ? cardputer::createProjectChat(project.project.summary.id, "Compaction target")
+        ? cardputer::createProjectChat(
+              project.project.summary.id, "Compaction target",
+              cardputer::defaultNewChatToolPermissionPolicy())
         : cardputer::ChatDocumentResult{false, {}, project.error};
     if (!project.success || !chat.success) {
         result = {false, project.success ? chat.error : project.error};
@@ -3801,7 +3884,9 @@ void runP2ArchiveTest(const String& nonce)
         result = {false, project.error};
     }
     const cardputer::ChatDocumentResult chat = result.success
-        ? cardputer::createProjectChat(projectId, "Archive boundary")
+        ? cardputer::createProjectChat(
+              projectId, "Archive boundary",
+              cardputer::defaultNewChatToolPermissionPolicy())
         : cardputer::ChatDocumentResult{false, {}, result.error};
     if (result.success && !chat.success) {
         result = {false, chat.error};
@@ -3984,7 +4069,8 @@ void runP2SummaryTest(const String& nonce)
         project = cardputer::createProject("P2 summary " + nonce);
         const cardputer::ChatDocumentResult chat = project.success
             ? cardputer::createProjectChat(
-                  project.project.summary.id, "P2 summary target")
+                  project.project.summary.id, "P2 summary target",
+                  cardputer::defaultNewChatToolPermissionPolicy())
             : cardputer::ChatDocumentResult{false, {}, project.error};
         cardputer::OperationResult result = project.success && chat.success
             ? cardputer::OperationResult{true, ""}
@@ -4081,7 +4167,9 @@ void runPhaseTwoLimitTest()
     const cardputer::ProjectDocumentResult project =
         cardputer::createProject("P2 limit boundaries");
     const cardputer::ChatDocumentResult chat = project.success
-        ? cardputer::createProjectChat(project.project.summary.id, "Boundary chat")
+        ? cardputer::createProjectChat(
+              project.project.summary.id, "Boundary chat",
+              cardputer::defaultNewChatToolPermissionPolicy())
         : cardputer::ChatDocumentResult{false, {}, project.error};
     if (!project.success || !chat.success) {
         result = {false, project.success ? chat.error : project.error};
@@ -4216,8 +4304,9 @@ void runInstructionPrecedenceTest()
     project.contextByteBudget = 32768;
     project.maximumOutputTokens = 2048;
     project.automaticCompaction = true;
+    const cardputer::ChatDocument chat = {};
     const cardputer::ResolvedProjectRequestPolicy policy =
-        cardputer::resolveProjectRequestPolicy(fixtureSettings, project, 0);
+        cardputer::resolveProjectRequestPolicy(fixtureSettings, project, chat, 0);
     const cardputer::ChatRequestSerializationValidation validation =
         cardputer::validateChatRequestSerialization(
             fixtureSettings, policy, "global-marker", "project-marker",
@@ -4263,10 +4352,12 @@ void runP2RequestSettingsTest(const String& nonce)
         project.contextByteBudget = 65536;
         project.maximumOutputTokens = 4096;
         project.automaticCompaction = true;
+        const cardputer::ChatDocument chat = {};
         const cardputer::ResolvedProjectRequestPolicy projectPolicy =
-            cardputer::resolveProjectRequestPolicy(fixtureSettings, project, 0);
+            cardputer::resolveProjectRequestPolicy(fixtureSettings, project, chat, 0);
         const cardputer::ResolvedProjectRequestPolicy requestPolicy =
-            cardputer::resolveProjectRequestPolicy(fixtureSettings, project, 8192);
+            cardputer::resolveProjectRequestPolicy(
+                fixtureSettings, project, chat, 8192);
         const cardputer::ChatRequestSerializationValidation projectValidation =
             cardputer::validateChatRequestSerialization(
                 fixtureSettings, projectPolicy, "p2-global-marker",
@@ -4379,7 +4470,8 @@ void runChatQolTest()
     source.instructions = "Be concise.";
     source.draft = "unfinished";
     source.summary.pinned = true;
-    source.sshToolsEnabled = true;
+    source.toolPolicy = cardputer::setLegacySshToolsEnabled(
+        diagnosticScopedToolPolicy(), true);
     const std::vector<cardputer::Message> archivedMessages = {
         {"user", "old"}, {"assistant", "reply"},
     };
@@ -4395,7 +4487,7 @@ void runChatQolTest()
     if (result.success && (!loaded.success || !loaded.chat.summary.pinned ||
                            loaded.chat.summary.archivedMessageCount != 2 ||
                            loaded.chat.draft != "unfinished" ||
-                           !loaded.chat.sshToolsEnabled)) {
+                           loaded.chat.toolPolicy != source.toolPolicy)) {
         result = {false, "Chat version-4 metadata round trip failed"};
     }
     const cardputer::ArchivedMessagesPageResult archivedPage = result.success
@@ -4411,7 +4503,7 @@ void runChatQolTest()
         : cardputer::ChatDocumentResult{false, {}, result.error};
     if (result.success && (!duplicated.success || duplicated.chat.messages.size() != 2 ||
                            duplicated.chat.draft != "unfinished" ||
-                           !duplicated.chat.sshToolsEnabled)) {
+                           duplicated.chat.toolPolicy != source.toolPolicy)) {
         result = {false, "Chat duplication verification failed"};
     }
     if (result.success) {
@@ -4426,10 +4518,12 @@ void runChatQolTest()
     const cardputer::ChatDocumentResult imported = result.success
         ? cardputer::importChatBundleFromWorkspace(bundleName)
         : cardputer::ChatDocumentResult{false, {}, result.error};
+    const cardputer::ScopedToolPermissionPolicy importedPolicy =
+        cardputer::setLegacySshToolsEnabled(source.toolPolicy, false);
     if (result.success && (!imported.success || imported.chat.messages.size() != 2 ||
                            imported.chat.summary.archivedMessageCount != 2 ||
                            imported.chat.instructions != "Be concise." ||
-                           imported.chat.sshToolsEnabled)) {
+                           imported.chat.toolPolicy != importedPolicy)) {
         result = {false, "Portable chat import verification failed"};
     }
     if (result.success) {
@@ -4981,6 +5075,8 @@ void runDeviceSettingsTest()
     candidate.screenSleepMinutes = 1;
     candidate.keyboardRepeatMs = 75;
     candidate.powerProfile = 0;
+    candidate.masterToolPolicy = diagnosticMasterToolPolicy();
+    candidate.newChatToolPolicy = diagnosticScopedToolPolicy();
     cardputer::OperationResult result = saveAndApplyDeviceSettings(candidate);
     cardputer::Settings loaded;
     if (result.success) {
@@ -4990,7 +5086,10 @@ void runDeviceSettingsTest()
         (loaded.displayBrightness != candidate.displayBrightness ||
          loaded.screenSleepMinutes != candidate.screenSleepMinutes ||
          loaded.keyboardRepeatMs != candidate.keyboardRepeatMs ||
-         loaded.powerProfile != candidate.powerProfile || getCpuFrequencyMhz() != 240)) {
+         loaded.powerProfile != candidate.powerProfile ||
+         loaded.masterToolPolicy != candidate.masterToolPolicy ||
+         loaded.newChatToolPolicy != candidate.newChatToolPolicy ||
+         getCpuFrequencyMhz() != 240)) {
         result = {false, "Device settings did not survive an NVS round trip"};
     }
     const cardputer::OperationResult restored = saveAndApplyDeviceSettings(original);
@@ -4998,31 +5097,6 @@ void runDeviceSettingsTest()
         result = {false, "Device settings test passed but original settings could not be restored"};
     }
     Serial.printf("DEVICESETTINGSTEST result=%s error=%s\n",
-                  result.success ? "pass" : "failed",
-                  result.success ? "none" : result.error.c_str());
-}
-
-void runBackupTest()
-{
-    cardputer::OperationResult result = saveCurrentChat();
-    if (result.success) {
-        result = cardputer::createLocalBackup(settings, activeChatId);
-    }
-    String summary;
-    if (result.success) {
-        result = cardputer::localBackupSummary(summary);
-    }
-    String restoredId;
-    if (result.success) {
-        result = cardputer::restoreLocalBackup(settings, restoredId);
-    }
-    if (result.success) {
-        result = refreshChatList();
-    }
-    if (result.success) {
-        result = activateChat(restoredId);
-    }
-    Serial.printf("BACKUPTEST result=%s error=%s\n",
                   result.success ? "pass" : "failed",
                   result.success ? "none" : result.error.c_str());
 }
@@ -5035,8 +5109,19 @@ void runToolApiTest()
         return;
     }
     bool writeSucceeded = false;
-    String writtenName;
     const String expectedName = "firmware_tool_" + String(millis()) + ".py";
+    const String expectedPath = cardputer::workspaceFilePath(expectedName);
+    const std::string expectedContent = "print('CARDMIND_TOOL_OK')\n";
+    const cardputer::SharedFileLinkResult initialLink =
+        cardputer::projectHasSharedFileLink(activeProjectId, expectedName);
+    if (SD.exists(expectedPath) || !initialLink.success || initialLink.linked) {
+        const String error = !initialLink.success
+            ? initialLink.error : String("fixture collision");
+        Serial.printf(
+            "TOOLTEST result=failed stage=fixture api=failed write=failed file=failed link=failed cleanup=pass error=%s\n",
+            serialSafeError(error, 120).c_str());
+        return;
+    }
     const std::string prompt =
         "Use write_file exactly once with JSON arguments name \"" +
         std::string(expectedName.c_str()) +
@@ -5044,44 +5129,100 @@ void runToolApiTest()
     const std::vector<cardputer::Message> testHistory = {
         {"user", prompt},
     };
+    cardputer::Settings requestSettings = settings;
+    requestSettings.webSearchApiKey = "";
+    requestSettings.masterToolPolicy =
+        cardputer::defaultGlobalToolPermissionPolicy();
+    cardputer::ProjectDocument project = {};
+    project.toolPolicy = cardputer::inheritedToolPermissionPolicy();
+    cardputer::ChatDocument chat = {};
+    chat.toolPolicy = cardputer::inheritedToolPermissionPolicy();
+    const std::uint8_t filesGroup = static_cast<std::uint8_t>(
+        1U << static_cast<std::uint8_t>(cardputer::ToolCapabilityGroup::Files));
+    const cardputer::ToolRequestPlan requestPlan =
+        cardputer::resolveChatToolRequestPlan(
+            requestSettings, project, chat,
+            {cardputer::ToolMessageIntentMode::Required, filesGroup},
+            true, true, true, false);
+    const String planError = toolRequestPlanError(requestPlan);
+    if (!planError.isEmpty()) {
+        Serial.printf(
+            "TOOLTEST result=failed stage=plan api=failed write=failed file=failed link=failed cleanup=pass error=%s\n",
+            planError.c_str());
+        return;
+    }
     const cardputer::ChatResult result = cardputer::streamChatCompletionWithTools(
-        settings, testHistory, "", false, [](const std::string&) {},
-        [&writeSucceeded, &writtenName, &expectedName](const cardputer::ToolCall& call) {
-            const cardputer::ToolExecutionResult execution =
-                cardputer::executeProjectWorkspaceTool(activeProjectId, call);
-            if (call.name == "write_file" && execution.success) {
-                JsonDocument arguments;
-                const DeserializationError error = deserializeJson(arguments, call.arguments);
-                if (!error && arguments["name"].is<const char*>()) {
-                    writtenName = String(arguments["name"].as<const char*>());
-                    writeSucceeded = writtenName == expectedName;
-                }
+        requestSettings, testHistory, "", requestPlan, [](const std::string&) {},
+        [&writeSucceeded, &expectedName, &expectedContent,
+         &requestPlan](const cardputer::ToolCall& call) {
+            JsonDocument arguments;
+            const DeserializationError parseError =
+                deserializeJson(arguments, call.arguments);
+            const bool exactCall = call.name == "write_file" && !parseError &&
+                arguments.size() == 2 &&
+                arguments["name"].is<const char*>() &&
+                arguments["content"].is<const char*>() &&
+                String(arguments["name"].as<const char*>()) == expectedName &&
+                std::string(arguments["content"].as<const char*>()) ==
+                    expectedContent;
+            if (!exactCall) {
+                return cardputer::ToolExecutionResult{
+                    false,
+                    "{\"ok\":false,\"error\":\"unexpected diagnostic tool call\"}",
+                    "TOOLTEST rejected a non-owned tool call",
+                };
             }
+            const cardputer::ToolExecutionResult execution =
+                cardputer::routeProjectToolCall(
+                    settings, requestPlan, activeProjectId, call,
+                    []() { return false; });
+            writeSucceeded = execution.success;
             return execution;
+        },
+        [](const cardputer::PendingToolContinuation&) {
+            return cardputer::OperationResult{
+                false, "TOOLTEST did not authorize confirmation"};
         }, []() { return false; });
-    const String testPath = writtenName.isEmpty()
-        ? String() : cardputer::workspaceFilePath(writtenName);
-    const bool fileCreated = !testPath.isEmpty() && SD.exists(testPath);
-    const cardputer::SharedFileLinkResult linked = fileCreated
-        ? cardputer::projectHasSharedFileLink(activeProjectId, writtenName)
-        : cardputer::SharedFileLinkResult{true, false, ""};
+    const bool fileCreated = SD.exists(expectedPath);
+    const cardputer::SharedFileLinkResult linked =
+        cardputer::projectHasSharedFileLink(activeProjectId, expectedName);
     cardputer::OperationResult cleanup = {true, ""};
-    if (fileCreated && linked.success && linked.linked) {
-        cleanup = cardputer::unlinkSharedFileFromProject(activeProjectId, writtenName);
+    if (linked.success && linked.linked) {
+        cleanup = cardputer::unlinkSharedFileFromProject(
+            activeProjectId, expectedName);
     }
-    if (fileCreated && cleanup.success) {
-        cleanup = cardputer::deleteWorkspaceFile(writtenName);
+    if (cleanup.success && SD.exists(expectedPath)) {
+        cleanup = cardputer::deleteWorkspaceFile(expectedName);
     }
+    const cardputer::SharedFileLinkResult afterCleanup =
+        cardputer::projectHasSharedFileLink(activeProjectId, expectedName);
+    cardputer::OperationResult repeatedCleanup = afterCleanup.success
+        ? cardputer::OperationResult{true, ""}
+        : cardputer::OperationResult{false, afterCleanup.error};
+    if (repeatedCleanup.success && afterCleanup.linked) {
+        repeatedCleanup = cardputer::unlinkSharedFileFromProject(
+            activeProjectId, expectedName);
+    }
+    if (repeatedCleanup.success && SD.exists(expectedPath)) {
+        repeatedCleanup = cardputer::deleteWorkspaceFile(expectedName);
+    }
+    const cardputer::SharedFileLinkResult finalLink =
+        cardputer::projectHasSharedFileLink(activeProjectId, expectedName);
+    const bool cleanupVerified = cleanup.success && repeatedCleanup.success &&
+        finalLink.success && !finalLink.linked && !SD.exists(expectedPath);
     if (!result.success || !writeSucceeded || !fileCreated || !linked.success ||
-        !linked.linked || !cleanup.success) {
+        !linked.linked || !cleanupVerified) {
         Serial.printf("TOOLTEST result=failed stage=tool_roundtrip api=%s write=%s file=%s link=%s cleanup=%s error=%s\n",
                       result.success ? "pass" : "failed",
                       writeSucceeded ? "pass" : "failed",
                       fileCreated ? "pass" : "failed",
                       linked.success && linked.linked ? "pass" : "failed",
-                      cleanup.success ? "pass" : "failed",
+                      cleanupVerified ? "pass" : "failed",
                       !result.error.isEmpty() ? result.error.c_str() :
-                          (!linked.success ? linked.error.c_str() : cleanup.error.c_str()));
+                          (!linked.success ? linked.error.c_str() :
+                           (!cleanup.success ? cleanup.error.c_str() :
+                            (!repeatedCleanup.success ? repeatedCleanup.error.c_str() :
+                             finalLink.error.c_str()))));
         return;
     }
     Serial.printf("TOOLTEST result=pass response_bytes=%u\n",
@@ -5138,7 +5279,12 @@ void runUiBenchmark()
         const std::uint32_t startedAt = micros();
         cardputer::showChat(sampleHistory, "Streaming response", "Input draft",
                             cardputer::KeyboardLayout::English, "UI benchmark", "Saved",
-                            0, true, batteryLevel, batteryCharging);
+                            0,
+                            {cardputer::ChatCapabilityState::Inherit,
+                             cardputer::ChatCapabilityState::Inherit,
+                             cardputer::ChatCapabilityState::Inherit,
+                             cardputer::ChatCapabilityState::Inherit},
+                            true, batteryLevel, batteryCharging);
         const std::uint32_t elapsed = micros() - startedAt;
         totalMicroseconds += elapsed;
         if (elapsed > maximumMicroseconds) {
@@ -5449,10 +5595,6 @@ void handleSerialCommand(const String& command)
     }
     if (command == "DEVICESETTINGSTEST") {
         runDeviceSettingsTest();
-        return;
-    }
-    if (command == "BACKUPTEST") {
-        runBackupTest();
         return;
     }
     if (command == "OFFLINETEST") {

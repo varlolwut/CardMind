@@ -39,7 +39,10 @@ ProjectChatAppendPlanResult planProjectChatAppend(
     std::uint64_t freeBytes,
     std::uint64_t operationalFloorBytes);
 
-ChatDocumentResult createProjectChat(const String& projectId, const String& title);
+ChatDocumentResult createProjectChat(
+    const String& projectId,
+    const String& title,
+    const ScopedToolPermissionPolicy& toolPolicy);
 OperationResult saveProjectChatMetadata(const ChatDocument& chat);
 OperationResult appendProjectChatMessages(const String& projectId,
                                            const String& chatId,

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "app_types.h"
+#include "pending_tool_call.h"
 #include "text_utils.h"
+#include "tool_catalog.h"
 
 #include <functional>
 
@@ -10,6 +12,8 @@ namespace cardputer {
 using ChatTextCallback = std::function<void(const std::string&)>;
 using CancelCallback = std::function<bool()>;
 using ToolExecutor = std::function<ToolExecutionResult(const ToolCall&)>;
+using PendingToolSaver = std::function<OperationResult(
+    const PendingToolContinuation&)>;
 
 struct ChatRequestSerializationValidation {
     bool success;
@@ -47,18 +51,32 @@ ChatResult streamChatCompletionWithBudget(const Settings& settings,
 ChatResult streamChatCompletionWithTools(const Settings& settings,
                                          const std::vector<Message>& history,
                                          const std::string& instructions,
-                                         bool sshToolAvailable,
+                                         const ToolRequestPlan& toolPlan,
                                          const ChatTextCallback& onText,
                                          const ToolExecutor& executeTool,
+                                         const PendingToolSaver& savePendingTool,
                                          const CancelCallback& isCancelled);
 ChatResult streamChatCompletionWithToolsAndBudget(
     const Settings& settings,
     const std::vector<Message>& history,
     const std::string& instructions,
-    bool sshToolAvailable,
+    const ToolRequestPlan& toolPlan,
     std::uint32_t maximumOutputTokens,
     const ChatTextCallback& onText,
     const ToolExecutor& executeTool,
+    const PendingToolSaver& savePendingTool,
+    const CancelCallback& isCancelled);
+ChatResult continueChatCompletionAfterPendingToolResult(
+    const Settings& settings,
+    const std::vector<Message>& history,
+    const std::string& instructions,
+    const ToolRequestPlan& toolPlan,
+    std::uint32_t maximumOutputTokens,
+    PendingToolContinuation continuation,
+    ToolExecutionResult toolResult,
+    const ChatTextCallback& onText,
+    const ToolExecutor& executeTool,
+    const PendingToolSaver& savePendingTool,
     const CancelCallback& isCancelled);
 
 }  // namespace cardputer

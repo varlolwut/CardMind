@@ -8,10 +8,8 @@ void renderFilesMenu()
 
 void renderWorkspaceFileList()
 {
-    const String title = workspaceListMode == WorkspaceListMode::ImportChat
-        ? String("IMPORT CHAT")
-        : (workspaceListMode == WorkspaceListMode::ImportProject
-            ? String("IMPORT PROJECT") : String("SD WORKSPACE"));
+    const String title = workspaceListMode == WorkspaceListMode::ImportProject
+        ? String("IMPORT PROJECT") : String("SD WORKSPACE");
     cardputer::showSelectionList(title,
                                  workspaceFileItems(), workspaceFileIndex,
                                  menuStatus.isEmpty() ? "UP/DOWN  ENTER  ESC back" : menuStatus);
@@ -55,7 +53,7 @@ void renderFileEditor()
 
 void renderFileFind()
 {
-    cardputer::showTextEditor("FIND IN FILE", fileFindInput, keyboardLayout, 128,
+    cardputer::showTextEditor("FIND IN FILE", fileFindInput, keyboardLayout, 1024,
                              fileFindStatus, "Type search text",
                              "ENTER find  ESC cancel  Fn+3 lang");
 }
@@ -226,9 +224,6 @@ cardputer::OperationResult refreshWorkspaceImportPage(std::uint32_t offset,
 
 cardputer::OperationResult refreshWorkspaceListPage(std::uint32_t offset)
 {
-    if (workspaceListMode == WorkspaceListMode::ImportChat) {
-        return refreshWorkspaceImportPage(offset, ".chat.jsonl");
-    }
     if (workspaceListMode == WorkspaceListMode::ImportProject) {
         return refreshWorkspaceImportPage(offset, ".cardmind-project.jsonl");
     }
@@ -246,22 +241,6 @@ void openWorkspaceFileList()
         return;
     }
     menuStatus = workspaceFiles.empty() ? String("Workspace is empty") : String();
-    currentScreen = Screen::WorkspaceFileList;
-    renderWorkspaceFileList();
-}
-
-void openChatImportList()
-{
-    workspaceListMode = WorkspaceListMode::ImportChat;
-    workspaceListReturnScreen = Screen::FilesMenu;
-    const cardputer::OperationResult result = refreshWorkspaceListPage(0);
-    if (!result.success) {
-        menuStatus = result.error;
-        renderFilesMenu();
-        return;
-    }
-    menuStatus = workspaceFiles.empty() ? String("No .chat.jsonl bundles found")
-                                        : String("Choose a .chat.jsonl bundle");
     currentScreen = Screen::WorkspaceFileList;
     renderWorkspaceFileList();
 }

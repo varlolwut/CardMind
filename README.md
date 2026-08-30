@@ -21,8 +21,8 @@ the device; it does not run alongside Bruce or another firmware.
   console.
 - A MicroPython mode for small scripts stored in the same microSD workspace that
   CardMind and the model use.
-- Offline notes, checklists, timers, calculator, QR rendering, diagnostics, backup,
-  and verified firmware updates.
+- Offline notes, checklists, timers, calculator, QR rendering, diagnostics, and
+  verified firmware updates.
 
 ## Quick start
 

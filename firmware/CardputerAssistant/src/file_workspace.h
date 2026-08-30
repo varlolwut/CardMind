@@ -2,6 +2,7 @@
 
 #include "app_types.h"
 
+#include <functional>
 #include <limits>
 
 namespace cardputer {
@@ -10,6 +11,13 @@ constexpr std::uint32_t kMaximumWorkspaceFileBytes =
     std::numeric_limits<std::uint32_t>::max();
 constexpr std::size_t kMaximumWorkspaceToolChunkBytes = 12288;
 constexpr std::size_t kMaximumWorkspaceFiles = 4096;
+
+struct WorkspaceWriteTargetResult {
+    bool success;
+    bool replacesExisting;
+    String name;
+    String error;
+};
 
 OperationResult initializeFileWorkspace();
 OperationResult ensureWorkspaceFileParent(const String& name);
@@ -40,6 +48,17 @@ OperationResult deleteWorkspaceFile(const String& name);
 ToolExecutionResult executeWorkspaceTool(const ToolCall& call);
 ToolExecutionResult executeProjectWorkspaceTool(const String& projectId,
                                                 const ToolCall& call);
+ToolExecutionResult executeControlledWorkspaceTool(
+    const ToolCall& call,
+    const std::function<bool()>& isCancelled);
+ToolExecutionResult executeControlledProjectWorkspaceTool(
+    const String& projectId,
+    const ToolCall& call,
+    const std::function<bool()>& isCancelled);
+WorkspaceWriteTargetResult inspectWorkspaceWriteTarget(const ToolCall& call);
+WorkspaceWriteTargetResult inspectProjectWorkspaceWriteTarget(
+    const String& projectId,
+    const ToolCall& call);
 String workspaceFilePath(const String& name);
 
 }  // namespace cardputer

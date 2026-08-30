@@ -14,7 +14,9 @@
 - An SSE error means the status, content type, event framing, or delta JSON did not
   match the expected contract. Use the connection check and read the explicit body.
 - “Unavailable tool” means the model requested a tool that is disabled or unconfigured.
-  Configure the separate search connector before using `/search`.
+  Configure the separate search connector before selecting **Web** for the next
+  message; SSH read, model-facing SFTP, and Python execution also remain unavailable
+  when no matching model tool exists.
 
 ## Voice
 

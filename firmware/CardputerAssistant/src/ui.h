@@ -4,6 +4,8 @@
 
 #include <M5Cardputer.h>
 
+#include <array>
+
 namespace cardputer {
 
 constexpr std::size_t kMaximumQrPayloadBytes = 320;
@@ -52,6 +54,16 @@ struct DeviceDiagnosticsView {
     bool sshStorageReady;
 };
 
+enum class ChatCapabilityState {
+    Off,
+    Inherit,
+    Ask,
+    Allow,
+    Required,
+};
+
+using ChatCapabilityStates = std::array<ChatCapabilityState, 4>;
+
 OperationResult beginUi();
 void showFatalError(const String& error);
 void showProvisioning(const String& accessPointName, const String& accessPointPassword);
@@ -69,6 +81,7 @@ void showChat(const std::vector<Message>& history,
               const String& chatTitle,
               const String& status,
               std::size_t scrollOffset,
+              const ChatCapabilityStates& capabilities,
               bool wifiConnected,
               int batteryLevel,
               bool batteryCharging);
@@ -101,6 +114,10 @@ void showTextViewer(const String& title,
                     const std::vector<std::string>& lines,
                     std::size_t firstLine,
                     const String& position);
+void showReadOnlyTextViewer(const String& title,
+                            const std::vector<std::string>& lines,
+                            std::size_t firstLine,
+                            const String& position);
 void showTextEditor(const String& title,
                     const std::string& input,
                     KeyboardLayout layout,

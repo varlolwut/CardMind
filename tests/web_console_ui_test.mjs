@@ -55,8 +55,31 @@ const requiredFragments = [
     'id="qrContent"',
     'id="showQr"',
     'id="qrFromFile"',
-    'id="sshToolsEnabled"',
-    'id="savePermissions"',
+    'id="capabilitySummary"',
+    'id="capabilityW"',
+    'id="capabilityF"',
+    'id="capabilityS"',
+    'id="capabilityP"',
+    'id="intentAuto" aria-pressed="true"',
+    'id="intentNone" aria-pressed="false"',
+    'id="intentWeb" aria-pressed="false"',
+    'id="intentFiles" aria-pressed="false"',
+    'id="intentSsh" aria-pressed="false"',
+    'id="intentPython" aria-pressed="false"',
+    'id="globalPolicyGrid"',
+    'id="projectPolicyGrid"',
+    'id="chatPolicyGrid"',
+    'id="chatModel" maxlength="240"',
+    'id="saveChatSettings"',
+    'id="capabilityStateText"',
+    'id="pendingToolDialog"',
+    'id="pendingToolReason"',
+    'id="pendingToolTarget"',
+    'id="pendingToolPreview"',
+    'id="pendingAllowOnce"',
+    'id="pendingAllowChat"',
+    'id="pendingDeny"',
+    'id="pendingAcknowledge"',
     'id="wifiSsid"',
     'id="refreshModels"',
     'id="startPython"',
@@ -68,6 +91,8 @@ const requiredFragments = [
     'const changedSecrets=new Set()',
     'data-1p-ignore',
     'id="exportDiagnostics"',
+    'id="toolActivity"',
+    'id="refreshActivity"',
     'id="contextMeter"',
     'id="loadOlder"',
     'id="clearChat"',
@@ -127,13 +152,20 @@ const requiredFragments = [
     "'X-CardMind-Context-Bytes'",
     "'X-CardMind-Output-Tokens'",
     "'X-CardMind-Auto-Compact'",
+    "'X-CardMind-Tool-Intent'",
     "'Content-Type':'application/vnd.cardmind.prompt-v1'",
     'function framedPromptBody(prompt,instructions)',
+    "setMessageIntent('auto')",
     '/api/project/links?offset=',
     '/api/project/link',
     '/api/qr/show',
     '/api/qr/file?name=',
-    '/api/chat/permissions',
+    '/api/chat/settings',
+    '/api/pending',
+    '/api/pending/allow-once',
+    '/api/pending/allow-chat',
+    '/api/pending/deny',
+    '/api/pending/acknowledge',
     '/api/chat/archived',
     '/api/chat/clear',
     '/api/console/close',
@@ -149,7 +181,7 @@ const requiredFragments = [
     "'/api/chat/compact'",
     'retryFailedPrompt',
     'pointer-events:none',
-    "const stateEndpoints={status:'/api/status',projects:'/api/projects',chats:'/api/chats',chat:'/api/chat',files:'/api/files',ssh:'/api/ssh/state',settings:'/api/settings'}",
+    "const stateEndpoints={status:'/api/status',projects:'/api/projects',chats:'/api/chats',chat:'/api/chat',files:'/api/files',ssh:'/api/ssh/state',settings:'/api/settings',activity:'/api/activity',pending:'/api/pending'}",
     'function monitorSshConnection()',
     'function shouldRenderRevision(kind,revision)',
     'requestAnimationFrame(()=>',
@@ -168,6 +200,15 @@ const requiredFragments = [
     'function renderFilesState(s)',
     'function renderSshState(s)',
     'function renderSettingsState(s)',
+    'function renderActivityState(s)',
+    'function decodeToolPolicy(value,scoped)',
+    'function encodeToolPolicy(values,scoped)',
+    'function capabilityGroupState(capabilities,intent,group)',
+    "'X-CardMind-Tool-Policy'",
+    'master_tool_policy:',
+    'new_chat_tool_policy:',
+    '>Default model</label>',
+    "event.type==='pending'",
 ];
 
 for (const fragment of requiredFragments) {
@@ -187,6 +228,11 @@ const forbiddenFragments = [
     "Open the same device address and sign in again",
     "request('/api/chat/instructions',{method:'POST',body:new URLSearchParams",
     "request('/api/prompt',{method:'POST',body:new URLSearchParams",
+    'id="sshToolsEnabled"',
+    'id="savePermissions"',
+    'data-intent="/search "',
+    'data-intent="/file "',
+    '/api/chat/permissions',
 ];
 
 for (const fragment of forbiddenFragments) {
@@ -201,6 +247,140 @@ if (scriptMatch === null) {
 }
 
 new Function(scriptMatch[1]);
+
+const policyStart = page.indexOf("const capabilityDefinitions=");
+const policyEnd = page.indexOf("function createPolicySelect", policyStart);
+if (policyStart < 0 || policyEnd < 0) {
+    throw new Error("Cannot extract the fixed tool-policy codec");
+}
+const policyHarness = new Function(
+    `${page.slice(policyStart, policyEnd)};return {` +
+    "capabilityDefinitions,decodeToolPolicy,encodeToolPolicy," +
+    "parseMessageIntent,capabilityGroupState,validatedCapabilities};",
+)();
+const masterPolicyValues = [
+    "off", "ask", "allow", "off", "ask", "allow", "off", "ask",
+];
+const masterPolicy = "v1;ws=o;wf=q;fr=a;fw=o;sr=q;sm=a;sf=o;py=q";
+if (policyHarness.encodeToolPolicy(masterPolicyValues, false) !== masterPolicy ||
+    JSON.stringify(policyHarness.decodeToolPolicy(masterPolicy, false)) !==
+        JSON.stringify(masterPolicyValues)) {
+    throw new Error("Master tool policy does not round-trip through the fixed v1 codec");
+}
+const scopedPolicyValues = [
+    "inherit", "off", "ask", "allow", "inherit", "off", "ask", "allow",
+];
+const scopedPolicy = "v1;ws=i;wf=o;fr=q;fw=a;sr=i;sm=o;sf=q;py=a";
+if (policyHarness.encodeToolPolicy(scopedPolicyValues, true) !== scopedPolicy ||
+    JSON.stringify(policyHarness.decodeToolPolicy(scopedPolicy, true)) !==
+        JSON.stringify(scopedPolicyValues)) {
+    throw new Error("Scoped tool policy does not round-trip through the fixed v1 codec");
+}
+for (const malformed of [
+    "v1;wf=i;ws=o;fr=q;fw=a;sr=i;sm=o;sf=q;py=a",
+    "v1;ws=i;wf=o;fr=q;fw=a;sr=i;sm=o;sf=q",
+    "v1;ws=z;wf=o;fr=q;fw=a;sr=i;sm=o;sf=q;py=a",
+]) {
+    let rejected = false;
+    try {
+        policyHarness.decodeToolPolicy(malformed, true);
+    } catch {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw new Error(`Fixed tool-policy codec accepted malformed input: ${malformed}`);
+    }
+}
+let masterInheritRejected = false;
+try {
+    policyHarness.decodeToolPolicy(
+        "v1;ws=i;wf=o;fr=q;fw=a;sr=o;sm=o;sf=q;py=a",
+        false,
+    );
+} catch {
+    masterInheritRejected = true;
+}
+if (!masterInheritRejected) {
+    throw new Error("Master tool policy accepted inherit");
+}
+const inheritedCapabilities = policyHarness.capabilityDefinitions.map((definition) => ({
+    id: definition.id,
+    raw_project: "inherit",
+    raw_chat: "inherit",
+    effective: "allow",
+    source: "global",
+}));
+policyHarness.validatedCapabilities(inheritedCapabilities);
+if (policyHarness.capabilityGroupState(inheritedCapabilities, "auto", 0) !== "inherit" ||
+    policyHarness.capabilityGroupState(inheritedCapabilities, "none", 0) !== "off" ||
+    policyHarness.capabilityGroupState(inheritedCapabilities, "required:1", 0) !==
+        "required") {
+    throw new Error("Capability group did not render Inherit, Off and Required deterministically");
+}
+const deniedInheritedCapabilities = structuredClone(inheritedCapabilities);
+deniedInheritedCapabilities[0].effective = "deny";
+if (policyHarness.capabilityGroupState(deniedInheritedCapabilities, "auto", 0) !== "off") {
+    throw new Error("Inherited capability group ignored an effective parent denial");
+}
+const explicitWebCapabilities = inheritedCapabilities.map((capability) => ({...capability}));
+explicitWebCapabilities[0].raw_chat = "allow";
+explicitWebCapabilities[1].raw_chat = "allow";
+if (policyHarness.capabilityGroupState(explicitWebCapabilities, "auto", 0) !== "allow") {
+    throw new Error("Allowed Web capability group did not render Allow");
+}
+explicitWebCapabilities[0].effective = "ask";
+if (policyHarness.capabilityGroupState(explicitWebCapabilities, "auto", 0) !== "ask") {
+    throw new Error("Ask Web capability group did not render Ask");
+}
+explicitWebCapabilities[0].effective = "unavailable";
+if (policyHarness.capabilityGroupState(explicitWebCapabilities, "auto", 0) !== "off") {
+    throw new Error("Unavailable Web capability group did not render Off");
+}
+let capabilityOrderRejected = false;
+try {
+    policyHarness.validatedCapabilities([
+        inheritedCapabilities[1], inheritedCapabilities[0],
+        ...inheritedCapabilities.slice(2),
+    ]);
+} catch {
+    capabilityOrderRejected = true;
+}
+if (!capabilityOrderRejected) {
+    throw new Error("Capability state accepted out-of-order entries");
+}
+
+const intentRenderStart = page.indexOf("function renderIntentControls()");
+const intentRenderEnd = page.indexOf("function renderCapabilityState()", intentRenderStart);
+if (intentRenderStart < 0 || intentRenderEnd < 0) {
+    throw new Error("Cannot extract the composer intent renderer");
+}
+function renderedIntentPresses(intent) {
+    const ids = [
+        "intentAuto", "intentNone", "intentWeb", "intentFiles", "intentSsh",
+        "intentPython",
+    ];
+    const elements = Object.fromEntries(ids.map((id) => [
+        `#${id}`,
+        {value: "", setAttribute(name, value) { this[name] = value; }},
+    ]));
+    const renderIntentControls = new Function(
+        "q", "parseMessageIntent", "messageIntent",
+        `${page.slice(intentRenderStart, intentRenderEnd)};return renderIntentControls;`,
+    )((selector) => elements[selector], policyHarness.parseMessageIntent, intent);
+    renderIntentControls();
+    return Object.fromEntries(ids.map((id) => [id, elements[`#${id}`]["aria-pressed"]]));
+}
+const autoPresses = renderedIntentPresses("auto");
+if (autoPresses.intentAuto !== "true" ||
+    Object.entries(autoPresses).some(([id, value]) => id !== "intentAuto" && value !== "false")) {
+    throw new Error("Auto intent did not reset every composer aria-pressed state");
+}
+const requiredPresses = renderedIntentPresses("required:5");
+if (requiredPresses.intentAuto !== "false" || requiredPresses.intentWeb !== "true" ||
+    requiredPresses.intentFiles !== "false" || requiredPresses.intentSsh !== "true" ||
+    requiredPresses.intentPython !== "false") {
+    throw new Error("Required intent did not expose the selected capability groups");
+}
 
 const degradedStart = page.indexOf("function renderSdDegradedState(s)");
 const degradedEnd = page.indexOf("function renderStatusState(s)", degradedStart);
@@ -230,6 +410,39 @@ if (degradedElements["#sdDegradedBanner"].hidden ||
 renderSdDegradedState({sd_state: "ready"});
 if (!degradedElements["#sdDegradedBanner"].hidden) {
     throw new Error("Ready storage left the degraded-state banner visible");
+}
+
+const activityStart = page.indexOf("function renderActivityState(s)");
+const activityEnd = page.indexOf("function renderProjectsState(s)", activityStart);
+if (activityStart < 0 || activityEnd < 0) {
+    throw new Error("Cannot extract the tool activity renderer");
+}
+const activityElement = {textContent: ""};
+const renderActivityState = new Function(
+    "q",
+    `${page.slice(activityStart, activityEnd)};return renderActivityState;`,
+)((selector) => selector === "#toolActivity" ? activityElement : null);
+renderActivityState({activities: [{
+    tool: "ssh_command",
+    target: "selected_ssh",
+    status: "succeeded",
+    duration_ms: 123,
+    output_bytes: 45,
+    exit_status: 7,
+}]});
+for (const value of ["ssh_command", "selected_ssh", "succeeded", "123 ms", "45 B", "exit 7"]) {
+    if (!activityElement.textContent.includes(value)) {
+        throw new Error(`Tool activity renderer omitted ${value}`);
+    }
+}
+let invalidActivityRejected = false;
+try {
+    renderActivityState({activities: [{tool: "read_file"}]});
+} catch {
+    invalidActivityRejected = true;
+}
+if (!invalidActivityRejected) {
+    throw new Error("Tool activity renderer accepted an incomplete row");
 }
 
 function readArrowFunction(name, nextMarker) {
@@ -286,6 +499,9 @@ if (flushedFinalEvent.buffer !== "" ||
 if (promptStreamCompletionError("", "done", "") !== "") {
     throw new Error("A completed SSE stream was rejected");
 }
+if (promptStreamCompletionError("", "pending", "Waiting for confirmation") !== "") {
+    throw new Error("A pending SSE terminal event was rejected");
+}
 if (!promptStreamCompletionError(firstChunk.buffer, "", "").includes("incomplete")) {
     throw new Error("A partial final SSE event was accepted");
 }
@@ -303,6 +519,14 @@ const summaryWithNotice = summarizeSseEvents([
 if (summaryWithNotice.notice !== "SSH terminal disconnected" ||
     summaryWithNotice.delta !== "OK" || summaryWithNotice.terminalType !== "done") {
     throw new Error("An SSE notice was not preserved alongside streamed text");
+}
+const summaryWithPending = summarizeSseEvents([{
+    type: "pending",
+    message: "Waiting for confirmation",
+}], "", "");
+if (summaryWithPending.terminalType !== "pending" ||
+    summaryWithPending.streamError !== "Waiting for confirmation") {
+    throw new Error("A pending SSE event was not treated as terminal");
 }
 
 const terminalStart = page.indexOf("const terminalScreen=");
@@ -331,6 +555,7 @@ if (terminalHarness.screen.lines.length !== 1 ||
 }
 for (const endpoint of [
     "/api/status",
+    "/api/activity",
     "/api/storage/confirm",
     "/api/projects",
     "/api/chats",
@@ -338,6 +563,11 @@ for (const endpoint of [
     "/api/files",
     "/api/ssh/state",
     "/api/settings",
+    "/api/pending",
+    "/api/pending/allow-once",
+    "/api/pending/allow-chat",
+    "/api/pending/deny",
+    "/api/pending/acknowledge",
 ]) {
     if (!routes.includes(`server.on("${endpoint}"`)) {
         throw new Error(`Specialized Web Console route is missing: ${endpoint}`);
@@ -470,6 +700,12 @@ for (const binding of [
 for (const requestPolicyFragment of [
     "activeProject, storedChat, requestInstructions",
     "resolveProjectRequestPolicy(",
+    "decodeToolMessageIntent(",
+    "resolveChatToolRequestPlan(",
+    "toolPlan.schemas != 0",
+    "routeProjectToolCall(\n                      consoleSettings, toolPlan",
+    "toolStorageReadable, toolStorageWritable, toolStorageWritable",
+    "failedWebRequestIntent = toolPlan.intent",
     "shouldAutomaticallyCompactRequest(",
     "failedWebRequestInstructions = std::move(requestInstructions)",
     "failedWebRequestOutputTokens = requestPolicy.maximumOutputTokens",
@@ -495,6 +731,9 @@ const promptSubmitStart = consoleSource.indexOf("void processWebPrompt(");
 const promptSubmitEnd = consoleSource.indexOf(
     "void handlePromptRawData()", promptSubmitStart);
 const promptSubmitSource = consoleSource.slice(promptSubmitStart, promptSubmitEnd);
+const promptToolPlan = promptSubmitSource.indexOf("resolveChatToolRequestPlan(");
+const requiredToolReject = promptSubmitSource.indexOf(
+    "toolPlan.missingRequiredGroups != 0", promptToolPlan);
 const promptAppend = promptSubmitSource.indexOf("appendProjectChatMessages(");
 const promptAppendFailure = promptSubmitSource.indexOf(
     "if (!saved.success)", promptAppend);
@@ -503,14 +742,87 @@ const retryInstructionsStage = promptSubmitSource.indexOf(
 const retryOutputStage = promptSubmitSource.indexOf(
     "failedWebRequestOutputTokens = submittedPolicy.maximumOutputTokens",
     retryInstructionsStage);
+const retryIntentStage = promptSubmitSource.indexOf(
+    "failedWebRequestIntent = intent", retryOutputStage);
 const firstMessageMetadataSave = promptSubmitSource.indexOf(
-    "saveProjectChatMetadata(activeChat)", retryOutputStage);
+    "saveProjectChatMetadata(activeChat)", retryIntentStage);
+const acceptedMetadataFailureStream = promptSubmitSource.indexOf(
+    'server.send(200, "text/event-stream; charset=utf-8", "")',
+    firstMessageMetadataSave);
+const acceptedMetadataFailureEvent = promptSubmitSource.indexOf(
+    'sendWebSse(server, "error", "", saved.error)',
+    acceptedMetadataFailureStream);
 if (promptSubmitStart < 0 || promptSubmitEnd < 0 || promptAppend < 0 ||
+    promptToolPlan < 0 || requiredToolReject < promptToolPlan ||
+    promptAppend < requiredToolReject ||
     promptAppendFailure < promptAppend || retryInstructionsStage < promptAppendFailure ||
     retryOutputStage < retryInstructionsStage ||
-    firstMessageMetadataSave < retryOutputStage) {
+    retryIntentStage < retryOutputStage || firstMessageMetadataSave < retryIntentStage ||
+    acceptedMetadataFailureStream < firstMessageMetadataSave ||
+    acceptedMetadataFailureEvent < acceptedMetadataFailureStream) {
     throw new Error(
-        "Web prompt retry state is not staged after append success and before metadata save");
+        "Web tool plan or retry snapshot is not ordered around durable prompt append");
+}
+for (const [handler, nextHandler] of [
+    ["void handleDuplicateProject()", "void handleArchiveProject()"],
+    ["void handleDeleteProject()", "void handleProjectLinks()"],
+    ["void handleDuplicateChat()", "void handleExportChat()"],
+    ["void handleImportChatBundle()", "void handleDeleteChat()"],
+    ["void handleDeleteChat()", "void handleSettings()"],
+]) {
+    const start = consoleSource.indexOf(handler);
+    const end = consoleSource.indexOf(nextHandler, start);
+    const source = consoleSource.slice(start, end);
+    const clear = source.indexOf("clearFailedWebRequestInstructions();");
+    const success = source.indexOf("sendWebJson(server, 200", clear);
+    if (start < 0 || end < 0 || clear < 0 || success < clear) {
+        throw new Error(`Successful ownership change keeps stale retry state: ${handler}`);
+    }
+}
+const retryHandlerStart = consoleSource.indexOf("void handlePromptRetry()");
+const retryHandlerEnd = consoleSource.indexOf(
+    "void handleSelectProject()", retryHandlerStart);
+const retryHandlerSource = consoleSource.slice(retryHandlerStart, retryHandlerEnd);
+const retryIntentSnapshot = retryHandlerSource.indexOf("failedWebRequestIntent");
+const retryToolPlan = retryHandlerSource.indexOf(
+    "resolveChatToolRequestPlan(", retryIntentSnapshot);
+const retryToolStream = retryHandlerSource.indexOf(
+    "streamStoredWebPrompt(", retryToolPlan);
+if (retryHandlerStart < 0 || retryHandlerEnd < 0 || retryIntentSnapshot < 0 ||
+    retryToolPlan < retryIntentSnapshot || retryToolStream < retryToolPlan ||
+    retryHandlerSource.includes("kToolIntentHeader")) {
+    throw new Error("Web retry does not reuse its accepted tool intent snapshot");
+}
+const webSendStart = page.indexOf("async function sendPrompt()");
+const webSendEnd = page.indexOf("async function retryFailedPrompt()", webSendStart);
+const webSendSource = page.slice(webSendStart, webSendEnd);
+const webPromptAccepted = webSendSource.indexOf("await rawPrompt(");
+const webIntentReset = webSendSource.indexOf("setMessageIntent('auto')", webPromptAccepted);
+if (webSendStart < 0 || webSendEnd < 0 || webPromptAccepted < 0 ||
+    webIntentReset < webPromptAccepted) {
+    throw new Error("Web composer intent does not reset to Auto after prompt acceptance");
+}
+const webRetryStart = page.indexOf("async function retryFailedPrompt()");
+const webRetryEnd = page.indexOf("q('#send').onclick", webRetryStart);
+if (webRetryStart < 0 || webRetryEnd < 0 ||
+    page.slice(webRetryStart, webRetryEnd).includes("messageIntent")) {
+    throw new Error("Web retry reads or changes the current composer intent");
+}
+for (const acceptedOperation of [
+    "await post('/api/project/select',{id:q('#projects').value});setMessageIntent('auto')",
+    "await post('/api/project/new',{title});setMessageIntent('auto')",
+    "await request('/api/chat/select',{method:'POST',body:new URLSearchParams({id:q('#chats').value})});setMessageIntent('auto')",
+    "await request('/api/chat/new',{method:'POST'});setMessageIntent('auto')",
+    "await post('/api/project/duplicate',{title});setMessageIntent('auto')",
+    "await post('/api/project/delete',{});setMessageIntent('auto')",
+    "await post('/api/chat/duplicate',{});setMessageIntent('auto')",
+    "await post('/api/chat/import',{name});setMessageIntent('auto')",
+    "await post('/api/chat/delete',{});setMessageIntent('auto')",
+    "await post('/api/chat/clear',{});setMessageIntent('auto')",
+]) {
+    if (!page.includes(acceptedOperation)) {
+        throw new Error(`Web composer intent is not reset after ${acceptedOperation}`);
+    }
 }
 for (const summaryFragment of [
     "readProjectChatMessagesByIndex(",
