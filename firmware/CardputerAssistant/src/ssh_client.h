@@ -68,6 +68,9 @@ struct SftpEntriesResult {
     String error;
 };
 
+using SshCommandOutputCallback =
+    std::function<OperationResult(const std::uint8_t*, std::size_t)>;
+
 OperationResult loadSshProfile(SshProfile& profile);
 OperationResult saveSshProfile(const SshProfile& profile);
 OperationResult loadSshProfileSummaries(
@@ -132,6 +135,12 @@ public:
         std::size_t maximumOutputBytes,
         std::uint32_t timeoutMs,
         const std::function<bool()>& isCancelled);
+    OperationResult executeCommandStreamingControlled(
+        const String& command,
+        int& exitStatus,
+        std::uint32_t timeoutMs,
+        const std::function<bool()>& isCancelled,
+        const SshCommandOutputCallback& onOutput);
     OperationResult openSftp(std::uint32_t timeoutMs);
     SftpEntriesResult listSftpDirectory(const String& path,
                                         std::uint32_t timeoutMs);

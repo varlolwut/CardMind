@@ -5741,6 +5741,54 @@ void handleSerialCommand(const String& command)
             result.success ? "none" : result.error.c_str());
         return;
     }
+    if (command == "SSHOUTPUTTEST") {
+        cardputer::markOperation("ssh_output_test");
+        const cardputer::OperationResult result =
+            runSshCommandOutputStorageTest();
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SSHOUTPUTTEST result=%s heap=%u largest_heap=%u stack_free=%u error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "SSHOUTPUTE2E") {
+        ensureNetworkReady();
+        cardputer::markOperation("ssh_output_e2e");
+        String retainedName;
+        std::uint32_t outputBytes = 0;
+        const cardputer::OperationResult result =
+            runSshCommandOutputRemoteTest(retainedName, outputBytes);
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SSHOUTPUTE2E result=%s log=%s output_bytes=%u heap=%u largest_heap=%u stack_free=%u error=%s\n",
+            result.success ? "pass" : "failed",
+            retainedName.isEmpty() ? "none" : retainedName.c_str(),
+            static_cast<unsigned int>(outputBytes),
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "SSHOUTPUTCLEAN") {
+        bool alreadyAbsent = false;
+        bool removed = false;
+        const cardputer::OperationResult result =
+            cleanupSshCommandOutputRemoteTest(alreadyAbsent, removed);
+        Serial.printf(
+            "SSHOUTPUTCLEAN result=%s already_absent=%s removed=%s error=%s\n",
+            result.success ? "pass" : "failed",
+            alreadyAbsent ? "yes" : "no",
+            removed ? "yes" : "no",
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
     if (command == "SSHSESSIONTEST" || command == "SFTPTEST") {
         ensureNetworkReady();
         cardputer::markOperation(command == "SFTPTEST" ? "sftp_test" : "ssh_session_test");

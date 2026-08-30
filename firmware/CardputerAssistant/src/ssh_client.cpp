@@ -2310,6 +2310,36 @@ OperationResult SshClient::executeCommandControlled(
     const std::function<bool()>& isCancelled)
 {
     output.clear();
+    if (maximumOutputBytes == 0 || maximumOutputBytes > 16384) {
+        return {false, "SSH command output limit must be between 1 and 16384 bytes"};
+    }
+    const SshCommandOutputCallback onOutput =
+        [&output, maximumOutputBytes](
+            const std::uint8_t* data,
+            std::size_t bytes) -> OperationResult {
+        if (!appendSshCommandOutput(
+                output, reinterpret_cast<const char*>(data), bytes,
+                maximumOutputBytes)) {
+            return {
+                false,
+                String("SSH command output exceeded the configured ") +
+                    String(static_cast<unsigned long>(maximumOutputBytes)) +
+                    "-byte inline limit",
+            };
+        }
+        return {true, ""};
+    };
+    return executeCommandStreamingControlled(
+        command, exitStatus, timeoutMs, isCancelled, onOutput);
+}
+
+OperationResult SshClient::executeCommandStreamingControlled(
+    const String& command,
+    int& exitStatus,
+    std::uint32_t timeoutMs,
+    const std::function<bool()>& isCancelled,
+    const SshCommandOutputCallback& onOutput)
+{
     exitStatus = -1;
     if (implementation_ == nullptr || implementation_->session == nullptr) {
         return {false, "SSH session is not connected"};
@@ -2320,14 +2350,14 @@ OperationResult SshClient::executeCommandControlled(
     if (command.isEmpty() || command.length() > 1024) {
         return {false, "SSH command must contain 1 to 1024 bytes without NUL characters"};
     }
-    if (maximumOutputBytes == 0 || maximumOutputBytes > 16384) {
-        return {false, "SSH command output limit must be between 1 and 16384 bytes"};
-    }
     if (timeoutMs < 1000 || timeoutMs > 120000) {
         return {false, "SSH command timeout must be between 1000 and 120000 ms"};
     }
     if (!isCancelled) {
         return {false, "SSH command requires a cancellation callback"};
+    }
+    if (!onOutput) {
+        return {false, "SSH command requires an output callback"};
     }
     if (isCancelled()) {
         return {false, "SSH command canceled by user"};
@@ -2375,15 +2405,9 @@ OperationResult SshClient::executeCommandControlled(
                 reinterpret_cast<char*>(buffer), sizeof(buffer));
             if (bytes > 0) {
                 const std::size_t count = static_cast<std::size_t>(bytes);
-                if (!appendSshCommandOutput(
-                        output, reinterpret_cast<const char*>(buffer), count,
-                        maximumOutputBytes)) {
-                    return {
-                        false,
-                        String("SSH command output exceeded the configured ") +
-                            String(static_cast<unsigned long>(maximumOutputBytes)) +
-                            "-byte inline limit",
-                    };
+                const OperationResult appended = onOutput(buffer, count);
+                if (!appended.success) {
+                    return appended;
                 }
                 progressed = true;
             } else if (bytes < 0 && bytes != LIBSSH2_ERROR_EAGAIN) {
@@ -2392,6 +2416,9 @@ OperationResult SshClient::executeCommandControlled(
                                                           : "SSH command stderr read",
                                             static_cast<int>(bytes))};
             }
+        }
+        if (isCancelled()) {
+            return {false, "SSH command canceled by user"};
         }
         if (libssh2_channel_eof(implementation_->channel) != 0) {
             exitStatus = libssh2_channel_get_exit_status(implementation_->channel);

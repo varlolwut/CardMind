@@ -29,6 +29,7 @@
 #include "src/storage.h"
 #include "src/storage_migration.h"
 #include "src/ssh_client.h"
+#include "src/ssh_command_output.h"
 #include "src/ssh_terminal.h"
 #include "src/ssh_tool.h"
 #include "src/text_utils.h"
@@ -52,6 +53,14 @@
 SET_LOOP_TASK_STACK_SIZE(16384);
 
 namespace {
+
+cardputer::OperationResult runSshCommandOutputStorageTest();
+cardputer::OperationResult runSshCommandOutputRemoteTest(
+    String& retainedName,
+    std::uint32_t& outputBytes);
+cardputer::OperationResult cleanupSshCommandOutputRemoteTest(
+    bool& alreadyAbsent,
+    bool& removed);
 
 constexpr const char* kFirmwareVersion = "1.12.1";
 constexpr std::size_t kMaximumInputBytes = 16384;

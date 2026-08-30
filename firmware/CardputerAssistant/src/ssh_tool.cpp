@@ -1,6 +1,7 @@
 #include "ssh_tool.h"
 
 #include "ssh_client.h"
+#include "ssh_command_output.h"
 #include "ssh_command_options.h"
 #include "text_utils.h"
 
@@ -38,13 +39,42 @@ ToolExecutionResult toolCanceled(const String& error)
 
 ToolExecutionResult terminalStateResult(SshCommandTerminalState state,
                                         std::uint32_t timeoutMs,
-                                        const String& stage)
+                                        const String& stage,
+                                        const String& storageDetail)
 {
     if (state == SshCommandTerminalState::UserCancelled) {
-        return toolCanceled(String("SSH command canceled ") + stage);
+        return toolCanceled(
+            String("SSH command canceled ") + stage + storageDetail);
     }
     return toolError(String("SSH command timed out after ") + String(timeoutMs) +
-                     " ms " + stage);
+                     " ms " + stage + storageDetail);
+}
+
+String outputStorageDetail(const SshCommandOutputCapture& capture,
+                           const OperationResult& storage)
+{
+    String detail;
+    if (capture.hasLog()) {
+        detail = String(" Retained SSH output log name: ") + capture.logName() + ".";
+        if (storage.success && capture.isComplete()) {
+            detail += String(" Download: ") + capture.downloadPath() + ".";
+        }
+    }
+    if (!storage.success) {
+        detail += String(" Output storage failed: ") + storage.error + ".";
+    }
+    return detail;
+}
+
+String commandFailureWithStorage(const String& primary,
+                                 const OperationResult& storage,
+                                 const String& detail)
+{
+    if (!storage.success && primary == storage.error) {
+        return primary + (detail.startsWith(" Retained") ? detail.substring(
+            0, detail.indexOf(" Output storage failed:")) : String());
+    }
+    return primary + detail;
 }
 
 }  // namespace
@@ -157,7 +187,7 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
     if (observeTerminalState()) {
         profile.password = "";
         profile.privateKeyPassphrase = "";
-        return terminalStateResult(terminalState, timeoutMs, "before connection");
+        return terminalStateResult(terminalState, timeoutMs, "before connection", "");
     }
     SshClient client;
     result = client.connectControlled(
@@ -167,7 +197,7 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
         client.close();
         profile.password = "";
         profile.privateKeyPassphrase = "";
-        return terminalStateResult(terminalState, timeoutMs, "during connection");
+        return terminalStateResult(terminalState, timeoutMs, "during connection", "");
     }
     if (!result.success) {
         profile.password = "";
@@ -181,7 +211,8 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
         client.close();
         profile.password = "";
         profile.privateKeyPassphrase = "";
-        return terminalStateResult(terminalState, timeoutMs, "during host-key verification");
+        return terminalStateResult(
+            terminalState, timeoutMs, "during host-key verification", "");
     }
     if (!trust.success || !trust.found || !trust.matches) {
         client.close();
@@ -198,35 +229,73 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
     profile.privateKeyPassphrase = "";
     if (terminalState != SshCommandTerminalState::None) {
         client.close();
-        return terminalStateResult(terminalState, timeoutMs, "during authentication");
+        return terminalStateResult(
+            terminalState, timeoutMs, "during authentication", "");
     }
     if (!result.success) {
         client.close();
         return toolError(result.error);
     }
-    std::string commandOutput;
+    SshCommandOutputCapture capture(maximumOutputBytes);
     int exitStatus = -1;
-    result = client.executeCommandControlled(
-        command, commandOutput, exitStatus, maximumOutputBytes,
-        timeoutMs, observeTerminalState);
+    const SshCommandOutputCallback onOutput =
+        [&capture](const std::uint8_t* data, std::size_t bytes) {
+            return capture.append(data, bytes);
+        };
+    result = client.executeCommandStreamingControlled(
+        command, exitStatus, timeoutMs, observeTerminalState, onOutput);
     observeTerminalState();
     client.close();
+
+    const bool invalidInline =
+        result.success && !capture.hasLog() &&
+        !isValidUtf8(capture.inlineOutput());
+    OperationResult storage = {true, ""};
+    if (capture.hasOutput() &&
+        (capture.hasLog() ||
+         terminalState != SshCommandTerminalState::None ||
+         !result.success || invalidInline)) {
+        storage = capture.promoteToLog();
+    }
+    const OperationResult finalized = capture.finalize();
+    if (storage.success && !finalized.success) {
+        storage = finalized;
+    }
+    const String storageDetail = outputStorageDetail(capture, storage);
+
     if (terminalState != SshCommandTerminalState::None) {
-        std::string().swap(commandOutput);
-        return terminalStateResult(terminalState, timeoutMs, "during execution");
+        return terminalStateResult(
+            terminalState, timeoutMs, "during execution", storageDetail);
     }
     if (!result.success) {
-        std::string().swap(commandOutput);
-        return toolError(result.error);
+        return toolError(commandFailureWithStorage(
+            result.error, storage, storageDetail));
     }
-    if (!isValidUtf8(commandOutput)) {
-        std::string().swap(commandOutput);
-        return toolError("SSH command returned output that is not valid UTF-8");
+    if (invalidInline) {
+        return toolError(commandFailureWithStorage(
+            "SSH command returned non-UTF-8 output", storage, storageDetail));
     }
+    if (!storage.success) {
+        return toolError(storage.error + storageDetail);
+    }
+
     JsonDocument document;
     document["ok"] = true;
     document["exit_status"] = exitStatus;
-    document["output"] = commandOutput;
+    if (capture.hasLog()) {
+        if (!capture.isComplete()) {
+            return toolError(
+                "SSH command output log could not be verified" + storageDetail);
+        }
+        document["output_bytes"] = capture.verifiedOutputBytes();
+        document["summary"] =
+            "SSH command output stored in a downloadable microSD log";
+        JsonObject outputLog = document["output_log"].to<JsonObject>();
+        outputLog["name"] = capture.logName();
+        outputLog["download_path"] = capture.downloadPath();
+    } else {
+        document["output"] = capture.inlineOutput();
+    }
     std::string output;
     serializeJson(document, output);
     return {

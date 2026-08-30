@@ -449,6 +449,291 @@ cardputer::OperationResult runSshSessionTest(bool testSftp)
     return result;
 }
 
+String sshCommandOutputRemoteFixture;
+
+cardputer::OperationResult removeSshCommandOutputFixture(const String& name)
+{
+    if (name.isEmpty()) {
+        return {true, ""};
+    }
+    const cardputer::OperationResult readable = cardputer::requireSdReadAccess();
+    if (!readable.success) {
+        return readable;
+    }
+    const String path = cardputer::workspaceFilePath(name);
+    if (SD.exists(path) && !SD.remove(path)) {
+        return {false, "Failed to remove the exact SSH command output fixture"};
+    }
+    return SD.exists(path)
+        ? cardputer::OperationResult{
+              false, "SSH command output fixture still exists after cleanup"}
+        : cardputer::OperationResult{true, ""};
+}
+
+cardputer::OperationResult runSshCommandOutputStorageTest()
+{
+    const std::array<std::uint8_t, 5> raw = {'A', 0, 0xFF, 'B', 'C'};
+    std::vector<String> fixtures;
+    cardputer::OperationResult outcome = {true, ""};
+    const auto remember = [&fixtures](
+        const cardputer::SshCommandOutputCapture& capture) {
+        if (capture.hasLog()) {
+            fixtures.push_back(capture.logName());
+        }
+    };
+    const auto reject = [&outcome](const String& error) {
+        if (outcome.success) {
+            outcome = {false, error};
+        }
+    };
+
+    do {
+        cardputer::SshCommandOutputCapture exact(4);
+        cardputer::OperationResult result = exact.append(raw.data(), 4);
+        if (result.success) result = exact.finalize();
+        if (!result.success || exact.hasLog() ||
+            exact.inlineOutput().size() != 4) {
+            reject(result.success
+                ? String("Exact-cap SSH output did not remain inline")
+                : result.error);
+            break;
+        }
+
+        cardputer::SshCommandOutputCapture spilled(4);
+        result = spilled.append(raw.data(), raw.size());
+        remember(spilled);
+        if (result.success) result = spilled.finalize();
+        if (!result.success || !spilled.isComplete() ||
+            spilled.verifiedOutputBytes() != raw.size()) {
+            reject(result.success
+                ? String("Cap-plus-one SSH output was not verified")
+                : result.error);
+            break;
+        }
+        File stored = SD.open(
+            cardputer::workspaceFilePath(spilled.logName()), FILE_READ);
+        std::array<std::uint8_t, 5> loaded = {};
+        const std::size_t loadedBytes = stored
+            ? stored.read(loaded.data(), loaded.size()) : 0;
+        if (stored) stored.close();
+        if (loadedBytes != raw.size() ||
+            !std::equal(raw.begin(), raw.end(), loaded.begin())) {
+            reject("Spilled SSH output bytes did not match the source bytes");
+            break;
+        }
+
+        cardputer::SshCommandOutputCapture promoted(16);
+        result = promoted.append(raw.data(), 3);
+        if (result.success) result = promoted.promoteToLog();
+        remember(promoted);
+        if (result.success) result = promoted.finalize();
+        if (!result.success || !promoted.isComplete() ||
+            promoted.verifiedOutputBytes() != 3) {
+            reject(result.success
+                ? String("Below-cap SSH output promotion was not verified")
+                : result.error);
+            break;
+        }
+
+        const std::array<cardputer::SdStorageState, 4> faultStates = {
+            cardputer::SdStorageState::Missing,
+            cardputer::SdStorageState::Full,
+            cardputer::SdStorageState::Removed,
+            cardputer::SdStorageState::Replaced,
+        };
+        for (const cardputer::SdStorageState state : faultStates) {
+            cardputer::setSdStorageFaultOverrideForDiagnostics(state);
+            cardputer::SshCommandOutputCapture beforeCreation(1);
+            result = beforeCreation.append(raw.data(), 2);
+            cardputer::clearSdStorageFaultOverrideForDiagnostics();
+            if (result.success || beforeCreation.hasLog()) {
+                reject("SSH output log was created while microSD was unavailable");
+                break;
+            }
+        }
+        if (!outcome.success) break;
+
+        for (const cardputer::SdStorageState state : faultStates) {
+            cardputer::SshCommandOutputCapture afterCreation(1);
+            result = afterCreation.append(raw.data(), 2);
+            remember(afterCreation);
+            if (!result.success) {
+                reject(result.error);
+                break;
+            }
+            cardputer::setSdStorageFaultOverrideForDiagnostics(state);
+            const cardputer::OperationResult faulted =
+                afterCreation.append(raw.data() + 2, 1);
+            cardputer::clearSdStorageFaultOverrideForDiagnostics();
+            const cardputer::OperationResult finalized =
+                afterCreation.finalize();
+            if (faulted.success || finalized.success ||
+                afterCreation.isComplete() ||
+                afterCreation.verifiedOutputBytes() != 0) {
+                reject("SSH output storage fault after creation was not fail-closed");
+                break;
+            }
+        }
+    } while (false);
+
+    cardputer::clearSdStorageFaultOverrideForDiagnostics();
+    for (const String& fixture : fixtures) {
+        const cardputer::OperationResult first =
+            removeSshCommandOutputFixture(fixture);
+        const cardputer::OperationResult second =
+            removeSshCommandOutputFixture(fixture);
+        if (!first.success || !second.success) {
+            outcome = {
+                false,
+                first.success ? second.error : first.error,
+            };
+        }
+    }
+    return outcome;
+}
+
+cardputer::OperationResult runSshCommandOutputRemoteTest(
+    String& retainedName,
+    std::uint32_t& outputBytes)
+{
+    retainedName = "";
+    outputBytes = 0;
+    if (!sshCommandOutputRemoteFixture.isEmpty()) {
+        return {
+            false,
+            "The previous exact SSH output fixture must be cleaned before another run",
+        };
+    }
+    const cardputer::SshProfile profile = {
+        "Rebex output test", "test.rebex.net", 22, "demo", "password",
+        cardputer::SshAuthMode::Password, ""};
+    cardputer::SshClient client;
+    cardputer::OperationResult result = client.connect(profile, 60000);
+    if (!result.success) return result;
+
+    const cardputer::SshTrustResult existing = cardputer::checkTrustedSshHost(
+        profile.host, profile.port, client.fingerprint());
+    if (!existing.success || (existing.found && !existing.matches)) {
+        client.close();
+        return {
+            false,
+            existing.success ? String("Rebex test host key changed") : existing.error,
+        };
+    }
+    const bool temporaryTrust = !existing.found;
+    if (temporaryTrust) {
+        result = cardputer::trustSshHost(
+            profile.host, profile.port, client.fingerprint());
+    }
+    if (result.success) {
+        result = client.authenticate(profile, 60000);
+    }
+
+    cardputer::SshCommandOutputCapture capture(1);
+    bool cancelAfterOutput = false;
+    int exitStatus = -1;
+    if (result.success) {
+        const std::function<bool()> cancel = [&cancelAfterOutput]() {
+            return cancelAfterOutput;
+        };
+        const cardputer::SshCommandOutputCallback output =
+            [&capture, &cancelAfterOutput](
+                const std::uint8_t* data,
+                std::size_t bytes) {
+            const cardputer::OperationResult appended =
+                capture.append(data, bytes);
+            if (appended.success && capture.hasLog()) {
+                cancelAfterOutput = true;
+            }
+            return appended;
+        };
+        result = client.executeCommandStreamingControlled(
+            "ls -lR /pub", exitStatus, 60000, cancel, output);
+    }
+    client.close();
+
+    cardputer::OperationResult stored = {true, ""};
+    if (capture.hasOutput()) {
+        stored = capture.promoteToLog();
+    }
+    const cardputer::OperationResult finalized = capture.finalize();
+    if (stored.success && !finalized.success) {
+        stored = finalized;
+    }
+    if (capture.hasLog()) {
+        retainedName = capture.logName();
+        sshCommandOutputRemoteFixture = retainedName;
+    }
+    if (capture.isComplete()) {
+        outputBytes = capture.verifiedOutputBytes();
+    }
+
+    if (result.success || !cancelAfterOutput ||
+        result.error != "SSH command canceled by user") {
+        const String observed = result.success
+            ? String("remote command completed before cancellation")
+            : result.error;
+        result = {
+            false,
+            String("Read-only SSH output command did not end with the exact cancellation outcome: ") +
+                observed,
+        };
+    } else if (!capture.hasLog() || !stored.success ||
+               !capture.isComplete() || outputBytes == 0) {
+        result = {
+            false,
+            stored.success
+                ? String("Canceled SSH output was not retained completely")
+                : stored.error,
+        };
+    } else {
+        result = {true, ""};
+    }
+
+    if (temporaryTrust) {
+        const cardputer::OperationResult forgotten =
+            cardputer::forgetTrustedSshHost(profile.host, profile.port);
+        if (!forgotten.success) {
+            result = {
+                false,
+                result.success
+                    ? forgotten.error
+                    : result.error + "; temporary host-key cleanup failed: " +
+                          forgotten.error,
+            };
+        }
+    }
+    return result;
+}
+
+cardputer::OperationResult cleanupSshCommandOutputRemoteTest(
+    bool& alreadyAbsent,
+    bool& removed)
+{
+    alreadyAbsent = sshCommandOutputRemoteFixture.isEmpty();
+    removed = false;
+    if (alreadyAbsent) {
+        return {true, ""};
+    }
+    const cardputer::OperationResult readable = cardputer::requireSdReadAccess();
+    if (!readable.success) {
+        return readable;
+    }
+    const String name = sshCommandOutputRemoteFixture;
+    const String path = cardputer::workspaceFilePath(name);
+    alreadyAbsent = !SD.exists(path);
+    const cardputer::OperationResult first =
+        removeSshCommandOutputFixture(name);
+    const cardputer::OperationResult second =
+        removeSshCommandOutputFixture(name);
+    if (!first.success || !second.success) {
+        return first.success ? second : first;
+    }
+    removed = !alreadyAbsent;
+    sshCommandOutputRemoteFixture = "";
+    return {true, ""};
+}
+
 cardputer::OperationResult runSshDemoTest()
 {
     const cardputer::SshProfile profile = {

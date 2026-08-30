@@ -52,7 +52,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-02 | Opaque private-key records and explicit profile-to-key ID binding | No shared mutable key slot; key material remains write-only and unreachable through model/file/read APIs | completed |
 | P4-03 | Conservative model SSH classification in the existing Phase 3 policy/runtime path | Every arbitrary shell `ssh_command` remains `SshMutate`; `SshRead` is available only to exact fixed reviewed safe actions or strict non-shell templates; no regex/prefix shell classifier exists; manual Device/Web terminal authority is unchanged | completed |
 | P4-04 | Configurable model SSH command timeout/output policy while retaining the existing 1,024-byte direct command cap | Timeout/output policy is explicit; the user-removed 8 KiB increase is not implemented | completed |
-| P4-05 | Single-pass streamed SD command log, bounded model summary/reference, cancellation, and downloadable output | Output is written once while streaming to SD; the model receives only a bounded summary/reference; a long foreground command cancels and its log downloads without background execution | in_progress |
+| P4-05 | Single-pass streamed SD command log, bounded model summary/reference, cancellation, and downloadable output | Output is written once while streaming to SD; the model receives only a bounded summary/reference; a long foreground command cancels and its log downloads without background execution | completed |
 | P4-06 | Paged model SFTP list/read/write/move through existing `SftpReadWrite` and Phase 3 permission/confirmation boundaries | Model listing is bounded/paged; `Ask` confirms every model SFTP call; `Allow` still confirms overwrite/delete/move onto an existing target; overwrite defaults deny and no prior remote target is truncated/deleted before confirmed safe replacement; manual Device/Web SFTP remains direct-user authority | pending |
 | P4-07 | Existing streaming CardMind workspace transfer to/from selected remote host | Both directions preserve workspace policy, total foreground deadline and cooperative cancel; overwrite defaults deny and replacement never destroys the prior target before confirmation | pending |
 | P4-08 | Small fixed built-in Safe Actions set for logs, service state, containers, disk and processes | Reviewed fixed actions obey existing Off/Ask/ceiling/host-key/timeout/audit boundaries; no presets, editor, macros, persistence schema or action framework | pending |
@@ -573,7 +573,7 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
 
 ## P4-04 design gate
 
-**Status:** completed
+**Status:** completed after the approved validator correction
 **Started:** 2026-08-30 21:24:34 +03:00.
 
 ### Approved reopen gate
@@ -717,5 +717,255 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
   bytes and stack margin 7,860 bytes. Immediate `STATUS` remained responsive with microSD ready,
   two preserved chats/two history entries, reset reason 1, free heap 122,752 bytes, minimum heap
   111,200 bytes and the same largest block/stack margin. No fixture or persisted state was created.
-- The approved correction completed at 2026-08-30 23:34:49 +03:00. P4-05 remains paused until this
-  row's standalone commit is pushed and its remote SHA is verified.
+- The approved correction completed at 2026-08-30 23:34:49 +03:00. Standalone commit
+  `47d4aaeb3596f9db74741c910de1ad66879bffce` was pushed to the Phase 4 feature branch and GitHub MCP
+  verified that exact remote SHA. P4-05 then resumed without a production change.
+
+## P4-05 design gate
+
+### Focused correction after independent design STOP
+
+This correction is authoritative wherever an earlier P4-05 draft is less precise.
+
+- Combined command-output order is the existing SSH callback-delivery order: each stdout chunk,
+  then each stderr chunk, exactly as delivered by the single foreground channel loop. Before every
+  append, reject a total beyond `UINT32_MAX`; the first spill space preflight covers the complete
+  retained inline prefix plus the triggering chunk. While the file is open, the internal persisted
+  count means only bytes accepted by exact `File::write` calls. After `flush()` and `close()`, reopen
+  the exact file and verify its size. Only that verified size may be reported as `output_bytes` with
+  a complete log. A short write, reopen failure, or size mismatch retains the collision-owned
+  filename when one was created, but reports storage failure and never claims a verified byte count
+  or completeness.
+- The output callback returns `OperationResult`; its failure stops channel reads immediately. The
+  existing first-observed terminal latch is authoritative, including cancellation precedence when
+  cancellation and deadline are first observed together. After reads stop, observe/latch terminal
+  state, close channel/session, then perform SD promotion/finalization exactly once. The first
+  latched cancellation or timeout remains the tool outcome ahead of later transport, sink, or
+  finalization failures, while the error includes relevant storage detail. Cancellation names a log
+  only if exact creation succeeded; the API continues to discard canceled tool output, so no
+  canceled bytes reach model continuation. This remains one foreground execution with no continuing
+  reader after return.
+- Promotion is required not only on normal overflow. If cancellation, timeout, connector failure,
+  or invalid inline UTF-8 occurs after any below-cap bytes were received, those bytes are promoted
+  once before finalization when the original SD remains writable. If promotion cannot start, return
+  the primary terminal outcome plus explicit storage failure and no filename. A fixed model summary
+  contains metadata only and never samples command bytes.
+
+Frozen focused proof additions:
+
+- Deterministically observe exact-cap inline success and cap-plus-one single-pass spill.
+- Observe cancellation below cap and timeout/connector error below cap promoting retained bytes;
+  cancellation must not reach model continuation and its error names the log only after creation.
+- Spill raw bytes containing NUL/non-UTF-8 and verify exact downloaded bytes without placing those
+  bytes in the model result, audit, serial output, or summary.
+- Exercise short-write or final-size-mismatch failure at the narrow capture boundary and verify that
+  no verified `output_bytes`/completeness claim is emitted.
+- Exercise missing/full/removed/replaced SD before creation and an identity/space failure after
+  creation; no overwrite, retry, or continued SSH read is allowed.
+- Cleanup uses only the returned collision-owned filename, first confirms the original SD volume is
+  still active, removes only that file after success or failure, verifies absence, and repeats
+  idempotently. Existing non-owned workspace files remain unchanged.
+
+**Focused review status:** `GO` from independent read-only reviewer
+`01a05426-cb94-7c51-9a54-1163e18b9a86`; all three concrete blockers were resolved in one focused
+follow-up. The reviewer is closed and production evidence may begin.
+
+**Code-review correction status:** `GO` from fresh independent read-only reviewer
+`01a05439-74c9-7ae2-b791-1e409205de5e` after its single focused follow-up. The reviewer found four
+bounded blockers. The corrected remote diagnostic cancels only after an actual SD spill and accepts
+only the exact cancellation outcome; the existing authenticated hardware-Web runner downloads the
+exact returned filename and owns two-pass Device cleanup from both its normal path and `finally`;
+failed/unverified storage reports a retained filename without claiming it is currently downloadable.
+The proportional test-only write set therefore also includes
+`tools/hardware_web_e2e.{ps1,mjs}`; it adds one P4-05 suite and no production route or framework.
+Static pre-review evidence: `git diff --check`, PowerShell parse and `node --check` all passed.
+The reviewer is closed; focused build/device/Web evidence may run.
+
+**Status:** code_review_GO
+
+**Build failure classification:** active-row diagnostic integration defect. The first pinned build
+reached Arduino compilation and failed because the preprocessor did not synthesize declarations for
+the three new P4-05 `.ino` diagnostic functions before `SerialDiagnostics.ino` consumed them.
+Production capture behavior was not implicated. The minimal correction is three explicit declarations
+in the existing sketch declaration owner; no contract, route, persistence or test scope changes.
+
+**Device failure classification (2026-08-30 23:14:39 +03:00; elapsed about 45 minutes):**
+test/harness defect, not a production failure. The retained diagnostic tried to induce a final-size
+mismatch by appending through a second FAT file handle while the capture handle remained open; the
+filesystem did not expose that concurrent write to the authoritative reopen, so the synthetic
+expectation was invalid. The exact write-count/final-reopen comparison remains independently
+code-reviewed, while real missing/full/removed/replaced failures before and after creation stay in
+the Device matrix. Remove only the unreliable concurrent-handle injection; do not alter production
+capture or repeat the experiment with the same hypothesis. The diagnostic's exact-owned finalizer
+ran before the suite returned failure.
+
+**Remote E2E failure classification:** the unchanged existing `SSHDEMOTEST` then passed connect,
+authentication, SFTP list/download, PTY and exact host-key cleanup on `test.rebex.net` with
+heap 122,092 bytes and stack margin 7,876 bytes. Therefore Wi-Fi, the host, trust and authentication
+are not the owner. The new exec/cancel diagnostic returned before any captured chunk, but replaced
+its first error with a generic assertion. This is a P4-05 harness-observability defect. One
+instrumentation-only correction preserves the underlying bounded libssh2 error in the diagnostic;
+production streaming/capture behavior remains unchanged. Do not repeat the remote case until that
+new observation is available.
+
+**Foreign regression ownership:** the instrumented remote run observed
+`SSH command must contain 1 to 1024 bytes without NUL characters` before channel open for the
+literal command `ls -lR /pub`. The P4-04 validator uses Arduino
+`String::indexOf('\0')`, which includes the terminating NUL and therefore rejects every non-empty
+command. P4-05 capture received no bytes because it was never entered. P4-05 is paused without a
+design/code change; P4-04 is explicitly reopened for the single validator correction, focused
+command-boundary evidence and its own follow-up commit. After P4-04 closes, resume this unchanged
+P4-05 proof from the remote E2E step.
+
+**Focused E2E failure ownership and 60-minute pivot:** after P4-04 closed, `SSHOUTPUTTEST` passed,
+but the remote diagnostic retained 157 verified bytes and reported that `ls -lR /pub` completed
+before the next cancellation poll. The initial test-harness hypothesis added a bounded post-output
+sleep; a materially different second run still returned success with 193 verified bytes. Both
+runner finalizers removed their exact-owned files, and two explicit cleanup retries after each run
+observed the file already absent. Code inventory then proved an active-row ordering defect:
+`executeCommandStreamingControlled` invokes `onOutput`, then checks channel EOF before its next
+loop-head cancellation observation. A callback-triggered cancel can therefore lose to same-iteration
+EOF. The frozen minimal correction checks the existing callback immediately after stream callbacks
+and before EOF success, with the original finite `ls` restored as the regression scenario. No SSH
+state, API, timeout, output-storage or channel-management contract changes.
+**Started:** 2026-08-30 22:30:00 +03:00.
+
+### Locked clauses and non-goals
+
+- A model-issued foreground `ssh_command` that exceeds its P4-04
+  `max_inline_output_bytes` must stop returning partial inline output and instead retain the
+  complete combined stdout/stderr stream in one downloadable microSD-backed command log.
+- Output through the inline cap remains the existing bounded JSON result. The first byte beyond
+  that cap promotes the already collected prefix to the log exactly once, clears the inline
+  buffer, and writes every later chunk directly to the same log. The inline buffer never grows
+  beyond the requested cap.
+- User cancellation remains cooperative and foreground. If any command bytes exist when
+  cancellation, timeout or connector failure is observed, those bytes are promoted/finalized as
+  a downloadable partial log; cancellation remains `ToolExecutionOutcome::Cancelled`.
+- The model receives only a bounded summary, byte count and opaque log filename/download
+  reference. It never receives the full spilled bytes, an absolute SD path, credentials or SSH
+  authority internals.
+- Non-goals: background jobs/queues, durable job manifests, resume/reconnect, automatic retry,
+  result handles, retention/rotation settings, a general streaming/storage framework, a larger
+  inline buffer, Device/Web controls, manual-terminal changes, SFTP/transfer and P5 execution.
+
+### Existing producer/consumer and persistence inventory
+
+- `executeSshTool()` is the only model-command producer and currently calls the sole live
+  `executeCommandControlled()` consumer. Manual Device/Web terminals use separate shell APIs and
+  remain unchanged.
+- `SshClient` reads libssh2 stdout then stderr in bounded 1,024-byte blocks on the existing
+  foreground channel. P4-04 already supplies one total deadline/cancel callback and the combined
+  inline cap; P4-05 changes only the output sink after that cap.
+- `ToolExecutionResult` and the API continuation accept bounded UTF-8 JSON. Finished failures can
+  carry a bounded log reference to the model. Canceled results short-circuit before tool output is
+  appended, so the actionable error string must also name the retained log for Device/Web users.
+- Existing tool activity records only tool, selected-SSH target, status, duration, bounded result
+  bytes and exit status. It never stores command output; P4-05 does not change that journal.
+- `createWorkspaceFile()` collision-checks a safe relative name under `/assistant/files`.
+  An unlinked generated `.log` is visible/downloadable to the authenticated user through the
+  existing `GET /api/file/download?name=...` stream, while project file tools cannot read it
+  without an explicit project link. P4-05 creates no link.
+- `requireSdWriteAccess()`, `checkSdOperationSpace()` and the retained 1-MiB operational floor
+  own missing/full/removed/replaced-card rejection. No write starts before the current card
+  identity and capacity permit it.
+- ESP32 FS from the pinned M5Stack core `3.2.1` defines `FILE_WRITE` as `w` and
+  `FILE_APPEND` as `a`; `File::write` reports accepted bytes, while `flush()` and
+  `close()` return no status. Therefore each write count and final file size must be checked.
+- A direct append-only `.log` is authoritative user output, not an atomic metadata document.
+  Reset while streaming leaves a valid downloadable partial file. No boot scan, transaction
+  marker, retry or running-command recovery owns it; ordinary authenticated file deletion owns
+  later user cleanup.
+
+### Minimal design and state transitions
+
+- Add one SSH-specific SD output-capture connector with states `inline`, `logged` and
+  `finalized`. It owns at most the requested inline bytes, one `File`, a 32-bit persisted byte
+  count and one generated name `ssh-command-<16 lowercase hex>.log`.
+- Name generation is bounded and collision checked; an existing file is never opened or
+  overwritten. Creation reuses `createWorkspaceFile()`, then opens the exact new file with
+  `FILE_APPEND`.
+- `inline -> logged` occurs on first overflow or explicit promotion after terminal
+  cancellation/error. It preflights SD space, writes the prefix once, clears it, then accepts each
+  subsequent stdout/stderr chunk only after a per-chunk space check and exact write-count check.
+- `finish` flushes, verifies exact file size and closes. Once a filename exists, later
+  connector/SD failure retains the honest partial log and returns its reference; failure before
+  creation clears partial inline output and leaves no artifact.
+- Extend `SshClient` by one SSH-output callback method and implement the existing bounded method
+  as a thin callback wrapper, keeping one libssh2 channel loop and unchanged manual callers.
+- Successful spill returns bounded JSON with `exit_status`, `output_bytes`, summary and
+  `output_log{name,download_path}`. Timeout/failure returns the same bounded reference; cancel
+  additionally includes the filename in `error` because the API deliberately discards canceled
+  tool output.
+
+### Crash/SD/cleanup table
+
+| Window | Durable state and required behavior |
+|---|---|
+| Before promotion | No command-log file; inline bytes remain bounded RAM only |
+| After collision-checked create, before/during prefix write | Exact new log exists and may be empty/partial; report and retain only that file |
+| During later chunk append | Exact log contains the verified persisted prefix; stop on cancel/deadline/short write/SD state change and retain it |
+| After flush/size verification | Closed downloadable log with exact persisted byte count |
+| Reset in any logged window | No executor resumes; the ordinary workspace file remains an honest partial/final log |
+| Test success/failure | Delete only the returned collision-checked fixture, verify absence and repeat cleanup idempotently; preserve all prior files/inventory |
+
+### Frozen proof and forbidden effects
+
+- Cheap gate: strict host regression, callback/output-cap static checks, no new route/settings/assets,
+  bounded JSON/reference and no absolute/private-storage path in schemas/results.
+- Device gate: one exact-core build/upload; a no-network capture diagnostic proves inline boundary,
+  first-byte spill, exact combined bytes, promotion/finalization, SD write/size checks and automatic
+  exact-owned cleanup.
+- Integration gate: one controlled read-only SSH command produces a spill, cancellation is observed
+  after output begins, the authenticated existing Web download route returns the exact logged
+  bytes, and a `finally` cleanup deletes only that returned filename and proves absence. Keep Web
+  Console active through download/cleanup, then send `EXIT`.
+- Record idle and active-SSH free heap, largest block, stack and reset/freeze state against their
+  respective retained baselines. The 70-KiB floor applies to idle/general mode; active SSH must not
+  regress from the existing active-SSH baseline.
+- Forbidden: overwrite/collision, a second output pass, output bytes in audit/serial/model result,
+  project linking, model file-tool access to the log, silent truncation, auto retry, background
+  execution, log rotation/retention, Web/Device UI work or any P4-06+ implementation.
+
+### Expected write set
+
+- Production: `src/ssh_client.{h,cpp}`, `src/ssh_tool.cpp`, and one narrow
+  `src/ssh_command_output.{h,cpp}` SD connector.
+- Retained proportional diagnostics only if needed:
+  `CardputerAssistant.ino`, `SshTools.ino`, `SerialDiagnostics.ino`, and
+  `tests/host_tests.cpp`.
+- Evidence only: this traceability row. No `file_workspace`, `sd_storage`, `tool_router`,
+  `api_client`, Web route/assets, Settings, profile/key or permission-policy changes.
+
+### Observed P4-05 evidence and closure
+
+- The stabilized design and production/diagnostic diff each received independent read-only GO.
+  After the real same-iteration output/EOF race was observed, one fresh reviewer returned GO for
+  the single cancel-before-EOF correction and was closed without follow-up or reuse.
+- Cheap checks passed: strict host tests, PowerShell parser, Node syntax, `git diff --check`, bounded
+  callback/output/reference invariants and the generated Web asset consistency remained unchanged.
+  No new route, Settings field, permission framework, background executor or UI asset exists.
+- Final exact pinned build passed with FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`, resolved M5Stack ESP32 core
+  `3.2.1`, 3,340,602 sketch bytes and 65,628 global bytes. The uploaded image is 3,340,784 bytes
+  with SHA-256 `34EA26ED51B85DF7DBBCBDF5314448FDBD2AFF7CBC156A1E523813EB5562D589`; every flash segment
+  reported hash verification and COM8 returned after reset.
+- `SSHOUTPUTTEST` passed inline/spill/promotion/final-size/SD-failure/cleanup boundaries with free
+  heap 122,500 bytes, largest block 60,404 bytes and stack margin 7,876 bytes. Against the retained
+  P3 baseline this is -260 free-heap bytes, +2,048 largest-block bytes and +8 stack bytes.
+- The final real foreground `SSHOUTPUTE2E` passed on the same device: the finite read-only command
+  produced and retained exactly 157 bytes in collision-owned
+  `ssh-command-42e5ea1879cfc4d4.log`, callback-triggered cancellation beat same-iteration EOF, and no
+  background execution or retry occurred. The existing authenticated Web route downloaded exactly
+  157 bytes with the required filename pattern while Web Console remained active; `EXIT` then
+  returned `WEB_CONSOLE result=stopped`.
+- Runner cleanup deleted only the returned command-log fixture. Two later cleanup calls both passed
+  with `already_absent=yes`; the two failed hypotheses received the same failure-finalizer cleanup.
+  Five exact-owned local log/sidecar files were removed from nine collision-checked candidate paths.
+- Final `STATUS` remained responsive with microSD ready, two preserved chats/two history entries,
+  reset reason 1, free heap 104,060 bytes, largest block 37,876 bytes, minimum heap 48,948 bytes and
+  stack margin 5,972 bytes. Free heap is 12 bytes below the retained 104,072-byte active-Web/SSH
+  comparison point, with bounded RAM, the 70-KiB general floor preserved and no reset or freeze.
+- P4-05 completed at 2026-08-30 23:59:26 +03:00 after approximately 89 minutes. The mandatory
+  material pivots were the independently closed P4-04 validator regression and then the proven
+  same-iteration cancellation-order correction; no third patch/review loop was entered.

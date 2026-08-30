@@ -7,7 +7,7 @@ param(
     [int]$BaudRate,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet("projects", "retry", "compaction", "summary-regeneration", "context-history", "context-history-orphan-recover", "archive-quota", "archive-quota-recover", "binary-text", "binary-text-recover", "history-heap", "limits", "chat-scale", "workspace-scale", "file-scale", "unicode-path", "shared-isolation", "large-stream", "atomic-failure", "version-history", "sd-degraded", "instructions", "request-settings", "diagnostics", "ssh", "workspace-tool", "full")]
+    [ValidateSet("projects", "retry", "compaction", "summary-regeneration", "context-history", "context-history-orphan-recover", "archive-quota", "archive-quota-recover", "binary-text", "binary-text-recover", "history-heap", "limits", "chat-scale", "workspace-scale", "file-scale", "unicode-path", "shared-isolation", "large-stream", "atomic-failure", "version-history", "sd-degraded", "instructions", "request-settings", "diagnostics", "ssh", "p4-ssh-output", "workspace-tool", "full")]
     [string]$Suite,
 
     [Parameter(Mandatory = $true)]
@@ -86,6 +86,30 @@ function Sync-SerialChannel {
                 throw "Serial channel did not reach normal mode and answer PING before Web E2E"
             }
         }
+    }
+}
+
+function Remove-P4SshOutputFixture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.Ports.SerialPort]$Serial,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedLogPath
+    )
+
+    $pattern = '^SSHOUTPUTCLEAN result=(?:pass|failed) already_absent=(?:yes|no) removed=(?:yes|no) error=.*$'
+    $Serial.WriteLine("SSHOUTPUTCLEAN")
+    $Serial.BaseStream.Flush()
+    $first = Wait-SerialLine -Serial $Serial -Pattern $pattern -TimeoutSeconds 30 -ResolvedLogPath $ResolvedLogPath
+    if ($first -notmatch '^SSHOUTPUTCLEAN result=pass already_absent=(?:yes|no) removed=(?:yes|no) error=none$') {
+        throw "P4-05 exact SSH output cleanup failed: $first"
+    }
+    $Serial.WriteLine("SSHOUTPUTCLEAN")
+    $Serial.BaseStream.Flush()
+    $second = Wait-SerialLine -Serial $Serial -Pattern $pattern -TimeoutSeconds 30 -ResolvedLogPath $ResolvedLogPath
+    if ($second -ne "SSHOUTPUTCLEAN result=pass already_absent=yes removed=no error=none") {
+        throw "P4-05 idempotent SSH output cleanup failed: $second"
     }
 }
 
@@ -733,6 +757,10 @@ $webConsoleRequested = $false
 $webConsoleStarted = $false
 $webConsoleStopped = $false
 $sdFaultActive = $false
+$p4SshOutputFixtureOwned = $false
+$p4SshOutputFixtureClean = $false
+$p4SshOutputName = ""
+$p4SshOutputBytes = [uint32]0
 $sdDegradedNonce = ""
 $sdDegradedFixtureSetupAttempted = $false
 $sdDegradedFixtureClean = $false
@@ -748,6 +776,32 @@ try {
     $serial.Open()
     Start-Sleep -Seconds 12
     Sync-SerialChannel -Serial $serial -ResolvedLogPath $resolvedLogPath
+    if ($Suite -eq "p4-ssh-output") {
+        $serial.WriteLine("SSHOUTPUTTEST")
+        $serial.BaseStream.Flush()
+        $storage = Wait-SerialLine -Serial $serial -Pattern '^SSHOUTPUTTEST result=(?:pass|failed) ' -TimeoutSeconds 120 -ResolvedLogPath $resolvedLogPath
+        if ($storage -notmatch '^SSHOUTPUTTEST result=pass .*error=none$') {
+            throw "P4-05 storage diagnostic failed: $storage"
+        }
+        Write-Host $storage
+
+        $serial.WriteLine("SSHOUTPUTE2E")
+        $serial.BaseStream.Flush()
+        $remote = Wait-SerialLine -Serial $serial -Pattern '^SSHOUTPUTE2E result=(?:pass|failed) ' -TimeoutSeconds 180 -ResolvedLogPath $resolvedLogPath
+        if ($remote -match ' log=(?<owned>ssh-command-[0-9a-f]{16}\.log) ') {
+            $p4SshOutputName = $Matches.owned
+            $p4SshOutputFixtureOwned = $true
+        }
+        $remotePass = '^SSHOUTPUTE2E result=pass log=(?<name>ssh-command-[0-9a-f]{16}\.log) output_bytes=(?<bytes>[1-9][0-9]*) heap=[1-9][0-9]* largest_heap=[1-9][0-9]* stack_free=[1-9][0-9]* error=none$'
+        if ($remote -notmatch $remotePass) {
+            throw "P4-05 canceled foreground SSH output diagnostic failed: $remote"
+        }
+        $p4SshOutputName = $Matches.name
+        $p4SshOutputBytes = [uint32]::Parse(
+            $Matches.bytes, [Globalization.CultureInfo]::InvariantCulture)
+        $p4SshOutputFixtureOwned = $true
+        Write-Host $remote
+    }
     if ($Suite -eq "sd-degraded") {
         $sdDegradedNonce = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString(
             [System.Globalization.CultureInfo]::InvariantCulture)
@@ -1396,6 +1450,12 @@ try {
     $nodeStdoutPath = "$resolvedLogPath.node.out"
     $nodeStderrPath = "$resolvedLogPath.node.err"
     $nodeArguments = @("tools/hardware_web_e2e.mjs", "--suite", $Suite)
+    if ($Suite -eq "p4-ssh-output") {
+        $nodeArguments += @(
+            "--p4-ssh-output-name", $p4SshOutputName,
+            "--p4-ssh-output-bytes", $p4SshOutputBytes.ToString(
+                [Globalization.CultureInfo]::InvariantCulture))
+    }
     if ($Suite -eq "workspace-scale") {
         $nodeArguments += @("--workspace-scale-nonce", $workspaceScaleNonce)
     }
@@ -1674,6 +1734,11 @@ try {
         -TimeoutSeconds 20 -ResolvedLogPath $resolvedLogPath
     $webConsoleStopped = $true
     Write-Host $stopped
+    if ($Suite -eq "p4-ssh-output" -and $p4SshOutputFixtureOwned) {
+        Remove-P4SshOutputFixture -Serial $serial -ResolvedLogPath $resolvedLogPath
+        $p4SshOutputFixtureClean = $true
+        $p4SshOutputFixtureOwned = $false
+    }
     if ($Suite -eq "instructions") {
         $serial.WriteLine("INSTRUCTIONTEST")
         $serial.BaseStream.Flush()
@@ -1870,6 +1935,17 @@ finally {
             }
             catch {
                 Write-Warning "Could not request Web Console shutdown: $($_.Exception.Message)"
+            }
+        }
+        if ($p4SshOutputFixtureOwned -and -not $p4SshOutputFixtureClean -and
+            (-not $webConsoleRequested -or $webConsoleStopped)) {
+            try {
+                Remove-P4SshOutputFixture -Serial $serial -ResolvedLogPath $resolvedLogPath
+                $p4SshOutputFixtureClean = $true
+                $p4SshOutputFixtureOwned = $false
+            }
+            catch {
+                Write-Warning "Could not complete P4-05 SSH output cleanup: $($_.Exception.Message)"
             }
         }
         if ($sdFaultActive -and (-not $webConsoleRequested -or $webConsoleStopped)) {
