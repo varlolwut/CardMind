@@ -60,7 +60,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-10 | Removed by user: configurable Device terminal-history rotation and new viewer; existing terminal.log/old.log remains | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-11 | Existing bounded known_hosts store with unconditional host-key-change block | Every mismatch blocks connection; user-removed pagination/rotation is not implemented | completed |
 | P4-12 | Removed by user: separate SSH profile diagnostics feature | Scope closed by explicit user decision; not implemented | removed_by_user |
-| P4-13 | Encrypted-at-rest evaluation and physical-access threat-model documentation only | No encrypted vault is implemented in P4; documentation states measured limitations and makes no unsupported encryption claim | pending |
+| P4-13 | Encrypted-at-rest evaluation and physical-access threat-model documentation only | No encrypted vault is implemented in P4; documentation states measured limitations and makes no unsupported encryption claim | completed |
 | P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | pending |
 | P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | pending |
 | P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | pending |
@@ -1931,3 +1931,137 @@ Device/Web/model/SFTP fail-before-auth paths, the Web trust-POST TOCTOU
 correction, compile/resources and the absence of a cleanup obligation. The
 accepted residual remains exclusively P4-17/P4-20 ownership; no runtime claim
 is added by this row.
+
+**Publication:** local row checker passed for the exact four allowed paths.
+Commit `9a90edeef6d76ae122ed82b94154a5dafc60d864` has exact required
+Author/Committer and authenticated GitHub MCP resolves
+`feature/phase-4-ssh-remote-workspace` to that exact SHA. The publication
+report was sent to Architect before P4-13 activation.
+
+## P4-13 design gate
+
+**Status:** completed after Architect personal closure GO
+**Started:** 2026-08-31 13:10:06 +03:00.
+**Completed:** 2026-08-31 13:50:07 +03:00.
+
+### Scope lock and adjacent ownership
+
+- ROADMAP requires documentation of current plaintext and physical-access
+  limitations without claiming encryption. Encryption design, provisioning and
+  any ship decision belong to the Phase 9 physical-access audit.
+- This row changes documentation only. P4-15 owns executable non-addressability
+  acceptance, P4-17 owns final Web SSH integration, P4-20 owns changed-boundary
+  security E2E, and P4-21 owns full documentation/regression/license/secret-scan
+  closure.
+- No encrypted vault, wrapper, key derivation, partition/configuration change,
+  secure boot, flash/NVS encryption enablement, export/backup feature, migration,
+  UI/API route or production behavior is permitted.
+
+### Inventory and primary-source evaluation
+
+- Completed P4-01/P4-02 evidence establishes that SSH passwords/passphrases and
+  opaque private-key records are held in the existing ESP32 NVS owner; selected
+  secret/key bytes are loaded just in time and kept outside model/file/read API
+  surfaces. Those logical access controls are not encryption at rest.
+- `docs/security.md` is the linked user-facing security model. It currently says
+  credentials are in NVS and microSD is unencrypted, but does not state that NVS
+  is also outside any CardMind encryption claim or describe offline flash,
+  modified-firmware and secure-erasure limits. `docs/README.md` already links it;
+  no navigation change is needed.
+- The removable microSD holds chats, workspace documents, command/terminal logs,
+  temporary audio and public SSH trust data. Command output can itself be
+  sensitive even though `known_hosts` fingerprints are not credentials.
+- The exact project partition table has an ordinary 0x5000 `data,nvs` partition,
+  no `nvs_keys` partition and no `encrypted` flag. The exact M5Stack ESP32 3.2.1
+  / ESP-IDF 5.4 build config records `CONFIG_NVS_ENCRYPTION`,
+  `CONFIG_SECURE_FLASH_ENC_ENABLED` and `CONFIG_SECURE_BOOT` as not set. Installed
+  Arduino `Preferences` opens ordinary NVS handles (and only initializes an
+  explicitly labeled partition through the ordinary partition API); it contains
+  no secure-initialization path.
+- Espressif ESP-IDF 5.4 primary documentation states that NVS encryption requires
+  the NVS encryption configuration and key-protection scheme/key partition, that
+  the partition `encrypted` flag only applies when flash encryption is enabled,
+  and that external/removable storage is outside native flash encryption. This
+  release neither enables nor verifies those platform protections, so it cannot
+  claim them for an installed device.
+
+### Minimal documentation design
+
+- Expand only `docs/security.md` with a concise data-at-rest table covering NVS,
+  removable microSD and transient RAM, explicitly separating logical
+  non-addressability/write-only controls from physical-at-rest protection.
+- State that supported CardMind builds do not enable or verify NVS encryption,
+  flash encryption or secure boot; NVS secrets and removable-card data must be
+  treated as plaintext to a physical attacker. Do not infer or publish any
+  device eFuse value that was not measured.
+- State physical consequences without overclaim: offline card reads expose SD
+  content; physical flash/debug/reflash access can expose NVS secrets or run
+  modified firmware; ordinary deletion/format is not certified secure erase.
+- Give proportional user actions: control physical access, keep/remove the card
+  separately when appropriate, revoke/rotate credentials after loss or
+  untrusted access, and avoid placing secrets in workspace/remote command logs.
+- Preserve existing local-HTTP and logical-boundary guidance. Explain that
+  removing microSD protects only the separately retained card, not NVS, and that
+  future encryption/recovery decisions remain Phase 9 rather than an implicit
+  promise.
+
+### Frozen proof and forbidden effects
+
+- Static claim matrix maps every at-rest statement to the exact partition CSV,
+  compiled sdkconfig, installed Preferences source, completed P4 persistence
+  evidence and Espressif 5.4 primary documentation.
+- Documentation scan must contain explicit `not encrypted/not enabled/not
+  verified` limits and must not contain claims that secrets, NVS, flash, backups
+  or microSD are encrypted, securely erased or protected from physical access.
+- Link and Markdown checks cover the existing `docs/README.md` consumer; no
+  firmware build, Device/Web action, fixture, persisted mutation, resource or
+  latency claim is needed for a documentation-only row.
+- Expected write set is exactly `.agents/P4_TRACEABILITY.md` and
+  `docs/security.md`. `docs/ssh-sftp.md`, `docs/limitations.md`, production code,
+  partition/configuration and generated assets remain unchanged; broader stale
+  product-document reconciliation remains P4-21.
+- One independent security/design review is required before the documentation
+  edit and a fresh read-only document/security review is required before
+  closure. No test may inspect or print device secrets or raw NVS contents.
+
+**Independent pre-edit review:** the fresh read-only reviewer returned `STOP`
+only because the first inventory wording incorrectly attributed global
+`nvs_flash_init` to `Preferences`. The trace was narrowed to the actual ordinary
+NVS handle/partition calls; the reviewer's single follow-up returned `GO`, and
+the reviewer was closed before documentation edits began.
+
+### Implemented documentation and evidence
+
+- `docs/security.md` now separates logical access controls from encryption at
+  rest and documents NVS, removable microSD and volatile-runtime exposure. It
+  states that the supported build does not enable or verify NVS encryption,
+  flash encryption or secure boot and makes no claim about an unmeasured device
+  eFuse state.
+- The physical-access section records offline SD read/modify risk, NVS/modified-
+  firmware exposure, non-integrity-protected `known_hosts`, lack of a certified
+  secure-delete guarantee, the limits of removing only microSD, and proportional
+  revoke/rotate/reprovision guidance. It does not expose a credential, key,
+  internal ID or private storage path.
+- The deferred-decision section leaves encryption provisioning, key ownership,
+  update, backup, migration and recovery trade-offs entirely to Phase 9. No
+  encrypted vault or product behavior was added or implied.
+- Final `git diff --check`, exact two-path write-set, Markdown link and static
+  claim-matrix checks passed. The claim matrix rechecked the exact partition CSV,
+  compiled ESP-IDF 5.4 sdkconfig, installed Preferences source and required/
+  forbidden document phrases; no unsupported encrypted-at-rest, tamper-resistance
+  or secure-erasure statement remains.
+- A fresh independent final document/security reviewer returned `GO` on the
+  actual two-file diff and was closed. No firmware build, Device/Web action,
+  fixture, persisted mutation, cleanup, resource or latency measurement applies
+  to this documentation-only row; user data and runtime state are unchanged.
+- Residual ownership is explicit: P4-15 still proves executable secret/key/ID
+  non-addressability, P4-17/P4-20 own their Web/security runtime acceptance, P4-21
+  owns broad documentation reconciliation, and Phase 9 owns any encryption ship
+  decision. This row does not claim per-device physical protection.
+
+**Architect personal closure GO:** The Architect personally reviewed the exact
+two-path documentation diff, ROADMAP/P9 ownership and non-goals, partition and
+sdkconfig facts, installed ordinary NVS APIs, completed P4-01/P4-02 logical
+controls, documentation links and every physical-access/encryption/secure-erasure
+claim. The review confirmed no secret/private path/internal ID disclosure and no
+production, resource or cleanup obligation.
