@@ -33,8 +33,10 @@
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <lwip/sockets.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -49,6 +51,7 @@ namespace {
 constexpr std::uint32_t kSessionIdleMs = 15U * 60U * 1000U;
 constexpr std::uint32_t kLoginLockMs = 30U * 1000U;
 constexpr std::size_t kMaximumLoginFailures = 5;
+constexpr std::uint32_t kWebSftpTransferTimeoutMs = 60000;
 constexpr std::size_t kMaximumPromptBytes = 16384;
 constexpr std::size_t kPromptFramePrefixBytes = 4;
 constexpr std::size_t kMaximumPromptFrameBytes =
@@ -125,8 +128,9 @@ ProjectDocument activeProject;
 std::vector<ProjectSummary> consoleProjects;
 std::vector<ChatSummary> consoleChats;
 std::vector<WorkspaceFile> consoleFiles;
-std::vector<SshProfile> consoleSshProfiles;
+std::vector<SshProfileSummary> consoleSshProfiles;
 std::size_t consoleSshSelected = 0;
+bool consoleSshConfigured = false;
 bool consoleSshPrivateKeyInstalled = false;
 bool filesIndexReady = false;
 bool sshProfilesReady = false;
@@ -172,6 +176,9 @@ std::uint64_t sshKeyUploadProfileId = 0;
 constexpr const char* kSshKeyUploadPath = "/assistant/ssh/upload.tmp";
 SshClient webSshClient;
 SshProfile webSshProfile = {"", "", 22, "", "", SshAuthMode::Password, ""};
+std::uint64_t webSshProfileId = 0;
+String webSshProfileHost;
+std::uint16_t webSshProfilePort = 0;
 enum class WebSshStage : std::uint8_t {
     Idle,
     Connecting,
@@ -233,6 +240,55 @@ bool webSshTaskIsRunning()
     const bool running = webSshTask != nullptr;
     portEXIT_CRITICAL(&webSshStateMux);
     return running;
+}
+
+bool webSshProfileStateLocked()
+{
+    portENTER_CRITICAL(&webSshStateMux);
+    const bool locked = webSshTask != nullptr || webSshAwaitingTrust ||
+        webSshTerminalOpen || webSshHostChanged;
+    portEXIT_CRITICAL(&webSshStateMux);
+    return locked;
+}
+
+void clearWebSshAuthorityCapture()
+{
+    webSshProfileId = 0;
+    webSshProfileHost = "";
+    webSshProfilePort = 0;
+    portENTER_CRITICAL(&webSshStateMux);
+    webSshHostChanged = false;
+    webSshFingerprint[0] = '\0';
+    webSshHostKeyType[0] = '\0';
+    portEXIT_CRITICAL(&webSshStateMux);
+}
+
+bool webRequestClientDisconnected(NetworkClient& client)
+{
+    const int socket = client.fd();
+    if (socket < 0) {
+        return true;
+    }
+    std::uint8_t byte = 0;
+    errno = 0;
+    const int received = recv(socket, &byte, 1, MSG_DONTWAIT | MSG_PEEK);
+    if (received > 0) {
+        return false;
+    }
+    if (received == 0) {
+        return true;
+    }
+    const int socketError = errno;
+    return socketError != EWOULDBLOCK && socketError != EAGAIN &&
+           socketError != ENOENT;
+}
+
+std::uint32_t remainingWebSftpTransferMs(std::uint32_t startedAt)
+{
+    const std::uint32_t elapsed = millis() - startedAt;
+    return elapsed < kWebSftpTransferTimeoutMs
+        ? kWebSftpTransferTimeoutMs - elapsed
+        : 0;
 }
 
 bool consoleEscapePressed()
@@ -310,6 +366,7 @@ void releaseConsoleSessionState()
 {
     closeWebSshConnection();
     webSshProfile = SshProfile{"", "", 22, "", "", SshAuthMode::Password, ""};
+    clearWebSshAuthorityCapture();
     consoleEscapeConsumed = false;
     passwordRevealUntil = 0;
     if (sshKeyUploadFile) {
@@ -352,8 +409,9 @@ void releaseConsoleSessionState()
     std::vector<ProjectSummary>().swap(consoleProjects);
     std::vector<ChatSummary>().swap(consoleChats);
     std::vector<WorkspaceFile>().swap(consoleFiles);
-    std::vector<SshProfile>().swap(consoleSshProfiles);
+    std::vector<SshProfileSummary>().swap(consoleSshProfiles);
     consoleSshSelected = 0;
+    consoleSshConfigured = false;
     consoleSshPrivateKeyInstalled = false;
     filesIndexReady = false;
     sshProfilesReady = false;
@@ -527,6 +585,7 @@ WebStorageAccess webStorageAccessForRoute(WebConsoleRouteHandler route)
         case WebConsoleRouteHandler::SshDelete:
         case WebConsoleRouteHandler::SshStart:
         case WebConsoleRouteHandler::SshTrust:
+        case WebConsoleRouteHandler::SshForget:
         case WebConsoleRouteHandler::SftpDownload:
         case WebConsoleRouteHandler::SshKeyComplete:
         case WebConsoleRouteHandler::FileSave:
@@ -1058,23 +1117,41 @@ OperationResult refreshFiles()
 OperationResult refreshSshProfiles()
 {
     const std::uint32_t startedAt = millis();
-    std::vector<SshProfile> profiles;
+    std::vector<SshProfileSummary> profiles;
     std::size_t selected = 0;
-    const OperationResult result = loadSshProfiles(profiles, selected);
-    if (result.success) {
-        consoleSshPrivateKeyInstalled = !profiles.empty() &&
-            sshPrivateKeyIsInstalled(profiles[selected].privateKeyId);
+    OperationResult result = loadSshProfileSummaries(profiles, selected);
+    bool selectedConfigured = false;
+    bool privateKeyInstalled = false;
+    if (result.success && !profiles.empty()) {
+        if (selected >= profiles.size()) {
+            result = {false, "Selected SSH profile index is invalid"};
+        } else {
+            SshProfile selectedProfile = {
+                "", "", 22, "", "", SshAuthMode::Password, ""};
+            std::uint64_t selectedProfileId = 0;
+            result = loadSshProfileWithId(selectedProfile, selectedProfileId);
+            if (result.success && selectedProfileId != profiles[selected].id) {
+                result = {
+                    false,
+                    "Selected SSH profile identity changed while loading state"};
+            }
+            if (result.success) {
+                selectedConfigured = sshProfileIsComplete(selectedProfile);
+                privateKeyInstalled =
+                    sshPrivateKeyIsInstalled(selectedProfile.privateKeyId);
+            }
+            selectedProfile.password = "";
+            selectedProfile.privateKeyPassphrase = "";
+        }
     }
     recordWebSdRead(millis() - startedAt);
     if (!result.success) {
         return result;
     }
-    for (SshProfile& profile : profiles) {
-        profile.password = "";
-        profile.privateKeyPassphrase = "";
-    }
     consoleSshProfiles = std::move(profiles);
     consoleSshSelected = selected;
+    consoleSshConfigured = selectedConfigured;
+    consoleSshPrivateKeyInstalled = privateKeyInstalled;
     sshProfilesReady = true;
     ++sshRevision;
     return {true, ""};
@@ -1685,9 +1762,13 @@ void handleState()
                 return;
             }
         }
-        buildWebConsoleSshState(consoleSshProfiles, consoleSshSelected,
-                                consoleSshPrivateKeyInstalled, runtime,
-                                sshRevision, document);
+        const OperationResult built = buildWebConsoleSshState(
+            consoleSshProfiles, consoleSshSelected, consoleSshConfigured,
+            consoleSshPrivateKeyInstalled, runtime, sshRevision, document);
+        if (!built.success) {
+            sendWebJsonError(server, 500, built.error);
+            return;
+        }
         char error[sizeof(webSshError)] = {};
         char fingerprint[sizeof(webSshFingerprint)] = {};
         char keyType[sizeof(webSshHostKeyType)] = {};
@@ -3127,10 +3208,7 @@ void handleChatPermissions()
                 return;
             }
         }
-        const bool complete = !consoleSshProfiles.empty() &&
-            consoleSshSelected < consoleSshProfiles.size() &&
-            sshProfileIsComplete(consoleSshProfiles[consoleSshSelected]);
-        if (!complete) {
+        if (!consoleSshConfigured) {
             sendWebJsonError(server, 409,
                              "A complete selected SSH profile is required");
             return;
@@ -3727,6 +3805,12 @@ void handleSshSettings()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    if (webSshProfileStateLocked()) {
+        sendWebJsonError(
+            server, 409,
+            "Disconnect the SSH session or resolve the host-key mismatch before changing profiles");
+        return;
+    }
     std::uint32_t port = 0;
     if (!parseUnsignedArgument(server.arg("port"), port) || port == 0 || port > 65535) {
         sendWebJsonError(server, 400, "SSH port must be between 1 and 65535");
@@ -3761,9 +3845,9 @@ void handleSshSettings()
     OperationResult saved;
     const std::uint32_t saveStartedAt = millis();
     if (create) {
-        std::vector<SshProfile> profiles;
+        std::vector<SshProfileSummary> profiles;
         std::size_t selectedIndex = 0;
-        saved = loadSshProfiles(profiles, selectedIndex);
+        saved = loadSshProfileSummaries(profiles, selectedIndex);
         if (saved.success) saved = saveSshProfileAt(profile, profiles.size());
     } else {
         saved = saveSshProfile(profile);
@@ -3792,6 +3876,12 @@ void handleSshSelect()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
+    if (webSshProfileStateLocked()) {
+        sendWebJsonError(
+            server, 409,
+            "Disconnect the SSH session or resolve the host-key mismatch before selecting a profile");
+        return;
+    }
     std::uint32_t index = 0;
     if (!parseUnsignedArgument(server.arg("index"), index)) {
         sendWebJsonError(server, 400, "SSH profile index must be an unsigned integer");
@@ -3818,6 +3908,12 @@ void handleSshDelete()
 {
     if (!requestHasValidCsrf()) {
         sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    if (webSshProfileStateLocked()) {
+        sendWebJsonError(
+            server, 409,
+            "Disconnect the SSH session or resolve the host-key mismatch before deleting a profile");
         return;
     }
     std::uint32_t index = 0;
@@ -3998,21 +4094,28 @@ void handleSshStart()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    if (webSshTaskIsRunning() || webSshAwaitingTrust ||
-        (webSshTerminalOpen && webSshClient.isOpen())) {
+    if (webSshProfileStateLocked()) {
         sendWebJsonError(server, 409,
-                         "SSH terminal is already open; disconnect it before reconnecting");
+                         "Disconnect SSH or resolve the blocked host key before reconnecting");
         return;
     }
     clearWebSshConnection();
+    clearWebSshAuthorityCapture();
     publishWebSshStage(WebSshStage::Idle, "");
     const std::uint32_t loadStartedAt = millis();
-    const OperationResult loaded = loadSshProfile(webSshProfile);
+    std::uint64_t loadedProfileId = 0;
+    const OperationResult loaded = loadSshProfileWithId(
+        webSshProfile, loadedProfileId);
     recordWebSdRead(millis() - loadStartedAt);
     if (!loaded.success || !sshProfileIsComplete(webSshProfile)) {
+        webSshProfile.password = "";
+        webSshProfile.privateKeyPassphrase = "";
         sendWebJsonError(server, 400, loaded.success ? String("Selected SSH profile is incomplete") : loaded.error);
         return;
     }
+    webSshProfileId = loadedProfileId;
+    webSshProfileHost = webSshProfile.host;
+    webSshProfilePort = webSshProfile.port;
     portENTER_CRITICAL(&webSshStateMux);
     webSshConnectMs = 0;
     webSshAuthenticateMs = 0;
@@ -4024,6 +4127,8 @@ void handleSshStart()
     portEXIT_CRITICAL(&webSshStateMux);
     const OperationResult result = startWebSshWorker(false);
     if (!result.success) {
+        clearWebSshConnection();
+        clearWebSshAuthorityCapture();
         sendWebJsonError(server, 500, result.error);
         return;
     }
@@ -4064,6 +4169,48 @@ void handleSshTrust()
     document["ok"] = true;
     document["stage"] = "authenticating";
     sendWebJson(server, 202, document);
+}
+
+void handleSshForget()
+{
+    if (!requestHasValidCsrf()) {
+        sendWebJsonError(server, 401, "Authentication required");
+        return;
+    }
+    if (webSshTaskIsRunning() || !webSshHostChanged ||
+        webSshAwaitingTrust || webSshTerminalOpen || webSshProfileId == 0 ||
+        webSshProfileHost.isEmpty() || webSshProfilePort == 0) {
+        sendWebJsonError(server, 409,
+                         "No blocked selected-host mismatch is available to forget");
+        return;
+    }
+    SshAuthoritySummary authority = {};
+    const OperationResult loaded = loadSelectedSshAuthority(authority);
+    if (!loaded.success) {
+        sendWebJsonError(server, 409, loaded.error);
+        return;
+    }
+    if (authority.profileId != webSshProfileId ||
+        authority.host != webSshProfileHost ||
+        authority.port != webSshProfilePort) {
+        sendWebJsonError(
+            server, 409,
+            "Selected SSH authority changed; the retained host key was not modified");
+        return;
+    }
+    const OperationResult forgotten = forgetTrustedSshHost(
+        webSshProfileHost, webSshProfilePort);
+    if (!forgotten.success) {
+        sendWebJsonError(server, 500, forgotten.error);
+        return;
+    }
+    clearWebSshConnection();
+    clearWebSshAuthorityCapture();
+    publishWebSshStage(WebSshStage::Idle, "");
+    JsonDocument document;
+    document["ok"] = true;
+    document["stage"] = "idle";
+    sendWebJson(server, 200, document);
 }
 
 void handleSshInput()
@@ -4165,6 +4312,20 @@ OperationResult ensureWebSftp()
     return webSshClient.openSftp(30000);
 }
 
+OperationResult ensureWebSftpControlled(
+    std::uint32_t startedAt,
+    const std::function<bool()>& isCancelled)
+{
+    if (!webSshTerminalOpen || !webSshClient.isOpen()) {
+        return {false, "Connect the SSH terminal before using SFTP"};
+    }
+    const std::uint32_t remainingMs = remainingWebSftpTransferMs(startedAt);
+    if (remainingMs == 0) {
+        return {false, "SFTP transfer timed out before opening the subsystem"};
+    }
+    return webSshClient.openSftpControlled(remainingMs, isCancelled);
+}
+
 void handleSftpList()
 {
     if (!sessionIsActive()) {
@@ -4199,18 +4360,40 @@ void handleSftpDownload()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    OperationResult result = ensureWebSftp();
-    if (result.success) {
-        const std::uint32_t startedAt = millis();
-        result = webSshClient.downloadSftpFile(
-            server.arg("path"), server.arg("name"), 60000);
-        recordWebSdWrite(millis() - startedAt);
-    }
-    if (!result.success) {
-        sendWebJsonError(server, 502, result.error);
+    const String overwriteArgument = server.arg("overwrite");
+    if (overwriteArgument != "0" && overwriteArgument != "1") {
+        sendWebJsonError(server, 400, "SFTP overwrite must be exactly 0 or 1");
         return;
     }
-    result = refreshFiles();
+    NetworkClient& requestClient = server.client();
+    const std::function<bool()> isCancelled = [&requestClient]() {
+        return webRequestClientDisconnected(requestClient);
+    };
+    const std::uint32_t startedAt = millis();
+    const OperationResult opened = ensureWebSftpControlled(startedAt, isCancelled);
+    if (!opened.success) {
+        sendWebJsonError(server, 502, opened.error);
+        return;
+    }
+    const std::uint32_t remainingMs = remainingWebSftpTransferMs(startedAt);
+    if (remainingMs == 0) {
+        sendWebJsonError(server, 502, "SFTP download timed out before transfer");
+        return;
+    }
+    const SftpMutationResult transferred =
+        webSshClient.downloadSftpFileControlled(
+            server.arg("path"), server.arg("name"), overwriteArgument == "1",
+            remainingMs, isCancelled);
+    recordWebSdWrite(millis() - startedAt);
+    if (!transferred.success) {
+        const String error = transferred.outcomeUnknown
+            ? String("SFTP download outcome is unknown; inspect both paths before retrying: ") +
+                  transferred.error
+            : transferred.error;
+        sendWebJsonError(server, 502, error);
+        return;
+    }
+    OperationResult result = refreshFiles();
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
         return;
@@ -4226,11 +4409,36 @@ void handleSftpUpload()
         sendWebJsonError(server, 401, "Authentication required");
         return;
     }
-    OperationResult result = ensureWebSftp();
-    if (result.success) result = webSshClient.uploadSftpFile(
-        server.arg("name"), server.arg("path"), 60000);
-    if (!result.success) {
-        sendWebJsonError(server, 502, result.error);
+    const String overwriteArgument = server.arg("overwrite");
+    if (overwriteArgument != "0" && overwriteArgument != "1") {
+        sendWebJsonError(server, 400, "SFTP overwrite must be exactly 0 or 1");
+        return;
+    }
+    NetworkClient& requestClient = server.client();
+    const std::function<bool()> isCancelled = [&requestClient]() {
+        return webRequestClientDisconnected(requestClient);
+    };
+    const std::uint32_t startedAt = millis();
+    const OperationResult opened = ensureWebSftpControlled(startedAt, isCancelled);
+    if (!opened.success) {
+        sendWebJsonError(server, 502, opened.error);
+        return;
+    }
+    const std::uint32_t remainingMs = remainingWebSftpTransferMs(startedAt);
+    if (remainingMs == 0) {
+        sendWebJsonError(server, 502, "SFTP upload timed out before transfer");
+        return;
+    }
+    const SftpMutationResult transferred =
+        webSshClient.uploadSftpFileControlled(
+            server.arg("name"), server.arg("path"), overwriteArgument == "1",
+            remainingMs, isCancelled);
+    if (!transferred.success) {
+        const String error = transferred.outcomeUnknown
+            ? String("SFTP upload outcome is unknown; inspect both paths before retrying: ") +
+                  transferred.error
+            : transferred.error;
+        sendWebJsonError(server, 502, error);
         return;
     }
     JsonDocument document;
@@ -4247,6 +4455,11 @@ void handleSshKeyUploadData()
         sshKeyUploadProfileId = 0;
         if (!requestHasValidCsrf()) {
             sshKeyUploadError = "Authentication required";
+            return;
+        }
+        if (webSshProfileStateLocked()) {
+            sshKeyUploadError =
+                "Disconnect the SSH session or resolve the host-key mismatch before installing a private key";
             return;
         }
         const OperationResult storage = requireSdWriteAccess(
@@ -4938,6 +5151,7 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
             handleSshDelete,
             handleSshStart,
             handleSshTrust,
+            handleSshForget,
             handleSshInput,
             handleSshResize,
             handleSshOutput,

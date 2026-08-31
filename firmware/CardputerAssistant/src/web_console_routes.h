@@ -63,6 +63,7 @@ enum class WebConsoleRouteHandler : std::size_t {
     SshDelete,
     SshStart,
     SshTrust,
+    SshForget,
     SshInput,
     SshResize,
     SshOutput,

@@ -168,6 +168,8 @@ void configureWebConsoleRoutes(WebServer& server,
               handler(handlers, WebConsoleRouteHandler::SshStart));
     server.on("/api/ssh/trust", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::SshTrust));
+    server.on("/api/ssh/forget", HTTP_POST,
+              handler(handlers, WebConsoleRouteHandler::SshForget));
     server.on("/api/ssh/input", HTTP_POST,
               handler(handlers, WebConsoleRouteHandler::SshInput));
     server.on("/api/ssh/resize", HTTP_POST,

@@ -181,6 +181,14 @@ OperationResult buildWebConsoleChatState(
         JsonString::Copied);
     document["project_ssh_profile"] = activeProject.sshProfile;
     document["chat_ssh_profile"] = activeChat.sshProfile;
+    document["project_ssh_profile_matches"] = sshProfileCeilingsAllowSelected(
+        availableSshProfileId,
+        activeProject.sshProfile.c_str(), activeProject.sshProfile.length(),
+        "", 0);
+    document["chat_ssh_profile_matches"] = sshProfileCeilingsAllowSelected(
+        availableSshProfileId,
+        activeProject.sshProfile.c_str(), activeProject.sshProfile.length(),
+        activeChat.sshProfile.c_str(), activeChat.sshProfile.length());
     document["ssh_available_profile_id"] = "";
     if (availableSshProfileId != 0) {
         document["ssh_available_profile_id"] = JsonString(
@@ -226,15 +234,20 @@ void buildWebConsoleFilesState(const std::vector<WorkspaceFile>& files,
     }
 }
 
-void buildWebConsoleSshState(const std::vector<SshProfile>& profiles,
-                             std::size_t selected,
-                             bool privateKeyInstalled,
-                             const WebConsoleRuntimeState& runtime,
-                             std::uint32_t revision,
-                             JsonDocument& document)
+OperationResult buildWebConsoleSshState(
+    const std::vector<SshProfileSummary>& profiles,
+    std::size_t selected,
+    bool selectedConfigured,
+    bool privateKeyInstalled,
+    const WebConsoleRuntimeState& runtime,
+    std::uint32_t revision,
+    JsonDocument& document)
 {
-    const SshProfile profile = profiles.empty()
-        ? SshProfile{"", "", 22, "", "", SshAuthMode::Password, ""}
+    if (!profiles.empty() && selected >= profiles.size()) {
+        return {false, "Selected SSH profile index is invalid"};
+    }
+    const SshProfileSummary profile = profiles.empty()
+        ? SshProfileSummary{0, "", "", 22, "", SshAuthMode::Password}
         : profiles[selected];
     document["ok"] = true;
     document["ssh_revision"] = revision;
@@ -248,7 +261,13 @@ void buildWebConsoleSshState(const std::vector<SshProfile>& profiles,
     document["ssh_terminal_open"] = runtime.sshTerminalOpen;
     JsonArray items = document["ssh_profiles"].to<JsonArray>();
     for (const auto& item : profiles) {
+        const EncodedSshProfileId encoded = encodeSshProfileId(item.id);
+        if (encoded.error != SshProfileIdCodecError::None) {
+            return {false, "SSH profile ID could not be encoded"};
+        }
         JsonObject profileItem = items.add<JsonObject>();
+        profileItem["id"] = JsonString(
+            encoded.value.data(), encoded.length, JsonString::Copied);
         profileItem["name"] = item.name;
         profileItem["host"] = item.host;
         profileItem["port"] = item.port;
@@ -257,7 +276,8 @@ void buildWebConsoleSshState(const std::vector<SshProfile>& profiles,
             item.authMode == SshAuthMode::PrivateKey ? "key" : "password";
     }
     document["ssh_key_installed"] = privateKeyInstalled;
-    document["ssh_configured"] = sshProfileIsComplete(profile);
+    document["ssh_configured"] = selectedConfigured;
+    return {true, ""};
 }
 
 OperationResult buildWebConsoleSettingsState(

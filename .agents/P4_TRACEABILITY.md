@@ -64,10 +64,10 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | completed |
 | P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | completed |
 | P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | completed |
-| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and acceptance are observable without terminal tabs or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; first real Cardputer private-key auth E2E runs here, with at most one authenticated CSRF-protected forget action for the exact selected profile whose host/port are resolved server-side | pending |
+| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and authenticated public state are observable without terminal tabs, SSH connection/trust mutation or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; the mismatch-only forget control is hidden in ordinary state and resolves host/port server-side | completed |
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
-| P4-20 | Changed-boundary-only recovery and security acceptance | Verify only Phase 4 changed boundaries, including mismatch block, deletion of only the exact test-host known_hosts entry and byte-for-byte preservation of unrelated entries; broad re-certification of unchanged NVS/SD was removed by user | pending |
+| P4-20 | Changed-boundary-only recovery and security acceptance | Verify first real Cardputer private-key authentication together with the inseparable exact-owned host-key lifecycle: mismatch block, deletion of only the exact test-host known_hosts entry and byte-for-byte preservation of unrelated entries; broad re-certification of unchanged NVS/SD was removed by user | pending |
 | P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; active SSH is compared with the existing active-SSH heap/largest-block/stack/latency baseline and must not regress or reset/freeze; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | pending |
 
 ## P4-01 design gate
@@ -284,7 +284,7 @@ locally only at trash/p4-01-overengineered-20260830
 
 | Observation | Required result |
 | --- | --- |
-| Record and binding | Two exact-owned profiles can hold distinct opaque records; selected-profile installed state and the reviewed JIT authentication call path resolve only the bound record and zeroize it after use; IDs/bytes are never emitted. First real Cardputer private-key auth E2E is owned by P4-17, not this row |
+| Record and binding | Two exact-owned profiles can hold distinct opaque records; selected-profile installed state and the reviewed JIT authentication call path resolve only the bound record and zeroize it after use; IDs/bytes are never emitted. First real Cardputer private-key auth E2E is owned by P4-20 with its exact known_hosts cleanup, not this row |
 | Replace/full failure | Replacement switches only the target profile after verified record commit; a deliberately unstoreable bounded key returns an actionable NVS-capacity error and leaves the old ref/record usable |
 | Legacy migration/reboot | The existing shared legacy SD private-key file becomes one explicitly bound record, the SD installed-key file disappears only after readback, saved authentication still works and reboot preserves refs |
 | Crash/cleanup boundaries | Fixed-slot orphan states are removed at boot/pre-mutation; referenced missing/mismatched records fail closed; cleanup reads no key bytes and never scans beyond five profile references plus six fixed record slots |
@@ -378,7 +378,7 @@ locally only at trash/p4-01-overengineered-20260830
   selected-record JIT load/zeroization in the reviewed authentication call path, immutable
   replacement with preservation on capacity failure, reboot persistence, bounded orphan cleanup
   and non-addressability. The first real Cardputer private-key authentication E2E is explicitly not
-  yet proven and belongs to P4-17. P4-17 may add only one authenticated CSRF-protected forget action
+  yet proven and belongs to P4-20. P4-17 may add only one authenticated CSRF-protected forget action
   for the exact selected profile, resolving host/port server-side through the existing
   `forgetTrustedSshHost()`; it may not accept a free host, list/clear trust state or create a manager.
   P4-20 owns mismatch blocking and proof that cleanup removes only the exact test-host entry while
@@ -390,7 +390,7 @@ locally only at trash/p4-01-overengineered-20260830
   fixture remained selected, the two-profile public inventory remained unchanged and
   `ssh_key_installed` remained true. The authenticated state exposed neither a private-key record
   ID nor key bytes. This directly proves preservation of the previous binding on capacity failure;
-  it does not claim real Cardputer private-key authentication, which remains owned by P4-17.
+  it does not claim real Cardputer private-key authentication, which remains owned by P4-20.
 - Cleanup revalidated the exact fixture name, host, port, user and auth mode before deletion, then
   ran the same absence/restoration check twice. It restored the original one-profile inventory and
   selected index, zeroized both local key buffers, removed only the exact temporary directory, and
@@ -494,7 +494,7 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
 - Unchanged capacity-failure preservation, bounded cleanup, reboot persistence, selected-record
   JIT/zeroization, non-addressability and resource evidence above is reused. The 16-KiB capacity
   scenario was not repeated. Real Cardputer private-key authentication remains explicitly unproven
-  here and owned by P4-17. P4-02 is complete; P4-03 is now the sole active row.
+  here and owned by P4-20. P4-02 is complete; P4-03 is now the sole active row.
 
 ### Forbidden effects
 
@@ -2485,8 +2485,8 @@ sent to Architect before P4-15 activation.
 - This row verifies the logical non-addressability boundary implemented by P4-01/P4-02 and its
   existing consumers. P4-13 owns the truthful plaintext-at-rest/physical-access threat model;
   Phase 9 owns any encryption design or shipping decision.
-- Real private-key authentication E2E remains P4-17. P4-20 owns the final changed-boundary security
-  E2E and P4-21 owns the broad filename-only secret/license/full-regression closure scan.
+- Real private-key authentication E2E remains P4-20 with the inseparable exact known_hosts cleanup.
+  P4-21 owns the broad filename-only secret/license/full-regression closure scan.
 
 ### Inventory and ownership
 
@@ -2698,7 +2698,7 @@ Author/Committer. P4-16 is now the sole `in_progress` row.
 
 ## P4-16 design gate
 
-**Status:** in_progress
+**Status:** completed
 **Started:** 2026-08-31 20:26:56 +03:00.
 
 ### Scope lock and observable acceptance
@@ -2725,8 +2725,8 @@ Author/Committer. P4-16 is now the sole `in_progress` row.
   one total foreground deadline and unknown-outcome behavior.
 - Existing changed-host-key failure remains an immediate block before authentication. Existing
   exact-profile host-key forget and private-key installation stay in the profile/security journey;
-  real private-key authentication remains P4-17 ownership and real mismatch/known_hosts mutation
-  acceptance remains P4-20 ownership.
+  real private-key authentication and real mismatch/known_hosts mutation acceptance remain P4-20
+  ownership as one exact-owned lifecycle.
 
 ### Existing producers, consumers and owners
 
@@ -2969,3 +2969,448 @@ P4-07 crash-temp ownership and absent new physical-input observation.
 
 **Completed:** 2026-08-31 23:07:23 +03:00. No successor row is active until this exact P4-16 commit
 is published and its remote SHA is verified.
+
+### Publication
+
+- Commit `14dc35b4111c7659886a5a27c30470fc603a42b4` was pushed to
+  `feature/phase-4-ssh-remote-workspace`; authenticated GitHub MCP resolved that branch to the
+  exact SHA and confirmed the required Author/Committer identity. The P4-16 publication report was
+  sent to Architect. P4-17 is now the sole active row.
+
+## P4-17 design gate
+
+**Status:** completed
+**Started:** 2026-08-31 23:16:04 +03:00.
+**Completed:** 2026-09-01 02:40:51 +03:00.
+
+### Scope lock and observable acceptance
+
+- ROADMAP Phase 4 requires Device and Web Console to expose the same SSH concepts and state while
+  retaining the existing single Web terminal. P4-17 owns the consolidated authenticated Web
+  profile/security, manual terminal, SFTP and workspace-transfer journey; it does not recreate the
+  user-removed P4-09/P4-19 subsystems.
+- The profile list uses P4-01 public summaries and authenticated canonical opaque IDs. Web state
+  must not load every password/passphrase; only the exact selected profile may be loaded just in
+  time for selected edit/completeness or connection. IDs may be values on authenticated config
+  boundaries but are never rendered as user text or returned to model/file/audit/diagnostic paths.
+- One live foreground shell remains. Profile create/edit/select/delete/key-install controls are
+  unavailable while a connection, trust decision, terminal or retained mismatch owns the selected
+  profile. The user explicitly disconnects before changing profiles; no tab/session pool,
+  reconnect scheduler or background terminal is added.
+- Host-key mismatch remains blocked before authentication and is visibly distinct from ordinary
+  disconnected/failed state. P4-17 may add one authenticated CSRF-protected manual forget action
+  only for the exact selected profile that produced the mismatch; host and port are resolved
+  server-side and no free host input, list/clear API or known-host manager is added. Reconnect is a
+  separate explicit action after forget.
+- The existing project/chat settings gain named SSH-profile ceiling selectors. The project control
+  emits the exact P4-14 `X-CardMind-Ssh-Profile-Encoded` envelope; chat uses its existing persisted
+  field. Both display saved/effective match state without rendering an ID and never select,
+  reconnect or elevate a profile. If a stored canonical ceiling is absent from public summaries,
+  the selector shows a selected non-ID-text `Unavailable saved profile` placeholder, preserves that
+  exact stored value on an otherwise untouched save, reports the production-computed match false,
+  and permits explicit clear or rebind. It never silently renders inherit or another profile.
+- Existing SFTP/workspace controls show exact source and destination, default overwrite denied,
+  enable overwrite only after confirmation for an observed existing target, and invoke only the
+  P4-07 controlled streaming methods with one 60-second foreground deadline and cooperative HTTP
+  cancellation. Failure/unknown outcome is explicit and never retried.
+- P4-20 owns first real Cardputer private-key authentication together with the inseparable exact
+  known_hosts mismatch/forget cleanup. P4-17 adds the existing selected-host forget UI/route/guard
+  but does not connect, trust, authenticate, mutate known_hosts or execute a remote transfer in its
+  runtime proof.
+
+### Explicit non-goals
+
+- No terminal tabs, second live SSH client, saved terminal state, new history viewer/rotation,
+  background work, reconnect, retry, job/result framework or user-defined Safe Actions.
+- No model schema/catalog/policy/pending/audit change and no change to manual terminal authority.
+- No SSH profile/key/known_hosts storage schema, migration, transaction/recovery framework,
+  pagination/rotation, diagnostics feature or encryption implementation.
+- No host/port forget input, broad known-host list/clear route, new navigation shell, Phase 6 visual
+  redesign, USB/Python/future-phase preparation or duplicated transfer backend.
+
+### Existing producers, consumers, persistence and cleanup owners
+
+- `assets/web_console.html` already has stable IDs for profile CRUD, key upload, the one ANSI/PTTY
+  terminal and basic SFTP upload/download. It currently changes selection while a terminal can be
+  live, has no exact-host forget control or project/chat ceiling selectors, and calls transfer
+  routes without destination/overwrite/cancel state.
+- `web_console.cpp::refreshSshProfiles()` currently calls `loadSshProfiles()`, materializes all five
+  secret pairs, clears them and retains public fields in `consoleSshProfiles`. P4-01 assigned this
+  compatibility consumer to P4-17. `handleSshSettings()` also uses the full loader only to count
+  profiles on create. Selected edit/start already have a JIT loader; private-key upload already
+  binds the selected public profile ID and removes its exact temporary SD file on terminal paths.
+- `web_console_state.{h,cpp}` serializes only public profile fields but accepts full `SshProfile`
+  records and cannot provide canonical IDs to the P4-14 controls. Chat state already returns the
+  persisted project/chat ceilings and selected available canonical ID through the authenticated
+  endpoint; no secret or private-key path is present.
+- `web_console_routes.{h,cpp}` owns the fixed route enum/table, collected project ceiling header and
+  route storage guard. Existing profile/key/terminal/SFTP mutation routes are session+CSRF guarded;
+  the new exact forget route belongs here and requires SD write access.
+- `handleSshStart()` loads the selected profile JIT, performs trusted-host verification before
+  authentication and reuses one `webSshClient`/worker/channel. A changed key records a failed,
+  blocked mismatch. The captured connection profile remains the exact server-side host/port owner.
+- Existing Web SFTP handlers require that same trusted live session but call the legacy direct
+  wrappers. P4-07 already proved the controlled methods' absolute deadline, bounded streaming,
+  safe remote/local temporary replacement, default-deny overwrite, cancellation, unknown outcome
+  and exact cleanup; P4-17 only integrates those methods.
+- Project/chat metadata keeps the existing atomic/revision owners. Project raw settings already
+  accept the collected P4-14 envelope; chat settings already validate and persist its canonical
+  field. No new durable representation or migration exists.
+- `forgetTrustedSshHost(host,port)` validates the target and atomically rewrites the existing
+  bounded known_hosts file through its exact `.tmp`/`.bak` owner. P4-20, not this row, owns
+  byte-for-byte unrelated-entry preservation acceptance.
+- Installed M5Stack ESP32 core WebServer 3.2.1 exposes the current request as
+  `NetworkClient& client()` and its public socket descriptor through `fd()`. The installed
+  `NetworkClient::connected()` is not sufficient for cancellation: a nonblocking peek result of
+  zero can retain stale `errno` and leave `_connected=true` after orderly browser FIN. P4-17 must
+  inspect the current request socket directly, treating peek `0` and terminal socket errors as
+  disconnected while preserving `EWOULDBLOCK`/`EAGAIN` and the vendor VFS `ENOENT` live states.
+
+### Minimal reviewed design candidate
+
+1. Replace only the Web cache/state compatibility adapter with `SshProfileSummary`. Refresh loads
+   summaries plus the selected record JIT for selected completeness/key state, clears its secret
+   fields immediately and never stores them in the list cache. Creation counts summaries. State
+   encodes each nonzero summary ID with the production P4-14 codec and emits no raw integer or
+   secret; existing index mutation APIs remain unchanged behind the authenticated UI.
+2. Reuse the current single-terminal stage. At connection start capture exactly
+   `{profileId, host, port}` from the selected JIT profile in existing `web_console.cpp`; transport
+   close and secret zeroization do not clear that capture when a mismatch is retained. One
+   server-owned predicate covers connect/trust/terminal/retained-mismatch state and rejects profile
+   create/edit, select, delete and key-upload start before any SD/NVS mutation; `SshStart` also
+   rejects while mismatch is retained. Matching controls are disabled and state shows `Connected`,
+   `Disconnected` or `Mismatch blocked`. The one CSRF forget route requires retained mismatch,
+   reloads the selected public authority immediately before mutation, requires exact ID+host+port
+   equality with the capture, and calls `forgetTrustedSshHost()` only with the captured host/port.
+   Drift or forget failure writes nothing and preserves mismatch/capture; only successful exact
+   forget or whole Web-session release clears them. Forget never reconnects or accepts host input.
+3. Add named project/chat ceiling selects to the existing details panel. Profile option values are
+   authenticated canonical IDs while labels contain only public names/hosts. State supplies the
+   saved ceiling values and production-computed match booleans. Project save sends exact `v1:` or
+   `v1:<canonical-id>` in the existing collected header; chat save sends its existing
+   `ssh_profile` argument. If a saved value is absent from summaries, a synthetic select option
+   carries that value but renders only `Unavailable saved profile`; ordinary saves preserve it,
+   while explicit clear/rebind changes it. Reloaded canonical state is the only displayed result.
+4. Add one visible transfer-cancel control and one UI operation owner. Every upload/download first
+   shows exact source/destination and whether replacement is requested. Browser abort closes only
+   that request. One function-local-owner predicate in existing `web_console.cpp` peeks the public
+   request-client `fd()`: result `0`, invalid descriptor or terminal socket error means cancelled;
+   positive data and only `EWOULDBLOCK`/`EAGAIN`/vendor `ENOENT` remain live. Each handler strictly
+   parses required `overwrite=0|1` before SFTP open or any temporary/final write, captures
+   `server.client()`, calls `openSftpControlled(remaining, sameCancel)` and then the controlled
+   transfer with remaining time from the same original 60-second deadline. It reports typed known/
+   unknown failure, never retries, and refreshes files only after confirmed download success.
+5. Retain existing key upload/authentication and terminal/SFTP backends. No test seam or key reader
+   is added; real acceptance uses collision-checked exact-owned profiles, keys, remote/workspace
+   paths and project/chat fixtures through existing authenticated controls.
+
+### Changed-boundary failure and cleanup ownership
+
+| Boundary | Required failure behavior | Cleanup/authority owner |
+|---|---|---|
+| Public summary/JIT refresh | Any invalid/failed selected load fails state explicitly; no all-profile secret fallback | Local selected secret strings cleared before return; existing NVS owner unchanged |
+| Profile mutation during live/mismatch state | One owner predicate returns HTTP conflict before NVS/SD mutation, including key-upload start | Existing live/mismatch capture remains authoritative |
+| Forget stale/nonmatching ID or same-ID host/port drift | Conflict before `forgetTrustedSshHost`; no known_hosts write | Captured exact ID/host/port and mismatch remain unchanged |
+| Forget commit failure/unknown atomic state | Explicit storage error; no reconnect and no capture clear | Existing bounded known_hosts recovery owns `.tmp`/`.bak`; P4-20 verifies exact effects |
+| Saved ceiling absent from summaries | Non-ID placeholder, false production match and exact preservation until explicit clear/rebind | Existing project/chat metadata remains authoritative |
+| Browser transfer abort/timeout | Direct socket peek observes orderly FIN and terminal errors; controlled cancel/failure or typed outcome unknown; no retry | P4-07 exact remote/local temporary owner and existing SD recovery |
+| UI/HTTP error after confirmed transfer | Never rerun mutation automatically | Canonical reload only; confirmed result remains authoritative |
+| Key upload/auth failure | Existing explicit error; no secret/read response | Existing exact key-upload temp cleanup and P4-02 immutable binding owner |
+
+### Frozen minimal proof matrix
+
+- Cheap host/static: Web profile state/cache and create-count path contain no `loadSshProfiles()`;
+  summaries expose only production-codec canonical IDs, selected JIT values are immediately cleared,
+  state/asset contain no password/passphrase/key bytes/path/internal integer output, and model/file/
+  audit schemas are unchanged.
+- Cheap host/static: one terminal/client remains; all profile mutations and key-upload start have
+  the same live/mismatch guard; forget is POST+CSRF+SD-write guarded, accepts no host/port, verifies
+  captured versus current selected ID+host+port immediately before mutation, calls the existing
+  exact-host primitive once with the capture and does not reconnect. The same-ID host/port-drift
+  branch fails before the primitive and writes nothing. Mismatch remains fail-before-authentication.
+- Cheap Web/UI: generated asset matches source; stable controls exist at desktop/tablet/narrow
+  widths; project header and chat argument use canonical option values; saved/effective labels come
+  from reloaded state; profile change requires disconnected state; transfer destination,
+  overwrite/no-overwrite and cancel behavior are observable without tabs or a new console.
+- Cheap host/static: upload/download invoke only P4-07 controlled methods, share one non-refreshing
+  60-second budget across SFTP open and transfer, use request-client disconnect for cancellation,
+  parse overwrite strictly, refresh only after confirmed success and contain no unknown retry or
+  final-path truncate/pre-delete fallback.
+- Exact pinned 3.2.1 compile after cheap checks; inspect generated asset and build options before the
+  sole upload.
+- The retained Web UI/asset test proves the new stable controls, responsive layout, exact route/form
+  wiring and saved/effective labels. P4-14's accepted runtime evidence remains authoritative for
+  ceiling persistence and conjunctive authority; P4-17 observes only that its displayed state
+  refreshes after the selected profile's identity or availability changes.
+- P4-07's accepted production/runtime evidence remains authoritative for transfer deadline,
+  cancellation, no-commit and exact temporary cleanup. P4-17 performs only one direct visible
+  SFTP/workspace control smoke proving exact destination, overwrite default deny/confirmation,
+  payload transfer and no automatic retry; it does not reimplement or re-prove the backend oracle.
+- P4-11 and P4-20 own the real host-key rotation, exact forget mutation and unrelated-known_hosts
+  preservation scenario. P4-17 proves the selected-host forget control, no host/port input, CSRF,
+  server-side exact authority guard and no reconnect through retained UI/route/static evidence.
+- One narrow authenticated session owns only the remaining P4-17 integration gap without an SSH
+  connection: actual page/state load, public profile summaries and canonical IDs without secrets,
+  project/chat saved/effective controls rendered from authenticated state, mismatch-only forget
+  hidden in ordinary state, and the existing single-terminal/SFTP destination-overwrite-cancel
+  controls visibly reachable and wired. It reuses P4-14/P4-07 runtime evidence and retains no P4
+  journey runner, endpoint manager, fixture protocol or comparable helper suite.
+- Device bootstrap remains one initial readiness attempt, prefix-matched Web Console ready, one
+  holder for the bounded session and normal `EXIT`/stopped. First readiness loss ends the path
+  without probe, upload, reset, recovery or physical action. Record only safely observed absolute
+  heap/block/stack/latency values and make no unsupported comparison.
+- Success and failure cleanup delete only exact profile/key/workspace/remote fixtures, prove repeated
+  absence, restore original profile/project/chat/workspace selections and complete inventories,
+  stop/remove the disposable endpoint and close Web Console. A failed checkpoint still executes
+  that bounded cleanup and reports its exact owner.
+
+### Forbidden effects
+
+- No credential/private-key/passphrase byte, secret path, raw internal ID or authority hash in DOM
+  text, Web read response beyond allowed canonical ID/summary, model context/results, workspace,
+  file tools, audit, serial, logs, diagnostics, fixtures or Git.
+- No profile switch/edit/delete/key install while the live/mismatch owner exists; no mismatch trust
+  bypass, free-host forget, automatic reconnect or mutation of an unrelated known-host entry.
+- No overwrite default true, destination mutation before confirmation, foreground deadline reset,
+  unbounded RAM copy, browser-cancel route, retry after unknown outcome or background transfer.
+- No new module, route family, storage field/schema, policy/capability, manager/framework, retained
+  Device diagnostic, terminal session abstraction, general recovery or future-phase work.
+
+### Expected write set and gate status
+
+- `.agents/P4_TRACEABILITY.md`.
+- `firmware/CardputerAssistant/assets/web_console.html` and generated
+  `firmware/CardputerAssistant/src/web_console_asset.h` for the existing responsive controls/state.
+- `firmware/CardputerAssistant/src/web_console.cpp` for summary/JIT cache, exact handlers and the
+  existing route table.
+- `firmware/CardputerAssistant/src/web_console_state.h` and
+  `firmware/CardputerAssistant/src/web_console_state.cpp` for authenticated public-summary IDs and
+  production-computed ceiling match state.
+- `firmware/CardputerAssistant/src/web_console_routes.h` and
+  `firmware/CardputerAssistant/src/web_console_routes.cpp` for exactly one selected-host forget
+  enum/POST route and its existing storage guard integration.
+- `tests/web_console_ui_test.mjs` for stable control/responsive/asset behavior only; no production-
+  source snapshot, duplicated codec, new harness or workflow file.
+- `tools/hardware_web_e2e.mjs` remains byte-identical to `HEAD`; P4-17 retains no composite journey,
+  dispatch plumbing, endpoint protocol, credential-path argument or comparable helper suite.
+- No `ssh_client.*`, storage, project/chat, policy/catalog/router/audit, Device, workflow or new file.
+- Independent bounded pre-edit review returned **STOP** on one concrete design defect: the original
+  draft relied on vendor `NetworkClient::connected()`, whose pinned 3.2.1 implementation can treat
+  orderly FIN as still connected when `recv(MSG_PEEK)` returns zero with stale `errno`. That could
+  allow a transfer commit after the browser reports Abort and encourage an unsafe retry. The
+  correction above uses only the existing request client's public `fd()` and one narrow direct-
+  peek predicate in `web_console.cpp`; no cancel route, module or framework is added. The same
+  reviewer used its single blocker-only follow-up and returned **GO**: the corrected direct-peek
+  predicate plus required Browser commit/cleanup proof fully resolve the cancellation-semantic
+  blocker. Reviewer lifecycle is closed. Production may proceed only with the frozen write set and
+  design above.
+
+### Architect pre-edit STOP and corrected package
+
+- Architect returned **STOP** before any production/test/Device/Web edit. The coherent existing-
+  owner write set is ten paths, but stale/deleted ceiling semantics, exact mismatch authority,
+  pre-open overwrite validation, the fixture cardinality/order and endpoint/Device cleanup needed
+  the explicit corrections now frozen above.
+- The corrected package preserves absent canonical ceilings with a non-ID placeholder, binds
+  mismatch to exact captured ID+host+port and one owner guard, validates overwrite before SFTP open,
+  uses one profile at a time, stops at unknown B without trusting it, assigns unrelated-known_hosts
+  preservation only to P4-20, and fixes one-holder/first-readiness-loss cleanup/resource ownership.
+- Production, retained tests and Device/Web actions remain forbidden pending Architect re-review of
+  this exact corrected design/proof package. No attempted production patch was applied.
+
+Architect personal pre-edit re-review: **GO** for the exact corrected gate and frozen ten-path
+write set. The direct request-socket peek is accepted as the necessary pinned-3.2.1 cancellation
+boundary, not general socket infrastructure. Production may now proceed only with the frozen
+public-summary/JIT, exact mismatch capture/guard/forget, stale-ceiling, strict-overwrite/deadline,
+existing asset/state/route/test integration and proportional one-profile proof responsibilities.
+No staging or commit is permitted before the later evidence-ready Architect closure review.
+
+### Fresh implementation review STOP and active-row correction
+
+- The fresh read-only code reviewer returned **STOP** on three P4-17-owned points after the cheap
+  checks passed. First, profile save/select/delete/key-install refreshed only SSH state, leaving
+  project/chat match booleans stale; the UI also conflated an existing non-selected ceiling with
+  an absent saved profile. The correction reloads canonical chat state after every availability/
+  identity mutation and labels absent versus present-but-nonmatching IDs separately.
+- Second, a local browser `AbortError` cannot prove whether the server committed before FIN became
+  observable. The correction reports that browser-side outcome as unknown and requires destination
+  inspection; only an observed server result may claim cancellation. No retry is added.
+- Third, the retained hardware lifecycle contained only the P4-14 header producer and did not yet
+  own the frozen P4-17 checkpoints or common exact-owned cleanup. The correction adds bounded
+  checkpoints to that existing owner only; no new harness, file, route or framework is introduced.
+- Failure ownership is active-row implementation/proof, not a predecessor regression or environment
+  failure. The diff remains inside the frozen ten paths. Expensive build/Device/Web evidence remains
+  paused until the consolidated correction passes the reviewer's one allowed blocker follow-up.
+
+### Final reviewer follow-up STOP and bounded correction
+
+- The reviewer's single blocker-only follow-up returned **STOP** on two remaining active-row
+  defects and is now closed. First, the generic saved-ceiling label claimed an existing chat profile
+  was not selected when it could instead be selected but conjunctively blocked by the project
+  ceiling. The corrected label states only that the saved profile is not effective; absent saved
+  profiles remain visibly distinct and the server-owned match booleans remain authoritative.
+- Second, the retained journey aborted after an unobserved timer, so unchanged destination state
+  could not prove that the controlled server operation had started. The corrected existing harness
+  arms the disposable fixture, waits for its exact `started` checkpoint with operation count one,
+  aborts that request, and requires a `cancelled` checkpoint with the same count, no target commit
+  and exact temporary absence before inspecting the unchanged prior destination. No retry, retained
+  fixture implementation, new production seam, route, module or framework is added.
+- These corrections remain within the frozen asset/generated-asset, existing hardware lifecycle
+  and trace owners. Build, upload and Device/Web evidence remain pending the corrected cheap checks;
+  no exact-owned mutation is active.
+
+### First exact compile failure and active-row ownership
+
+- The corrected cheap gate passed: generated Web asset source was 120,132 bytes and gzip was
+  31,059 bytes; lifecycle syntax, retained UI/asset checks, diff hygiene, timer absence and the
+  fixture-side checkpoint inventory all passed. The unchanged host C++ boundary retained its prior
+  pass and was not repeated.
+- The first exact pinned M5Stack 3.2.1 compile then failed before upload on two stale consumers of
+  the P4-17 public-summary cache: session release attempted to swap a `vector<SshProfile>` into the
+  new `vector<SshProfileSummary>`, and chat-permission enablement passed a public summary to the
+  full-profile completeness function. This is an active-row cache-adapter defect, not a toolchain,
+  predecessor, Device or environment failure.
+- The bounded correction uses the summary vector type during release, resets the cached selected
+  completeness flag with the other session state, and makes chat-permission enablement consume that
+  same selected-profile JIT-derived flag. It adds no loader, secret access, route, policy or schema.
+
+### Disposable private-key path boundary
+
+- Runtime preparation found that the draft retained journey accepted the disposable private-key
+  path as a command-line argument, making that secret-bearing path visible in process metadata.
+  Failure ownership is the P4-17 test caller, not production key storage or P4-02.
+- The existing journey now reads that one path only from a temporary process environment value.
+  The fixture generates a random filename, the launcher never prints it and clears the environment
+  value immediately after the child exits; no key bytes/path enter retained output, serial, Web,
+  model, audit, Git or the production API.
+
+### Mandatory greater-than-60-minute proof pivot
+
+- At 2026-09-01 01:55:17 +03:00 Architect returned **STOP** after the row had exceeded its
+  60-minute limit. No new production defect was established. The retained harness had accumulated
+  a 594-line composite P4 journey plus roughly twenty helpers spanning profile/key CRUD, ceilings,
+  SSH stages, fixture control, transfers, cancellation and cleanup, contradicting the locked
+  independent-checkpoint design and the user's removal of a separate P4-19 journey subsystem.
+- The materially different approach freezes the reviewed production diff, restores
+  `tools/hardware_web_e2e.mjs` exactly to `HEAD`, reuses the accepted P4-07/P4-11/P4-14/P4-20 proof
+  owners above, and limits runtime to one narrow disposable private-key/authentication and direct
+  control smoke. No replacement retained runner, fixture framework or oracle is permitted.
+- The attempted AsyncSSH 2.24.0 fixture passed its own local key-auth/shell/SFTP/control self-test,
+  but no Device/Web action began. Its temporary process and environment were stopped and removed;
+  the attempted exact firewall rule was denied before creation and verified absent. No exact-owned
+  mutation or external process remains.
+- The earlier command-line key-path correction was part of the removed composite runner and is no
+  longer retained code. Any later narrow disposable caller must keep the random path in process
+  memory/environment only, never argv or output, and delete it in the same bounded cleanup.
+
+### Architect reduced-package STOP and narrowed concurrency correction
+
+- Architect accepted the reduced proof ownership and every other reviewed P4-17 boundary, but
+  returned **STOP** before upload/runtime because `handleSshStart` reread changed-host state after
+  its locked composite check and `handleSshForget` composed worker state before proving that the
+  worker had published its final state and cleared its task handle.
+- A second independent concurrency analysis narrowed the correction. Exact authority capture is
+  main-loop owned and its ID/host/port reload prevents unrelated deletion. The worker publishes its
+  changed/awaiting/terminal state before clearing `webSshTask` under `webSshStateMux`, and only the
+  serialized WebServer/main loop can start another worker. Therefore start retains the existing
+  locked `webSshProfileStateLocked()` check but uses one generic conflict message with no later
+  changed-state read; forget checks `webSshTaskIsRunning()` first and only after false reads the
+  published flags. Established writes and main-owned Arduino Strings remain unchanged.
+- This ordering keeps the existing exact selected-authority reload before the unchanged forget
+  primitive and adds no synchronization abstraction, helper/type/module, schema, route, policy or
+  proof runner. Upload, Device and Web actions remain forbidden pending ordering/static evidence,
+  one exact compile and Architect re-review.
+
+### Narrowed concurrency correction evidence
+
+- `git diff --check` passed. A disposable first ordering assertion falsely selected an earlier
+  unrelated `completeWebSshWorker()` occurrence and stopped before compilation; production was not
+  changed. The corrected assertion searched only after each publication point and passed: start
+  uses the locked generic conflict, forget checks task first, exact authority reload/comparison
+  precedes forget, and worker changed/awaiting/terminal publication precedes task-handle clear.
+- The exact pinned M5Stack ESP32 3.2.1 compile then passed. Sketch flash is 3,440,354 bytes and
+  globals are 65,700 bytes. The firmware image is 3,440,544 bytes with SHA-256
+  `FD1103603FF9A98EE62787BF65B26916CE91528CE32BA68A9D4CE7C48C17B7E1`; build options contain the
+  exact FQBN and one unique resolved 3.2.1 core. No upload, Device, HTTP, Browser or fixture action
+  followed this correction.
+- The reduced write set remains nine tracked paths and `tools/hardware_web_e2e.mjs` remains exactly
+  at `HEAD`. The most recent retained UI/asset check passed before this C++-only ordering correction
+  and its boundary is unchanged.
+
+### Narrow runtime preflight blocker
+
+- Architect returned runtime-only **GO** for one upload and one bounded private-key authentication/
+  direct transfer smoke, explicitly excluding real mismatch/forget mutation, which remains P4-20.
+  No upload or Device/Web action has started.
+- Preflight found that a fresh exact endpoint must add its host key before private-key authentication.
+  Production has an ordinary manual Device profile action which can forget that exact host, while
+  the authenticated P4-17 Web forget route intentionally requires a retained mismatch. There is no
+  existing unattended Web/API/serial cleanup for a newly trusted non-mismatching endpoint. Using a
+  real key rotation/mismatch/forget would violate the runtime GO and consume P4-20 acceptance;
+  requiring manual Device input would violate unattended exact cleanup.
+- Consequently the authorized scenario cannot yet satisfy both first real private-key auth and
+  exact known_hosts restoration. The image was not uploaded and no endpoint/profile/key/trust/
+  workspace mutation was made. This is a proof-ownership blocker, not a production defect; it is
+  reported to Architect before any state-changing runtime action.
+
+### Runtime ownership resolution
+
+- Architect assigned the inseparable first real private-key authentication plus created known_hosts
+  cleanup to P4-20, which already owns real mismatch, exact forget and unrelated-entry preservation.
+  This is required Phase 4 evidence, not a waiver or deferral. P4-17 must not manufacture a cleanup
+  route/diagnostic, rotate merely for cleanup, retain a trust entry, request manual Device cleanup or
+  change firewall/system policy.
+- P4-17 is authorized for one upload and one authenticated Web lifecycle with no SSH connection,
+  trust, known_hosts, endpoint, remote-file or profile/key mutation. It observes only the actual
+  public page/state and controls listed in the narrowed proof matrix, restores any Web selection it
+  changes, and exits normally. First readiness loss ends the path without recovery escalation.
+
+### Narrow authenticated Web acceptance evidence
+
+- On 2026-09-01 after the reboot-safe resume, one direct COM8 holder performed exactly one `PING`
+  and one `CONSOLE`; the device returned `PONG` and the prefix-matched Web Console ready marker on
+  the first attempt. The same holder stayed open for the complete authenticated Browser observation
+  and then accepted one `EXIT`, observed exact `WEB_CONSOLE result=stopped`, closed COM8 and exited.
+  No readiness loss, recovery action, rebuild, upload or repeated probe occurred.
+- The ignored installation credential was read only in the local automated Browser login path,
+  submitted only to the CardMind Web Console and cleared from the automation variables without
+  output. The authenticated page reported Cardputer online and loaded the existing project/chat
+  selection without changing it.
+- In the real Chat details surface, both project and chat SSH ceiling controls were visible. After
+  the existing Terminal state refresh, each contained at least one public profile option; every
+  non-empty option value was an exact nonzero 16-lowerhex canonical ID. Both saved/effective state
+  labels were visible and non-empty, while neither those labels nor any rendered page text exposed
+  a raw canonical ID, private-key material or private-key storage path.
+- In the real Terminal surface, one public selected-profile option was present with a canonical ID
+  held only in the control value/dataset and no raw ID in its rendered label. Password and
+  passphrase fields were empty. Exactly one SSH terminal was present; state was `Disconnected`,
+  Connect was available, Disconnect was disabled, and the selected-host forget control existed but
+  was `hidden`, `display:none` and disabled in this ordinary non-mismatch state. No SSH connection,
+  trust decision or forget mutation was attempted.
+- Existing SFTP destination, download, upload, transfer-state and cancel controls were present and
+  reachable in the Terminal surface. The retained UI/asset test remains the evidence for strict
+  overwrite/default-deny and route wiring; this narrowed runtime observation intentionally made no
+  SFTP/workspace/remote mutation and did not re-prove the P4-07 backend.
+- No profile, key, project, chat, workspace, remote file, known_hosts entry or other exact-owned
+  fixture was created or changed, so inventories and selections remained unchanged and no data
+  deletion was required. The temporary Browser tab was closed and the sole Web Console holder
+  stopped normally. The UI exposed no safe heap/block/stack/latency values, so no new numeric
+  runtime resource or latency claim is made; the exact compiled-image resource evidence above
+  remains authoritative.
+
+### Architect personal closure review
+
+- Architect returned explicit **GO** for the unchanged exact nine-path row-owned diff after personal
+  review of the production path, raw authenticated Web evidence, embedded-asset equality, retained
+  UI check, pinned build, cleanup and forbidden effects. The index was empty,
+  `tools/hardware_web_e2e.mjs` was content-identical to `HEAD`, and the three approved untracked
+  `.codex/agents` files remained excluded.
+- Accepted behavior is the authenticated production public-state path into the real project/chat
+  ceiling, single-terminal, SFTP and mismatch-only forget controls. Canonical IDs remained control
+  values rather than visible text; exactly one terminal and the required transfer controls were
+  present; forget remained hidden in ordinary disconnected state; no secret/private path/raw ID,
+  second terminal, parallel framework or runtime mutation was observed.
+- Accepted resources are flash 3,440,354 bytes, globals 65,700 bytes and image 3,440,544 bytes with
+  SHA-256 `FD1103603FF9A98EE62787BF65B26916CE91528CE32BA68A9D4CE7C48C17B7E1`.
+  No new numeric runtime resource claim is required for this UI integration row. P4-20 retains the
+  mandatory real private-key mismatch/forget lifecycle; P4-07 retains backend transfer evidence.
