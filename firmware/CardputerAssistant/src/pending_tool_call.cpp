@@ -334,6 +334,58 @@ CanonicalToolArgumentsResult canonicalizeParsedToolArguments(
             normalized["max_inline_output_bytes"] = maximumOutputBytes;
             break;
         }
+        case ToolSchemaId::SshSafeAction: {
+            if (input.size() < 1 || input.size() > 3 ||
+                !input["action"].is<const char*>()) {
+                return failArguments(
+                    "ssh_safe_action requires action and only its optional timeout/output fields");
+            }
+            for (JsonPairConst field : input) {
+                const char* name = field.key().c_str();
+                if (std::strcmp(name, "action") != 0 &&
+                    std::strcmp(name, "timeout_ms") != 0 &&
+                    std::strcmp(name, "max_inline_output_bytes") != 0) {
+                    return failArguments(
+                        "ssh_safe_action contains an unknown field");
+                }
+            }
+            const JsonString actionValue = input["action"].as<JsonString>();
+            if (actionValue.isNull() ||
+                std::strlen(actionValue.c_str()) != actionValue.size()) {
+                return failArguments("SSH Safe Action id is invalid");
+            }
+            const std::string actionId(
+                actionValue.c_str(), actionValue.size());
+            if (sshSafeActionEntryForId(actionId) == nullptr) {
+                return failArguments(
+                    "SSH Safe Action id is not in the fixed reviewed set");
+            }
+            const bool hasTimeout = input.containsKey("timeout_ms");
+            const bool hasOutputLimit =
+                input.containsKey("max_inline_output_bytes");
+            if ((hasTimeout &&
+                 !input["timeout_ms"].is<std::uint32_t>()) ||
+                (hasOutputLimit &&
+                 !input["max_inline_output_bytes"].is<std::size_t>())) {
+                return failArguments(
+                    "SSH Safe Action timeout/output options must be integers");
+            }
+            const std::uint32_t timeoutMs = hasTimeout
+                ? input["timeout_ms"].as<std::uint32_t>()
+                : kDefaultSshCommandTimeoutMs;
+            const std::size_t maximumOutputBytes = hasOutputLimit
+                ? input["max_inline_output_bytes"].as<std::size_t>()
+                : kDefaultSshCommandInlineOutputBytes;
+            if (!isValidSshCommandTimeout(timeoutMs) ||
+                !isValidSshCommandInlineOutputLimit(maximumOutputBytes)) {
+                return failArguments(
+                    "SSH Safe Action timeout/output options are outside current limits");
+            }
+            normalized["action"] = actionId;
+            normalized["timeout_ms"] = timeoutMs;
+            normalized["max_inline_output_bytes"] = maximumOutputBytes;
+            break;
+        }
         case ToolSchemaId::SftpList: {
             static constexpr const char* kFields[] = {
                 "path", "offset", "max_entries",
@@ -700,7 +752,9 @@ CurrentPendingIdentityResult validateCurrentPendingIdentity(
     identity = validateProjectTarget(
         pending.projectId, schema, fileName, currentTarget);
     if (identity.success &&
-        (schema == ToolSchemaId::SshCommand || isModelSftpSchema(schema))) {
+        (schema == ToolSchemaId::SshCommand ||
+         schema == ToolSchemaId::SshSafeAction ||
+         isModelSftpSchema(schema))) {
         identity = selectedSshAuthorityIdentity(currentTarget);
         if (identity.success && isModelSftpSchema(schema)) {
             currentTarget.name = fileName;
@@ -759,6 +813,7 @@ PendingToolCallBuildResult buildPendingToolCall(
         return {false, {}, result.error};
     }
     if (arguments.schema == ToolSchemaId::SshCommand ||
+        arguments.schema == ToolSchemaId::SshSafeAction ||
         isModelSftpSchema(arguments.schema)) {
         result = selectedSshAuthorityIdentity(target);
         if (!result.success) {
@@ -1093,10 +1148,12 @@ PendingToolCallResult loadPendingToolCall()
          (pending.target.kind != PendingToolTargetKind::File ||
           pending.target.name != arguments.fileName)) ||
         (!fileMutation && arguments.schema != ToolSchemaId::SshCommand &&
+         arguments.schema != ToolSchemaId::SshSafeAction &&
          !sftpTarget &&
          pending.target.kind != PendingToolTargetKind::None) ||
         (arguments.schema == ToolSchemaId::AppendFile && !pending.target.exists) ||
-        (arguments.schema == ToolSchemaId::SshCommand &&
+        ((arguments.schema == ToolSchemaId::SshCommand ||
+          arguments.schema == ToolSchemaId::SshSafeAction) &&
          pending.target.kind != PendingToolTargetKind::Ssh) ||
         (sftpTarget &&
          (pending.target.kind != PendingToolTargetKind::Ssh ||
@@ -1214,6 +1271,21 @@ PendingToolPreviewResult loadPendingToolPreview(const String& pendingId)
         preview.kind = PendingToolPreviewKind::SshCommand;
         preview.proposedBytes = static_cast<std::uint32_t>(body.body.size());
         preview.body = std::move(body.body);
+    } else if (entry->schema == ToolSchemaId::SshSafeAction) {
+        const json_reader::JsonStringValueResult actionId =
+            readCanonicalStringArgument(
+                pending.continuation.call.arguments, "action", 32);
+        if (!actionId.success) {
+            return {false, {}, actionId.error};
+        }
+        const SshSafeActionEntry* action =
+            sshSafeActionEntryForId(actionId.value);
+        if (action == nullptr) {
+            return {false, {}, "Pending SSH Safe Action id is invalid"};
+        }
+        preview.kind = PendingToolPreviewKind::SshCommand;
+        preview.body = std::string("Fixed read-only action: ") +
+            action->id + "\nCommand: " + action->command;
     } else if (entry->schema == ToolSchemaId::SftpWrite ||
                entry->schema == ToolSchemaId::SftpMove) {
         JsonDocument argumentsDocument;

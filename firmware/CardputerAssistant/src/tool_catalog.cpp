@@ -26,7 +26,20 @@ constexpr std::array<ToolCatalogEntry, kToolCatalogSize> kToolCatalog = {{
      ToolCapability::SftpReadWrite},
     {ToolSchemaId::SftpMove, "sftp_move", ToolCapabilityGroup::Ssh,
      ToolCapability::SftpReadWrite},
+    {ToolSchemaId::SshSafeAction, "ssh_safe_action",
+     ToolCapabilityGroup::Ssh, ToolCapability::SshRead},
 }};
+
+constexpr std::array<SshSafeActionEntry, kSshSafeActionCount>
+    kSshSafeActionCatalog = {{
+        {"logs", "journalctl --no-pager --lines=100 --output=short-iso"},
+        {"service_state",
+         "systemctl list-units --type=service --state=running,failed "
+         "--no-pager --plain"},
+        {"containers", "docker ps --no-trunc"},
+        {"disk", "df -hP"},
+        {"processes", "ps -eo pid,ppid,user,stat,etime,comm"},
+    }};
 
 bool decisionIncludesSchema(ToolPermissionDecision decision) noexcept
 {
@@ -45,6 +58,23 @@ std::uint8_t groupMask(ToolCapabilityGroup group) noexcept
 const std::array<ToolCatalogEntry, kToolCatalogSize>& toolCatalog() noexcept
 {
     return kToolCatalog;
+}
+
+const std::array<SshSafeActionEntry, kSshSafeActionCount>&
+sshSafeActionCatalog() noexcept
+{
+    return kSshSafeActionCatalog;
+}
+
+const SshSafeActionEntry* sshSafeActionEntryForId(
+    const std::string& id) noexcept
+{
+    for (const SshSafeActionEntry& entry : kSshSafeActionCatalog) {
+        if (id == entry.id) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 const ToolCatalogEntry* toolCatalogEntryForName(

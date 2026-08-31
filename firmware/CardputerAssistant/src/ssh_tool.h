@@ -17,11 +17,25 @@ struct SshCommandArgumentsResult {
     String error;
 };
 
+struct SshSafeActionArgumentsResult {
+    bool success;
+    String actionId;
+    String command;
+    std::uint32_t timeoutMs;
+    std::size_t maximumInlineOutputBytes;
+    String error;
+};
+
 bool isSshToolName(const std::string& name);
 bool sshToolIsAvailable();
 SshCommandArgumentsResult parseSshCommandArguments(
     const std::string& argumentsJson);
+SshSafeActionArgumentsResult parseSshSafeActionArguments(
+    const std::string& argumentsJson);
 ToolExecutionResult executeSshTool(const ToolCall& call,
                                    const CancelCallback& isCancelled);
+ToolExecutionResult executeSshSafeActionTool(
+    const ToolCall& call,
+    const CancelCallback& isCancelled);
 
 }  // namespace cardputer

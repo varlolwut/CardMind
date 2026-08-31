@@ -152,23 +152,84 @@ SshCommandArgumentsResult parseSshCommandArguments(
     return {true, command, timeoutMs, maximumOutputBytes, ""};
 }
 
-ToolExecutionResult executeSshTool(const ToolCall& call,
-                                   const CancelCallback& isCancelled)
+SshSafeActionArgumentsResult parseSshSafeActionArguments(
+    const std::string& argumentsJson)
 {
-    if (!isSshToolName(call.name)) {
-        return toolError("Unsupported SSH tool name");
+    JsonDocument arguments;
+    const DeserializationError parsed = deserializeJson(arguments, argumentsJson);
+    if (parsed || !arguments.is<JsonObject>()) {
+        return {false, "", "", 0, 0,
+                "SSH Safe Action arguments must be a JSON object"};
     }
+    const JsonObjectConst input = arguments.as<JsonObjectConst>();
+    if (input.size() < 1 || input.size() > 3 ||
+        !input["action"].is<const char*>()) {
+        return {
+            false, "", "", 0, 0,
+            "SSH Safe Action requires action and only its optional timeout/output fields",
+        };
+    }
+    for (JsonPairConst field : input) {
+        const char* name = field.key().c_str();
+        if (std::strcmp(name, "action") != 0 &&
+            std::strcmp(name, "timeout_ms") != 0 &&
+            std::strcmp(name, "max_inline_output_bytes") != 0) {
+            return {false, "", "", 0, 0,
+                    "SSH Safe Action contains an unknown field"};
+        }
+    }
+    const JsonString actionValue = input["action"].as<JsonString>();
+    if (actionValue.isNull() ||
+        std::strlen(actionValue.c_str()) != actionValue.size()) {
+        return {false, "", "", 0, 0,
+                "SSH Safe Action id is invalid"};
+    }
+    const std::string actionId(
+        actionValue.c_str(), actionValue.size());
+    const SshSafeActionEntry* action = sshSafeActionEntryForId(actionId);
+    if (action == nullptr) {
+        return {false, "", "", 0, 0,
+                "SSH Safe Action id is not in the fixed reviewed set"};
+    }
+    const bool hasTimeout = input.containsKey("timeout_ms");
+    const bool hasOutputLimit =
+        input.containsKey("max_inline_output_bytes");
+    if ((hasTimeout && !input["timeout_ms"].is<std::uint32_t>()) ||
+        (hasOutputLimit &&
+         !input["max_inline_output_bytes"].is<std::size_t>())) {
+        return {false, "", "", 0, 0,
+                "SSH Safe Action timeout/output options must be integers"};
+    }
+    const std::uint32_t timeoutMs = hasTimeout
+        ? input["timeout_ms"].as<std::uint32_t>()
+        : kDefaultSshCommandTimeoutMs;
+    const std::size_t maximumOutputBytes = hasOutputLimit
+        ? input["max_inline_output_bytes"].as<std::size_t>()
+        : kDefaultSshCommandInlineOutputBytes;
+    if (!isValidSshCommandTimeout(timeoutMs) ||
+        !isValidSshCommandInlineOutputLimit(maximumOutputBytes)) {
+        return {false, "", "", 0, 0,
+                "SSH Safe Action timeout/output options are outside current limits"};
+    }
+    return {
+        true,
+        action->id,
+        action->command,
+        timeoutMs,
+        maximumOutputBytes,
+        "",
+    };
+}
+
+static ToolExecutionResult executeSshCommand(
+    const String& command,
+    std::uint32_t timeoutMs,
+    std::size_t maximumOutputBytes,
+    const CancelCallback& isCancelled)
+{
     if (isCancelled()) {
         return toolCanceled("SSH command canceled before connection");
     }
-    const SshCommandArgumentsResult arguments =
-        parseSshCommandArguments(call.arguments);
-    if (!arguments.success) {
-        return toolError(arguments.error);
-    }
-    const String& command = arguments.command;
-    const std::uint32_t timeoutMs = arguments.timeoutMs;
-    const std::size_t maximumOutputBytes = arguments.maximumInlineOutputBytes;
     SshProfile profile;
     OperationResult result = loadSshProfile(profile);
     if (!result.success || !sshProfileIsComplete(profile)) {
@@ -306,6 +367,45 @@ ToolExecutionResult executeSshTool(const ToolCall& call,
         true,
         exitStatus,
     };
+}
+
+ToolExecutionResult executeSshTool(const ToolCall& call,
+                                   const CancelCallback& isCancelled)
+{
+    if (!isSshToolName(call.name)) {
+        return toolError("Unsupported SSH tool name");
+    }
+    if (isCancelled()) {
+        return toolCanceled("SSH command canceled before connection");
+    }
+    const SshCommandArgumentsResult arguments =
+        parseSshCommandArguments(call.arguments);
+    if (!arguments.success) {
+        return toolError(arguments.error);
+    }
+    return executeSshCommand(
+        arguments.command, arguments.timeoutMs,
+        arguments.maximumInlineOutputBytes, isCancelled);
+}
+
+ToolExecutionResult executeSshSafeActionTool(
+    const ToolCall& call,
+    const CancelCallback& isCancelled)
+{
+    if (call.name != "ssh_safe_action") {
+        return toolError("Unsupported SSH Safe Action tool name");
+    }
+    if (isCancelled()) {
+        return toolCanceled("SSH command canceled before connection");
+    }
+    const SshSafeActionArgumentsResult arguments =
+        parseSshSafeActionArguments(call.arguments);
+    if (!arguments.success) {
+        return toolError(arguments.error);
+    }
+    return executeSshCommand(
+        arguments.command, arguments.timeoutMs,
+        arguments.maximumInlineOutputBytes, isCancelled);
 }
 
 }  // namespace cardputer

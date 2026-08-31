@@ -55,7 +55,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-05 | Single-pass streamed SD command log, bounded model summary/reference, cancellation, and downloadable output | Output is written once while streaming to SD; the model receives only a bounded summary/reference; a long foreground command cancels and its log downloads without background execution | completed |
 | P4-06 | Paged model SFTP list/read/write/move through existing `SftpReadWrite` and Phase 3 permission/confirmation boundaries | Model listing is bounded/paged; `Ask` confirms every model SFTP call; `Allow` still confirms overwrite/delete/move onto an existing target; overwrite defaults deny and no prior remote target is truncated/deleted before confirmed safe replacement; manual Device/Web SFTP remains direct-user authority | completed |
 | P4-07 | Existing streaming CardMind workspace transfer to/from selected remote host | Both directions preserve workspace policy, total foreground deadline and cooperative cancel; overwrite defaults deny and replacement never destroys the prior target before confirmation | completed |
-| P4-08 | Small fixed built-in Safe Actions set for logs, service state, containers, disk and processes | Reviewed fixed actions obey existing Off/Ask/ceiling/host-key/timeout/audit boundaries; no presets, editor, macros, persistence schema or action framework | pending |
+| P4-08 | Small fixed built-in Safe Actions set for logs, service state, containers, disk and processes | Reviewed fixed actions obey existing Off/Ask/ceiling/host-key/timeout/audit boundaries; no presets, editor, macros, persistence schema or action framework | completed |
 | P4-09 | Removed by user: Web terminal tabs; existing single terminal remains | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-10 | Removed by user: configurable Device terminal-history rotation and new viewer; existing terminal.log/old.log remains | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-11 | Existing bounded known_hosts store with unconditional host-key-change block | Every mismatch blocks connection; user-removed pagination/rotation is not implemented | pending |
@@ -1458,3 +1458,309 @@ state, API, timeout, output-storage or channel-management contract changes.
 - Residual risk retained honestly: a device reset after remote-temp creation can leave an inert random same-directory temp that CardMind cannot safely rediscover without forbidden durable metadata. Automatic replay/wildcard deletion is forbidden; remote-host operator inspection owns that rare crash residual. P4-16/P4-17 own direct-user controls and explicit overwrite interaction.
 
 **Completed:** 2026-08-31 02:50:53 +03:00. P4-08 and later behavior remain pending.
+
+## P4-08 design gate
+
+**Status:** completed after Architect personal closure GO
+**Started:** 2026-08-31 02:53:27 +03:00.
+**Completed:** 2026-08-31 11:48:03 +03:00.
+
+**Architect personal closure GO:** the Architect personally reviewed the final
+actual nine-file diff, exact contract and non-goals, every schema/prompt/catalog/
+policy/router/pending/preview/executor/audit producer and consumer, fixed vendor
+command semantics, restored cancel-before-parse behavior, diagnostic removal,
+retained host tests, compositional Device evidence, pinned build resources,
+cleanup and the explicit post-fix preview residual. The two final trace evidence
+ownership statements are accurate and no unresolved blocker remains.
+
+**Independent pre-edit review:** initial STOP found missing explicit audit-path
+proof. The frozen matrix was corrected to cover direct Allow, approved Ask and
+Succeeded/Failed/Canceled activity records; the reviewer's single focused
+follow-up returned GO. The reviewer was then closed.
+
+**Independent code review:** the fresh code reviewer returned GO after one
+focused correction, but the later Architect personal closure review superseded
+that verdict with two exact blockers: the refactor had moved cancellation after
+argument parsing, and the retained firmware diagnostic duplicated lifecycle
+ownership while retaining an exact-cleanup hole. The correction restores the
+pre-P4-08 cancel-before-parse boundary in both public executors and removes the
+firmware diagnostic entirely. No new reviewer loop is opened; the corrected
+row-owned diff returns to Architect for personal re-review.
+
+### Scope lock
+
+- ROADMAP Phase 4: add a small fixed built-in Safe Actions set for logs,
+  service state, containers, disk and processes.
+- Arbitrary model-issued `ssh_command` remains `SshMutate`. `SshRead` exposes
+  only exact fixed reviewed actions; no command-text, prefix or regex
+  classifier is permitted.
+- Every action remains under the existing Off/Ask/Allow hierarchy, selected
+  trusted SSH authority, total command deadline, bounded/SD-backed output,
+  cooperative cancel, pending confirmation and tool-activity audit paths.
+- Manual Device/Web terminal authority is unchanged. Final Device/Web controls
+  belong to P4-16/P4-17.
+
+### Inventory and ownership
+
+- Producer: `api_client.cpp::addToolSchema` emits model schemas from the stable
+  append-only `tool_catalog`; API tool-call decoding resolves names back
+  through that catalog.
+- Policy: `ToolCapability::SshRead` and its persisted P3 policy codec already
+  exist. `tool_router.cpp` currently keeps it unavailable; `ssh_command`
+  remains mapped only to `SshMutate`.
+- Runtime: `tool_router.cpp` owns authorization/confirmation dispatch and
+  `executeAuditedToolCall`; `ssh_tool.cpp` already owns selected-profile JIT
+  secret load/zeroization, one total deadline, cancel, host-key mismatch block,
+  authentication, one-pass streamed output and P4-05 SD-log/reference results.
+- Pending confirmation: `pending_tool_call.cpp` canonicalizes exact arguments,
+  stores selected profile/key/trusted-fingerprint authority SHA-256, and rejects
+  stale authority before approval. The Safe Action must reuse that SSH target
+  identity while remaining `PolicyAsk`, not mandatory under `Allow`.
+- Persistence/reboot/SD: no new settings, action records, migration or recovery
+  owner. Existing pending-call persistence and P4-05 output-log ownership are
+  reused unchanged. Missing remote utilities return their normal non-zero exit
+  status; there is no fallback command.
+- Consumers: model schema/prompt, catalog/request plan, router, pending preview,
+  audit/cancel executor and host policy tests. P4-16/P4-17 later add matching
+  direct-user controls.
+- Primary references reviewed: systemd `journalctl`/`systemctl` upstream manual
+  sources, Docker CLI `container ls`, GNU Coreutils 9.11 `df`, and procps-ng
+  `ps`. The fixed commands are read-only introspection commands:
+  `journalctl --no-pager --lines=100 --output=short-iso`,
+  `systemctl list-units --type=service --state=running,failed --no-pager --plain`,
+  `docker ps --no-trunc`, `df -hP`, and
+  `ps -eo pid,ppid,user,stat,etime,comm`.
+
+### Minimal design
+
+- Append one stable `ssh_safe_action` schema mapped to `SshRead`; preserve all
+  existing schema IDs and the `ssh_command -> SshMutate` mapping.
+- Accept exactly one required enum `action` (`logs`, `service_state`,
+  `containers`, `disk`, `processes`) plus the existing optional `timeout_ms`
+  and `max_inline_output_bytes`. No free command, path, service/container name,
+  filter, shell fragment or other interpolation enters the fixed command.
+- Keep the five-ID/five-command table in the existing catalog source so API,
+  canonicalization, runtime and host proof share one reviewed authority. This is
+  a fixed table, not an action registry/editor/framework.
+- Refactor only the existing SSH execution body into one internal function
+  called by `ssh_command` and the parsed fixed action. Host-key verification,
+  JIT credentials, deadline, cancel, output capture and zeroization remain one
+  implementation.
+- Treat the Safe Action as an SSH authority target in pending-call save/load and
+  stale-identity validation. Its Ask preview shows the exact fixed action; Allow
+  runs without mandatory confirmation. Arbitrary `ssh_command` stays mandatory.
+
+### Frozen proof matrix
+
+- Host/static: catalog has one appended `ssh_safe_action -> SshRead`; with only
+  `SshRead=Allow/Ask`, the request plan exposes that schema and never
+  `ssh_command`/SFTP. With `SshRead=Off/Unavailable`, it exposes none.
+- Host/static: the catalog contains exactly the five reviewed ID/command pairs;
+  unknown IDs, extra fields, free command text and out-of-range timeout/output
+  options fail closed.
+- Pending/static: Ask persists selected SSH authority identity, preview names
+  the exact fixed action, and stale profile/key/trusted-host identity cannot be
+  approved. Allow is not promoted to mandatory; arbitrary SSH remains mandatory.
+- Audit/static: direct `Allow` dispatch in `routeToolCall` and approved `Ask`
+  dispatch through `approvePendingProjectToolCall ->
+  executeConfirmedProjectToolCall` both enter the same
+  `executeAuditedToolCall`; the appended catalog row resolves its target as
+  `SelectedSsh`. There is no unaudited Safe Action dispatch.
+- Compositional runtime evidence: the already observed pre-fix image parsed all
+  five fixed mappings, passed canonical pending save/load/clear before and after
+  one direct-Allow production execution, and reached the valid pre-cancel,
+  invalid audited and Ask paths. Exact project/chat, pending and output-log
+  cleanup and restoration passed. The disposable firmware diagnostic is not
+  retained and no new Device/Web run is part of this correction.
+- Pending/audit ownership: the only observed Ask failure was the shared
+  16-byte canonical field-name reader in `loadPendingToolPreview`. P4-04 commit
+  `439f630203c92b59b7e38c7223d35b0bbe64de85` replaced it with the exact
+  production 23-byte helper and directly host-tested that boundary. Approved
+  Ask then continues through the unchanged `executeAuditedToolCall` path proven
+  by static ownership and predecessor evidence.
+- Cleanup: the five commands create no remote mutation fixture. The pre-fix
+  compositional run removed every exact-owned project/chat, pending call and
+  output log, verified repeated absence, and restored original inventories and
+  selection. No retained diagnostic or fixture remains in final ownership.
+
+### Forbidden effects
+
+- No shell classifier, regex/prefix inference, user-defined preset, editor,
+  macro, persistence schema, action framework or background executor.
+- No Device/Web terminal policy change, Device/Web controls, P4-14 ceiling
+  implementation, host-key management change, retry or recovery framework.
+- No credentials/private-key bytes or their paths in model schemas/results,
+  pending records, previews, audit, serial, logs or Git.
+- No action can accept model-controlled command bytes or mutate remote state;
+  `ssh_command` must not become reachable through `SshRead`.
+
+### Expected write set
+
+- `.agents/P4_TRACEABILITY.md`.
+- `firmware/CardputerAssistant/src/tool_catalog.h` and `.cpp`.
+- `firmware/CardputerAssistant/src/api_client.cpp`.
+- `firmware/CardputerAssistant/src/tool_router.cpp`.
+- `firmware/CardputerAssistant/src/ssh_tool.h` and `.cpp`.
+- `firmware/CardputerAssistant/src/pending_tool_call.cpp`.
+- `tests/host_tests.cpp`.
+
+No Web asset, policy codec, Settings, storage, SSH client, SFTP/transfer,
+workspace, profile/key or known-host file is in the P4-08 write set.
+`CardputerAssistant.ino`, `SerialDiagnostics.ino`, and `SshTools.ino` are also
+excluded: the disposable `SSHSAFEACTIONTEST` declaration, selector and helper
+block are removed before closure.
+
+### Retained compositional runtime evidence
+
+The following observations came from the now-removed disposable diagnostic.
+They remain evidence about the shared production boundaries it called, not a
+retained firmware test or a claim of post-correction Device acceptance.
+
+- The initial retained diagnostic attempted five direct actions plus one Ask and
+  produced no completion line within the 420-second host timeout. The host then
+  re-opened COM8 and immediately observed PONG, so this was classified as
+  over-broad diagnostic latency, not reset/freeze or a proven production
+  deadlock. No production behavior changed.
+- Per the proportional-test and no-repeat rules, the retained diagnostic was
+  narrowed to parse/verify all five mappings plus one representative direct
+  Allow and one representative approved Ask. This preserves every distinct
+  runtime boundary while removing four duplicate SSH connection cycles.
+- The narrowed run then reached its 240-second host limit and again returned to
+  PONG without reset. The limit exactly overlapped the serial wrapper's blocking
+  network readiness wait plus two 60-second SSH deadlines, while final-only
+  output hid the active stage. The material diagnostic-lifecycle pivot removes
+  that extra readiness wait for this selector and emits only non-secret bounded
+  stage names; SSH production deadlines and behavior remain unchanged.
+- The approved final diagnostic-only pivot compiled to a 3,434,800-byte image
+  with SHA-256 `DEF0BF2537433F3FFA4E898EA9C1C31AAB0A75C45BD4565B738E693F9ED1E8A6`.
+  `build.options.json` resolved the exact Cardputer FQBN and only the pinned
+  M5Stack ESP32 `3.2.1` hardware path; COM8 upload wrote all 3,434,800 bytes and
+  verified the flash hash.
+- The single staged selector observed `direct_allow`, then `ask_prepare`, and
+  failed before `ask_execute` with `Failed to read JSON field name: JSON string
+  field exceeds its byte limit`. Static call ordering places the error in the
+  existing active project/chat metadata load inside `savePendingToolCall ->
+  buildPendingToolCall`, before `storePendingToolCall`; no pending-call mutation
+  occurred. The representative direct Allow and its exact output-log cleanup had
+  already completed, and no remote mutation fixture exists.
+- Post-failure `STATUS` proved `microsd=ready`, `chats=ready`, `files=ready`,
+  `reset_reason=1`, free heap 122,216 bytes, minimum heap 53,116 bytes, largest
+  block 55,284 bytes and stack margin 5,748 bytes. The device remained responsive
+  and user state was not reset or replaced.
+- **External ownership block started 2026-08-31:** the approved one-build,
+  one-upload, one-selector budget is exhausted. The unresolved observation is
+  whether the existing user project/chat metadata read is a diagnostic-fixture
+  dependency or a foreign storage/parser regression. No further build, selector
+  or production change is permitted until Architect assigns that ownership.
+- Architect classified that observation as a diagnostic dependency and required
+  an exact-owned canonical project/chat fixture. Authenticated setup passed with
+  one baseline project, two baseline chats and eleven baseline workspace files;
+  exact project/chat deletion, repeated absence, original selection and all
+  three inventories were restored successfully after the attempt.
+- The attempted selector produced no stage while Web Console was active;
+  `STATUS` was likewise ignored, while `EXIT` was accepted and stopped the
+  console. This proves a harness lifecycle error: the active console serial loop
+  did not dispatch ordinary diagnostic commands, so no P4-08 production path was
+  exercised. The fixture and non-secret ledger were removed. A corrected
+  no-build lifecycle (HTTP setup, stop Console, selector, restart Console,
+  cleanup/restore) is awaiting Architect authorization before one retry.
+- Architect authorized one corrected-lifecycle retry without rebuild/upload.
+  With a fresh canonical exact-owned project/chat selected and Web Console
+  stopped, the existing selector reached `direct_allow`, then `ask_prepare`, and
+  failed identically after 5,321 ms: `Failed to read JSON field name: JSON string
+  field exceeds its byte limit`. This disproves the arbitrary-user-metadata
+  hypothesis and is concrete evidence that the existing canonical project/chat
+  storage reader blocks `savePendingToolCall -> buildPendingToolCall` before Ask
+  persistence. P4-08 production code remains frozen; ownership requires a
+  separately approved completed-row reopen.
+- Corrected-run cleanup passed: only the exact-owned project/chat was deleted,
+  repeated absence was verified, original project/chat selection and
+  project/chat/workspace inventories were restored, the non-secret ledger/helper
+  were removed, and Web Console stopped. Final PONG/STATUS observed
+  `microsd=ready`, `chats=ready` with two original chats, `files=ready`,
+  `reset_reason=1`, free heap 100,404 bytes, minimum heap 27,512 bytes, largest
+  block 32,756 bytes and stack margin 5,172 bytes. These values are retained as
+  failed-run observations, not P4-08 closure evidence.
+- Architect did not yet assign a completed-row reopen because Web selection had
+  loaded the same canonical fixture and P3-06 previously proved pending save on
+  device. One final diagnostic-only A/B/C pivot is authorized: A separately
+  marks canonical project load, chat load and exact Ask pending save/load/clear
+  before any Safe Action; B runs one existing direct-Allow action; C immediately
+  repeats those exact marked operations. Production reader/schema, pending,
+  policy and executor code remain frozen. A failure assigns persistence/pending
+  ownership; A pass with C failure assigns a P4 sequencing/resource regression;
+  both passing resumes the existing P4-08 acceptance within the same run.
+- The one A/B/C image used 3,436,786 flash bytes and 65,628 global-RAM bytes;
+  the 3,436,976-byte binary had SHA-256
+  `EBE684CE29CBE39280AE0A775C86E4EA72A07C7F2833E73CEA1381FD09D4466F`,
+  resolved only the pinned M5Stack ESP32 `3.2.1`, and uploaded with verified
+  flash hash. A passed project load, chat load and pending save/load/clear; B
+  passed the direct-Allow production route; C immediately repeated every A
+  operation and passed. The existing acceptance then failed after `ask_prepare`
+  and before `ask_execute`.
+- Exact static localization assigns that failure to P4-04 preview handling:
+  `readCanonicalStringArgument` passes a 16-byte field-name bound, while the
+  canonical P4-04 object contains the 23-byte field
+  `max_inline_output_bytes`. A/C do not invoke preview, whereas
+  `loadPendingToolPreview` does, matching the observed boundary exactly. No
+  production correction is made until Architect explicitly reopens P4-04.
+- A/B/C cleanup passed: exact fixture project/chat and pending/output were
+  absent, repeated absence and original project/chat/workspace inventories and
+  selection were restored, and the helper/ledger were removed. Final status was
+  `microsd=ready`, two original chats, files ready, `reset_reason=1`, free heap
+  100,428 bytes, minimum heap 32,156 bytes, largest block 32,756 bytes and stack
+  margin 4,452 bytes. These remain diagnostic observations, not closure values.
+
+### Architect correction and closure proof
+
+- Restore the pre-P4-08 cancellation order in both `executeSshTool` and
+  `executeSshSafeActionTool`: validate the exact tool name, return the existing
+  pre-connection canceled result when already canceled, then parse arguments.
+  The shared `executeSshCommand` check remains the guard between parse and
+  connection. No other executor behavior changes.
+- Remove the full `SSHSAFEACTIONTEST` declaration, serial selector/result block
+  and helper/test block. They are disposable evidence and have no final commit
+  ownership.
+- Closure proof is limited to `git diff --check`; the existing strict
+  host/static suite covering the exact five mappings, SshRead-only exposure,
+  full Safe Action/SSH confirmation matrix, pending authority/preview/audit
+  ownership and cancellation order; and one exact pinned M5Stack ESP32 3.2.1
+  compile for final flash, global RAM and binary hash.
+- No COM8, upload, Browser, HTTP, fixture, reset, power-cycle, card action,
+  serial probe or new diagnostic is authorized. No new Device latency is
+  measured or claimed.
+- Residual risk accepted at P4-04 closure remains explicit: post-fix
+  `loadPendingToolPreview` was not observed on Device because the separate
+  HWCDC path lost readiness and the Web handler was inactive. The exact shared
+  helper defect was localized by pre-fix A/B/C, corrected and directly tested
+  in production code by P4-04; P4-08 adds no separate preview implementation.
+
+### Corrected closure evidence
+
+- `git diff --check` passed. Static ownership checks proved that the three
+  `SSHSAFEACTIONTEST` firmware files have no remaining diff, both public
+  executors contain exactly one name-check -> cancel -> parse sequence, the
+  shared executor retains its between-parse-and-connection cancel guard, and
+  the existing pending authority/preview and audited-router boundaries remain.
+- The CI-equivalent C++17 `-Wall -Wextra -Werror` host suite passed. It exercises
+  the exact five catalog ID/command pairs, unknown catalog ID and noncanonical
+  schema names, SshRead-only exposure, the Safe Action
+  Allow=None/Ask=PolicyAsk confirmation matrix, unchanged mandatory
+  `ssh_command`, and catalog/request-plan bounds. Extra-field, free-command and
+  out-of-range Safe Action parser cases belong only to the earlier removed
+  Device diagnostic's compositional evidence, which reached Ask after those
+  checks. The Linux ELF and Windows launcher were exact-owned temporary files
+  and were removed.
+- One compile-only build used the exact FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom` and
+  resolved only M5Stack ESP32 `3.2.1`. Sketch use is 3,427,766 bytes; globals
+  are 65,628 bytes; the 3,427,952-byte app binary has SHA-256
+  `A51AFDE91A1CA378651B4C898555E6E010092DA0E95F7E2EA08750FCADF2E6C9`.
+- Final unstaged ownership is exactly nine files: this trace, `api_client.cpp`,
+  `pending_tool_call.cpp`, `ssh_tool.cpp`, `ssh_tool.h`, `tool_catalog.cpp`,
+  `tool_catalog.h`, `tool_router.cpp`, and `tests/host_tests.cpp`. The index is
+  clean. No COM8, upload, Web/HTTP/Browser, fixture, serial probe, reset,
+  recovery or Device latency measurement occurred during the correction.
+- Architect personal closure review returned explicit GO for this exact diff
+  and evidence. P4-08 is completed; P4-11 remains pending until this row's
+  commit is published and its exact remote SHA is verified.

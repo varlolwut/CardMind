@@ -339,6 +339,36 @@ void addToolSchema(JsonArray tools, ToolSchemaId schema)
             required.add("destination_path");
             break;
         }
+        case ToolSchemaId::SshSafeAction: {
+            function["description"] =
+                "Run one fixed reviewed read-only SSH action through the selected trusted profile.";
+            parameters["properties"]["action"]["type"] = "string";
+            parameters["properties"]["action"]["description"] =
+                "Exact fixed action: logs, service_state, containers, disk, or processes.";
+            JsonArray actions =
+                parameters["properties"]["action"]["enum"].to<JsonArray>();
+            for (const SshSafeActionEntry& action : sshSafeActionCatalog()) {
+                actions.add(action.id);
+            }
+            parameters["properties"]["timeout_ms"]["type"] = "integer";
+            parameters["properties"]["timeout_ms"]["minimum"] =
+                kMinimumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["maximum"] =
+                kMaximumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["default"] =
+                kDefaultSshCommandTimeoutMs;
+            parameters["properties"]["max_inline_output_bytes"]["type"] =
+                "integer";
+            parameters["properties"]["max_inline_output_bytes"]["minimum"] =
+                kMinimumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["maximum"] =
+                kMaximumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["default"] =
+                kDefaultSshCommandInlineOutputBytes;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("action");
+            break;
+        }
         case ToolSchemaId::Count:
             return;
     }
@@ -409,8 +439,9 @@ String buildToolChatRequest(const Settings& settings,
     }
     if (sshToolAvailable) {
         systemPrompt +=
-            " The selected SSH profile is available through ssh_command and bounded SFTP "
-            "list/read/write/move tools. Use them only for remote-machine work requested by the user. "
+            " The selected SSH profile is available through fixed read-only ssh_safe_action, "
+            "mutating ssh_command, and bounded SFTP list/read/write/move tools. "
+            "Use them only for remote-machine work requested by the user. "
             "Report non-zero command exit status and never claim success when tool output says otherwise.";
         if (requiresGroup(ToolCapabilityGroup::Ssh)) {
             systemPrompt +=

@@ -292,12 +292,13 @@ cardputer::ToolPolicyResolutionResult uniformToolResolution(
 void testToolCatalogAndRequestPlan()
 {
     const auto& catalog = cardputer::toolCatalog();
-    const std::array<std::string, 11> expectedNames = {
+    const std::array<std::string, 12> expectedNames = {
         "web_search", "web_fetch", "list_files", "read_file",
         "write_file", "append_file", "ssh_command",
         "sftp_list", "sftp_read", "sftp_write", "sftp_move",
+        "ssh_safe_action",
     };
-    const std::array<cardputer::ToolCapabilityGroup, 11> expectedGroups = {
+    const std::array<cardputer::ToolCapabilityGroup, 12> expectedGroups = {
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Files,
@@ -309,8 +310,9 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapabilityGroup::Ssh,
         cardputer::ToolCapabilityGroup::Ssh,
         cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
     };
-    const std::array<cardputer::ToolCapability, 11> expectedPrimary = {
+    const std::array<cardputer::ToolCapability, 12> expectedPrimary = {
         cardputer::ToolCapability::WebSearch,
         cardputer::ToolCapability::WebFetch,
         cardputer::ToolCapability::FilesRead,
@@ -322,8 +324,9 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapability::SftpReadWrite,
         cardputer::ToolCapability::SftpReadWrite,
         cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SshRead,
     };
-    require(catalog.size() == 11, "Tool catalog size changed");
+    require(catalog.size() == 12, "Tool catalog size changed");
     for (std::size_t index = 0; index < catalog.size(); ++index) {
         require(static_cast<std::size_t>(catalog[index].schema) == index &&
                     expectedNames[index] == catalog[index].name &&
@@ -339,9 +342,9 @@ void testToolCatalogAndRequestPlan()
                     &catalog[index],
                 "Canonical tool name did not resolve to its catalog row");
     }
-    const std::array<std::string, 6> noncanonicalNames = {
+    const std::array<std::string, 8> noncanonicalNames = {
         "WebSearch", "web-search", "SSH_COMMAND", "ssh-command",
-        "SFTP_LIST", "sftp-list",
+        "SFTP_LIST", "sftp-list", "SSH_SAFE_ACTION", "ssh-safe-action",
     };
     for (const std::string& name : noncanonicalNames) {
         require(cardputer::toolCatalogEntryForName(name) == nullptr,
@@ -398,12 +401,38 @@ void testToolCatalogAndRequestPlan()
         resolution,
         {cardputer::ToolMessageIntentMode::Required,
          resolution.requiredGroups});
-    require(plan.schemas == 0 &&
-                plan.missingRequiredGroups == resolution.requiredGroups &&
+    require(plan.schemas == 0x800 &&
+                plan.missingRequiredGroups == 0 &&
                 cardputer::toolRequestPlanDecision(
                     plan, cardputer::ToolSchemaId::SshCommand) ==
-                    cardputer::ToolPermissionDecision::Unavailable,
-            "SSH read-only policy exposed the arbitrary command schema");
+                    cardputer::ToolPermissionDecision::Unavailable &&
+                cardputer::toolRequestPlanDecision(
+                    plan, cardputer::ToolSchemaId::SshSafeAction) ==
+                    cardputer::ToolPermissionDecision::Allow,
+            "SSH read-only policy did not expose only the fixed Safe Action schema");
+
+    const std::array<std::string, 5> expectedActionIds = {
+        "logs", "service_state", "containers", "disk", "processes",
+    };
+    const std::array<std::string, 5> expectedActionCommands = {
+        "journalctl --no-pager --lines=100 --output=short-iso",
+        "systemctl list-units --type=service --state=running,failed --no-pager --plain",
+        "docker ps --no-trunc",
+        "df -hP",
+        "ps -eo pid,ppid,user,stat,etime,comm",
+    };
+    const auto& safeActions = cardputer::sshSafeActionCatalog();
+    require(safeActions.size() == expectedActionIds.size(),
+            "SSH Safe Action catalog size changed");
+    for (std::size_t index = 0; index < safeActions.size(); ++index) {
+        require(expectedActionIds[index] == safeActions[index].id &&
+                    expectedActionCommands[index] == safeActions[index].command &&
+                    cardputer::sshSafeActionEntryForId(expectedActionIds[index]) ==
+                        &safeActions[index],
+                "SSH Safe Action identity or fixed command changed");
+    }
+    require(cardputer::sshSafeActionEntryForId("unknown") == nullptr,
+            "Unknown SSH Safe Action id resolved");
 
     resolution = uniformToolResolution(
         cardputer::ToolPermissionDecision::Deny);
@@ -460,7 +489,7 @@ void testToolCatalogAndRequestPlan()
                     resolvedBefore.permissions[index].source;
         }
         require(plan.error == cardputer::ToolPolicyContractError::None &&
-                    plan.schemas == 0x7FF &&
+                    plan.schemas == 0xFFF &&
                     plan.missingRequiredGroups ==
                         static_cast<std::uint8_t>(mask & pythonGroup) &&
                     remainingGroups ==
@@ -525,7 +554,7 @@ void testToolCatalogAndRequestPlan()
             "Inconsistent denied schema satisfied a required group");
     forged = plan;
     forged.schemas = static_cast<cardputer::ToolSchemaMask>(
-        forged.schemas | 0x800U);
+        forged.schemas | 0x1000U);
     require(!cardputer::toolRequestPlanIsConsistent(forged),
             "Plan with an unknown schema bit was accepted");
     forged = plan;

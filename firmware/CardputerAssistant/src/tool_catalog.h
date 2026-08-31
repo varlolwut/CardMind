@@ -21,7 +21,8 @@ enum class ToolSchemaId : std::uint8_t {
     SftpRead = 8,
     SftpWrite = 9,
     SftpMove = 10,
-    Count = 11,
+    SshSafeAction = 11,
+    Count = 12,
 };
 
 enum class ToolConfirmationReason : std::uint8_t {
@@ -41,6 +42,13 @@ struct ToolCatalogEntry {
     ToolCapability capability;
 };
 
+struct SshSafeActionEntry {
+    const char* id;
+    const char* command;
+};
+
+constexpr std::size_t kSshSafeActionCount = 5;
+
 struct ToolRequestPlan {
     ToolMessageIntent intent;
     std::array<ToolPermissionDecision, kToolCatalogSize> decisions;
@@ -51,6 +59,10 @@ struct ToolRequestPlan {
 };
 
 const std::array<ToolCatalogEntry, kToolCatalogSize>& toolCatalog() noexcept;
+const std::array<SshSafeActionEntry, kSshSafeActionCount>&
+sshSafeActionCatalog() noexcept;
+const SshSafeActionEntry* sshSafeActionEntryForId(
+    const std::string& id) noexcept;
 const ToolCatalogEntry* toolCatalogEntryForName(
     const std::string& name) noexcept;
 ToolRequestPlan buildToolRequestPlan(

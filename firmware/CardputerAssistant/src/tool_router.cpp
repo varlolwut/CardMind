@@ -156,6 +156,8 @@ ToolExecutionResult dispatchToolCall(
             return executeControlledWorkspaceTool(call, isCancelled);
         case ToolSchemaId::SshCommand:
             return executeSshTool(call, isCancelled);
+        case ToolSchemaId::SshSafeAction:
+            return executeSshSafeActionTool(call, isCancelled);
         case ToolSchemaId::SftpList:
             return executeSftpListTool(call, isCancelled);
         case ToolSchemaId::SftpRead:
@@ -253,7 +255,7 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
     availability[static_cast<std::size_t>(
         ToolCapability::FilesWriteDelete)] = filesWritable;
     availability[static_cast<std::size_t>(ToolCapability::SshRead)] =
-        false;
+        sshAvailable && project.sshProfile.isEmpty();
     availability[static_cast<std::size_t>(ToolCapability::SshMutate)] =
         sshAvailable && project.sshProfile.isEmpty();
     availability[static_cast<std::size_t>(ToolCapability::SftpReadWrite)] =
