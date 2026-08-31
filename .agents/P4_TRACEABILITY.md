@@ -62,7 +62,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-12 | Removed by user: separate SSH profile diagnostics feature | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-13 | Encrypted-at-rest evaluation and physical-access threat-model documentation only | No encrypted vault is implemented in P4; documentation states measured limitations and makes no unsupported encryption claim | completed |
 | P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | completed |
-| P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | pending |
+| P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | completed |
 | P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | pending |
 | P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and acceptance are observable without terminal tabs or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; first real Cardputer private-key auth E2E runs here, with at most one authenticated CSRF-protected forget action for the exact selected profile whose host/port are resolved server-side | pending |
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
@@ -2461,3 +2461,233 @@ exact SHA. The publication report was sent to Architect before P4-14 activation.
   compile/upload evidence, authenticated project/chat route observations, exact cleanup and the
   truthful absence of failure-path numeric runtime metrics; no further Device/Web lifecycle or
   production/test correction is required.
+
+**Publication:** local row checker passed for the exact 22 allowed paths. Commit
+`46e62c2471dde26dd4e984525ea0444299f7d836` has the exact required Author/Committer, and
+authenticated GitHub MCP resolves the phase branch to that exact SHA. The publication report was
+sent to Architect before P4-15 activation.
+
+## P4-15 design gate
+
+**Status:** completed
+**Started:** 2026-08-31 18:33:20 +03:00.
+
+### Scope lock
+
+- ROADMAP Phase 4 requires CardMind SSH password/passphrase bytes, private-key bytes,
+  private credential storage locations and SSH authority internals to remain absent from model
+  context, tool schemas/results, readable Web/API state, workspace tools, serial output, logs,
+  diagnostics and Git. The model must not be able to address CardMind private-key storage through
+  file tools.
+- The authenticated configuration surface may expose only the already-approved public SSH profile
+  summary and stable opaque non-secret profile ID. P4-14 project/chat ceiling metadata uses that
+  public ID and does not expose key-record identity.
+- This row verifies the logical non-addressability boundary implemented by P4-01/P4-02 and its
+  existing consumers. P4-13 owns the truthful plaintext-at-rest/physical-access threat model;
+  Phase 9 owns any encryption design or shipping decision.
+- Real private-key authentication E2E remains P4-17. P4-20 owns the final changed-boundary security
+  E2E and P4-21 owns the broad filename-only secret/license/full-regression closure scan.
+
+### Inventory and ownership
+
+- `ssh_client` owns the bounded private NVS credential/key records, selected-profile JIT loading,
+  exact profile-to-key binding, authentication consumption and explicit in-memory clearing. No
+  private storage key/path is part of its public profile-summary contract.
+- `ssh_tool` and `sftp_tool` are the model execution consumers. They load only the selected profile,
+  clear password/passphrase fields on every pre-auth failure and immediately after authentication,
+  and construct results only from command/SFTP outcomes, bounded remote data and the P4-05 public
+  command-log reference.
+- `tool_catalog` and `api_client` produce the model schemas/prompt. SSH/SFTP calls carry command,
+  fixed-action or remote-path/content/options fields only; they do not carry a profile selector,
+  password, passphrase, private key, local private-storage identifier or local storage path.
+- `pending_tool_call` binds confirmations to a SHA-256 digest of the selected authority. The durable
+  and preview surfaces expose the digest/kind (plus the already-reviewed SFTP target name), not the
+  digest inputs, profile ID or private-key record identity.
+- `web_console_state` emits public profile name/host/port/username/auth mode, selected index,
+  configured/key-installed booleans and the separately approved public available-profile ID. The
+  write-only credential/key upload handlers have no matching read/download/export route.
+- Workspace file tools validate a bounded relative workspace name and prepend the fixed workspace
+  root internally. They cannot select NVS or the private-key owner. Model SFTP paths address the
+  selected remote host, not CardMind local storage.
+- Tool audit, serial diagnostics, error paths and bundle/export producers consume decisions,
+  bounded public results and public profile metadata only. Reboot, SD-removal, migration and
+  exact-owned key cleanup remain the already-verified P4-01/P4-02 owners; this row changes no
+  persisted format or cleanup behavior.
+
+### Minimal contract and non-goals
+
+- Allowed outward data is limited to public SSH profile metadata/opaque profile ID on authenticated
+  configuration surfaces, permission/availability state, confirmation authority digest, remote
+  command/SFTP result data and public downloadable command-log references.
+- Forbidden outward data is CardMind-owned password/passphrase/private-key bytes, private storage
+  locations, opaque key-record IDs and unhashed authority internals. A failure must not add those
+  values to its error/result/serial/audit path.
+- Arbitrary remote command output and explicitly requested remote SFTP file content are the remote
+  data feature itself; P4-15 does not add a content classifier, shell parser or remote-secret filter.
+  This does not authorize disclosure of CardMind-owned authentication material.
+- No production edit is expected. Do not add a secret manager, path denylist, output scrubber,
+  schema, route, storage field, compatibility layer, retained diagnostic or general security
+  framework. A concrete leak is classified to its existing owner before any write-set expansion.
+
+### Frozen proof matrix and forbidden effects
+
+- Run the existing strict host suite covering exact SSH/SFTP schemas, workspace relative-path
+  validation, public Web SSH state, authority-hash pending validation and bounded tool results.
+- Run one disposable no-echo static ownership check over the exact model schema/result, Web read,
+  pending/preview, audit, serial/diagnostic and bundle producers. It reports only pass/fail boundary
+  labels and file/line ownership; it never prints matched literals, values or private paths.
+- Reuse unchanged real-runtime evidence from P4-01/P4-02 that authenticated state returned no
+  password/passphrase, private-key bytes or key-record identity; from P4-05/P4-06/P4-08 that model
+  results contained only the reviewed bounded output contracts; and from P4-14 that the authenticated
+  public profile ID/ceiling surface contained only its approved non-secret identity.
+- Inspect all selected-profile JIT exit paths and the private-key authentication consumer for
+  explicit clearing before outward result construction. Prove file tools accept only workspace
+  relative names and expose no selector for private NVS/key storage.
+- Forbidden effects: no credential/key read or export, no private storage addressability, no model
+  profile selection, no new persistence/migration/cleanup work, no remote mutation, no Device/Web
+  state mutation and no secret-like value printed or retained by the proof.
+- Expected write set: `.agents/P4_TRACEABILITY.md` only. Production, retained tests, firmware assets,
+  build workflows and documentation outside this row remain unchanged unless a concrete row-owned
+  defect is independently demonstrated before expansion.
+
+Independent bounded pre-edit/proof review: **GO**. The fresh read-only reviewer found no concrete
+CardMind credential/private-key/private-storage/authority-internal leak and accepted the frozen
+verification-only, trace-only write set. This is design/proof GO, not row completion; the locked host,
+no-echo ownership and JIT-clearing evidence still must run before closure review.
+
+**Reboot-safe pause (2026-08-31):** the user announced an imminent system restart after the gate GO.
+No P4-15 production/test/build/Device/Web/Git action or exact-owned mutation had started. No fixture,
+external command process or open reviewer remains. On resume, first restore the complete visible plan
+with P4-15 sole `in_progress`, then continue exactly with the frozen proof matrix; do not repeat inventory
+or expand the write set.
+
+### Proof execution finding and ownership hold
+
+- After reboot, the full visible plan was restored and local state was reconfirmed at HEAD
+  `46e62c2471dde26dd4e984525ea0444299f7d836` on the Phase 4 feature branch. The only tracked change
+  remained this P4-15 trace; the three Architect-owned `.codex/agents/*.toml` files remained excluded.
+- The no-echo ownership check passed the selected-profile JIT clearing, private-key auth clearing,
+  tool-result, pending-hash, public Web-state, workspace confinement, model-selector and tracked-filename
+  boundaries. Its initial serial check was correctly classified as over-broad: five auth-term occurrences
+  had no direct `Serial` sink, and no value was printed by the checker.
+- The narrowed no-echo literal classifier identified four credential-shaped diagnostic aggregates for
+  ownership classification. It reported only file/function ownership and non-empty booleans; it never read
+  or emitted literal values. Architect correctly stopped the first correction hypothesis because shape
+  alone does not prove that public demo or synthetic fixture data is CardMind-owned secret material.
+- A read-only in-memory comparison against the official `https://test.rebex.net/` service page proved that
+  the P2 Unicode, command-output and SSH-demo profiles are the documented public Rebex test account and do
+  not read persisted CardMind credentials. The profile-storage literals are synthetic exact-owned fixture
+  data and never reach connect/auth. Those literals are not P4-15 violations.
+- The same ownership pass found one actual P4-15 diagnostic consumer: `runSshProfileStorageTest` calls the
+  legacy full-profile loader for the original inventory and compares password/passphrase fields, placing
+  persisted user credential bytes inside a retained firmware diagnostic. No value is emitted to serial,
+  but this contradicts the frozen prohibition on CardMind-owned secrets entering diagnostics. No
+  Device/Web/remote mutation or fixture was started.
+
+### Architect ownership and frozen minimal correction
+
+**Status:** correction_implemented_proof_pending.
+
+- Architect assigned genuine CardMind-owned diagnostic secret consumption to active P4-15. No predecessor
+  row is reopened. Exact literal/call-site inventory, obtained without printing values:
+  `SerialDiagnostics.ino::downloadP2UnicodeFixture`; `SshTools.ino::runSshProfileStorageTest`
+  (owned profile creation, sixth-create rejection and cleanup comparison);
+  `SshTools.ino::runSshCommandOutputRemoteTest`; and `SshTools.ino::runSshDemoTest`. Their only
+  dispatcher consumers are the existing P2 Unicode setup, SSH profile-storage selector,
+  SSH command-output remote selector and SSH demo selector respectively.
+- Remove only `runSshProfileStorageTest`, its serial selector and its forward declaration. It is a completed
+  P4-01 disposable diagnostic retained in firmware, loads every user profile including secrets, and is no
+  longer an acceptable P4-15 consumer. P4-01's observed five/sixth/ID/JIT/delete/reboot evidence remains in
+  the canonical trace; no replacement harness or runtime credential generator is needed.
+- Preserve `downloadP2UnicodeFixture`, `runSshCommandOutputRemoteTest` and `runSshDemoTest` byte-for-byte.
+  Their public Rebex account is part of the fixed public test-service contract; substituting an arbitrary
+  selected profile would change remote paths/commands and risk touching a user host. Their retained P2,
+  P4-05 and SSH transfer/demo consumers and existing trust/file cleanup remain unchanged.
+- No persisted format, route, schema, storage field, helper/module, secret manager, compatibility layer,
+  migration, recovery or background behavior is added. There is no new crash window: the selected profile
+  store is no longer read by this obsolete selector and all retained remote diagnostics are unchanged.
+- Exact expected write set: `.agents/P4_TRACEABILITY.md`,
+  `firmware/CardputerAssistant/CardputerAssistant.ino`,
+  `firmware/CardputerAssistant/SerialDiagnostics.ino`, and
+  `firmware/CardputerAssistant/SshTools.ino` only.
+- Smallest proof after edit: no-echo source ownership scan proves zero `runSshProfileStorageTest` declaration,
+  definition or selector, zero full-profile secret-loader use by retained diagnostics, and byte-identical
+  ownership for all three public Rebex consumers; filename-only tracked secret scan; `git diff --check`;
+  existing strict host
+  suite; one exact pinned M5Stack 3.2.1 compile-only build and options/resource report. No upload, COM8,
+  Device/Web, remote SSH, fixture or trust mutation is required to prove removal of an obsolete diagnostic;
+  unchanged product JIT/auth/cleanup behavior reuses P4-01/P4-02/P4-05 evidence.
+
+Architect pre-edit review: **GO** for this exact correction package. The obsolete diagnostic definition,
+selector and declaration were removed as one coherent patch; verification remains pending and the row is not completed.
+
+### Corrected proof evidence
+
+- No-echo ownership proof passed: `runSshProfileStorageTest` has zero remaining declarations,
+  definitions or selectors; retained diagnostics contain no full-profile secret-loader call. The P2
+  Unicode, P4-05 command-output and SSH-demo function segments are byte-identical to HEAD. No matched
+  value or literal was emitted.
+- The official Rebex test-service page was read only for ownership classification. An in-memory
+  comparison proved all three unchanged remote diagnostics use that documented public fixed test account;
+  the exact account values were neither printed nor retained in evidence.
+- Filename-only tracked secret scan passed with no private-key/certificate filename. `git diff --check`
+  passed before and after the blocker-only harness correction. The final changed-path set is exactly this
+  trace, `CardputerAssistant.ino`, `SerialDiagnostics.ino`, `SshTools.ino` and
+  `tools/device_regression.ps1`.
+- The existing strict production-linked C++ host suite compiled with `-Wall -Wextra -Werror`, ran from
+  a disposable WSL ELF and returned exit code zero; the ELF was removed by its exact cleanup trap.
+- One exact pinned compile-only build passed with FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom` and one unique M5Stack core
+  version 3.2.1. Sketch usage is 3,427,258 bytes; globals are 65,668 bytes with 262,012 bytes left for
+  locals. The generated binary is 3,427,440 bytes with SHA-256
+  `4E049AA6F5DF086B0CEE79D68ED0D2801B82C4FE004BD8B005BB8FDEFC44EF0B`.
+- Compared with the accepted P4-14 compile (3,437,062 sketch bytes; 65,668 global bytes), the obsolete
+  diagnostic removal reduces flash by 9,804 bytes and leaves global RAM unchanged. Product runtime,
+  active-SSH heap/latency, persisted storage and Web/Device behavior are unchanged, so no new numeric
+  runtime claim is made.
+- No upload, COM8, Device/Web, remote SSH, fixture, trust, NVS or microSD mutation occurred. There is no
+  exact-owned runtime cleanup obligation; generated build output remains ignored and outside row ownership.
+- Residual: the three fixed public Rebex diagnostics still embed the vendor-documented public demo account
+  by design. They are not CardMind-owned authority, cannot select/read CardMind persisted credentials and
+  remain outside P4-15's forbidden-data set. The removed P4-01 disposable selector is no longer rerunnable;
+  its completed historical hardware/reboot evidence remains canonical and is not restated as current proof.
+
+**Closure status:** completed after mandatory personal Architect review.
+
+### Independent code-review STOP
+
+- Fresh read-only review found one concrete retained-harness consumer missed by the first inventory:
+  `tools/device_regression.ps1` still includes the removed profile-storage selector in its offline/full
+  case list. With the producer gone, that case can only wait for an impossible completion response and
+  time out; no test was run after this finding.
+- Failure class: P4-15-owned test/harness defect caused by removal of the obsolete diagnostic, not a
+  production regression. Production and tests are frozen pending the single Architect owner verdict.
+- Proposed smallest correction is to remove only that obsolete regression case, with no replacement
+  selector or diagnostic. The completed P4-01 hardware/reboot/restoration evidence remains canonical.
+  If authorized, the exact write set becomes this trace, the three already-reviewed firmware files and
+  `tools/device_regression.ps1`; all other scripts/cases remain byte-identical.
+- The earlier four-path/final-evidence wording is provisional and must be corrected after this blocker is
+  resolved and rechecked. P4-15 remains sole `in_progress`; no staging, commit or push is permitted.
+
+Architect owner verdict: **GO**. `tools/device_regression.ps1` was confirmed as the sole live caller of
+the removed selector. Exactly that one `offlineCases` entry was deleted; no replacement or other harness
+change was made. The final expected write set is five paths: this trace, the three firmware deletion files
+and `tools/device_regression.ps1`. Existing host/build evidence remains applicable because the blocker-only
+correction changes no compiled source; the same independent reviewer receives one final follow-up limited
+to its stale-consumer blocker before mandatory Architect closure review.
+
+Independent blocker-only follow-up: **GO**. The reviewer confirmed that `tools/device_regression.ps1`
+equals HEAD minus exactly the obsolete case, no live producer/caller or replacement harness remains, and
+the final five-path accounting is complete. No other blocker was found in the exact production deletion,
+public-fixture preservation, evidence, resources or cleanup claims.
+
+### Architect closure GO
+
+Architect personally reviewed the actual five-path diff and raw evidence and returned **GO**. The exact
+exercised boundary is firmware build/link plus serial-dispatch/regression ownership: no retained diagnostic
+or runner can invoke the legacy full-profile materializer. The required behavior is absence of that consumer;
+the forbidden effect shown absent is CardMind-owned password/passphrase bytes entering a retained diagnostic.
+The three public Rebex diagnostics and every product JIT/auth/Web/model/workspace/audit path are unchanged.
+
+**Completed:** 2026-08-31 20:05:57 +03:00. No next row is activated until this exact P4-15 commit is
+published and its remote SHA is verified.

@@ -5723,13 +5723,6 @@ void handleSerialCommand(const String& command)
                       result.success ? "none" : result.error.c_str());
         return;
     }
-    if (command == "SSHPROFILETEST") {
-        const cardputer::OperationResult result = runSshProfileStorageTest();
-        Serial.printf("SSHPROFILETEST result=%s error=%s\n",
-                      result.success ? "pass" : "failed",
-                      result.success ? "none" : result.error.c_str());
-        return;
-    }
     if (command == "SSHOPTIONSTEST") {
         cardputer::markOperation("ssh_options_test");
         const cardputer::OperationResult result = runSshCommandOptionsTest();

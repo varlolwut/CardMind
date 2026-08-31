@@ -427,7 +427,6 @@ cardputer::OperationResult captureDevicePendingContext(
 void openWebConsole(Screen returnScreen);
 cardputer::OperationResult runSshTerminal();
 cardputer::OperationResult runSshTool();
-cardputer::OperationResult runSshProfileStorageTest();
 cardputer::OperationResult runSshCommandOptionsTest();
 cardputer::OperationResult runSshSessionTest(bool testSftp);
 cardputer::OperationResult runSshDemoTest();

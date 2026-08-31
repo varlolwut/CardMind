@@ -195,7 +195,6 @@ $offlineCases = @(
     (New-RegressionCase -Name "device settings" -Command "DEVICESETTINGSTEST" -CompletionPattern "^DEVICESETTINGSTEST result=" -PassPattern "^DEVICESETTINGSTEST result=pass" -TimeoutSeconds 45),
     (New-RegressionCase -Name "offline tools" -Command "OFFLINETEST" -CompletionPattern "^OFFLINETEST result=" -PassPattern "^OFFLINETEST result=pass$" -TimeoutSeconds 20),
     (New-RegressionCase -Name "SSH runtime" -Command "SSHCHECK" -CompletionPattern "^SSHCHECK result=" -PassPattern "^SSHCHECK result=pass" -TimeoutSeconds 60),
-    (New-RegressionCase -Name "SSH profile storage" -Command "SSHPROFILETEST" -CompletionPattern "^SSHPROFILETEST result=" -PassPattern "^SSHPROFILETEST result=pass" -TimeoutSeconds 45),
     (New-RegressionCase -Name "Python partition layout" -Command "PYTHONCHECK" -CompletionPattern "^PYTHONCHECK result=" -PassPattern "^PYTHONCHECK result=pass.*layout=yes.*image=yes" -TimeoutSeconds 20),
     (New-RegressionCase -Name "microphone before speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
     (New-RegressionCase -Name "speaker hardware" -Command "TTSHW" -CompletionPattern "^TTSHW result=" -PassPattern "^TTSHW result=pass$" -TimeoutSeconds 20),
