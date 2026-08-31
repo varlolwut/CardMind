@@ -63,7 +63,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-13 | Encrypted-at-rest evaluation and physical-access threat-model documentation only | No encrypted vault is implemented in P4; documentation states measured limitations and makes no unsupported encryption claim | completed |
 | P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | completed |
 | P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | completed |
-| P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | pending |
+| P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | completed |
 | P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and acceptance are observable without terminal tabs or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; first real Cardputer private-key auth E2E runs here, with at most one authenticated CSRF-protected forget action for the exact selected profile whose host/port are resolved server-side | pending |
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
@@ -2691,3 +2691,281 @@ The three public Rebex diagnostics and every product JIT/auth/Web/model/workspac
 
 **Completed:** 2026-08-31 20:05:57 +03:00. No next row is activated until this exact P4-15 commit is
 published and its remote SHA is verified.
+
+**Published:** commit `c6a3f78416db2dcc17db9c31497a34772c34c225`; the authenticated GitHub
+Phase 4 branch resolves to that exact SHA and reports the reviewed five paths with exact required
+Author/Committer. P4-16 is now the sole `in_progress` row.
+
+## P4-16 design gate
+
+**Status:** in_progress
+**Started:** 2026-08-31 20:26:56 +03:00.
+
+### Scope lock and observable acceptance
+
+- ROADMAP Phase 4 requires the Device surface to expose the same SSH concepts and state as the
+  Web Console while retaining the existing terminal/history boundaries. This row owns the one
+  consolidated Device journey for profile/security plus manual command, SFTP and workspace
+  transfer controls; it does not create a separate P4-18 subsystem.
+- Profile inventory uses the P4-01 public summaries. Device rendering/navigation and its direct
+  connect/edit consumers must not materialize every saved password/passphrase. A secret-bearing
+  profile is loaded only after that exact profile is already the global default and the user starts
+  an edit or connection path. The inherited bounded P4-01 CRUD writer remains an explicit
+  non-evidence exception: `saveSshProfileAt()` and `deleteSshProfile()` may materialize multiple
+  bounded records while rewriting the indexed store, and P4-16 does not reopen `ssh_client.*`.
+- Existing project/chat capability screens gain the P4-14 ceiling control. The UI presents
+  inherit/bound and available/unavailable state without displaying the opaque ID; choosing a
+  named public summary stores its existing canonical ID but never selects or reconnects it.
+- The existing manual terminal remains the command surface, with its current SD scrollback and
+  in-session recall unchanged. Model command policy, Safe Actions and model SFTP are not Device
+  authority and are not reimplemented here.
+- Existing manual SFTP remains direct-user authority. Workspace upload/download must show the
+  exact destination, default overwrite to denied, pass overwrite only after an explicit user
+  choice, use the P4-07 controlled streaming backend, expose cooperative cancel and preserve its
+  one total foreground deadline and unknown-outcome behavior.
+- Existing changed-host-key failure remains an immediate block before authentication. Existing
+  exact-profile host-key forget and private-key installation stay in the profile/security journey;
+  real private-key authentication remains P4-17 ownership and real mismatch/known_hosts mutation
+  acceptance remains P4-20 ownership.
+
+### Existing producers, consumers and owners
+
+- `DeviceMenus.ino` already places one `SSH tool` entry in Utilities and the Tools carousel already
+  names SSH. `KeyboardNavigation.ino` invokes `runSshTool()` and refreshes the cached available
+  selected profile ID on return. No card or navigation entry is missing.
+- `SshTools.ino::runSshTool()` currently calls `loadSshProfiles()` twice and therefore loads all
+  stored password/passphrase values for menu rendering. It separately loads summaries only to
+  obtain IDs. The top-level and per-profile SFTP paths pass full records from that materialized
+  vector. P4-01 explicitly assigned migration of this Device compatibility consumer to P4-16.
+- `loadSshProfileSummaries()` returns at most five public records and the selected index;
+  `loadSshProfile()` JIT-loads only the selected secret pair; `selectSshProfile()` changes only the
+  stored selection. Existing CRUD remains the P4-01 bounded indexed writer and is not redesigned
+  or claimed as selected-only proof in this row.
+- `runSshTerminal()` already JIT-loads the selected profile, blocks host-key mismatch through
+  `connectTrustedSsh()`, authenticates only after trust and uses the existing bounded
+  `/assistant/ssh/terminal.log` and `.old.log`. It is reused unchanged.
+- `runSftpBrowser()` currently uses the legacy `uploadSftpFile()`/`downloadSftpFile()` wrappers.
+  P4-07 already proved `uploadSftpFileControlled()`/`downloadSftpFileControlled()` streaming,
+  total deadline, cooperative cancellation, safe temp replacement, no-overwrite and explicit
+  unknown outcome. P4-16 owns only the Device confirmation and invocation boundary.
+- `renderProjectToolPolicy()` and `renderChatToolPolicy()` already load their current public
+  documents and display capability rows. P4-14 supplies the shared ID codec/predicate, cached
+  available selected ID and persisted `sshProfile` fields. The existing capability-status view
+  already resolves from the same project/chat/current-ID state as request planning.
+- Project and chat storage retain their existing atomic/revision owners. A successful new ceiling
+  save is canonically reloaded before replacing the active cache so repeated Device edits preserve
+  revision invalidation; no storage format or writer changes.
+- Vendor/storage/transport semantics are inherited unchanged from the accepted P4-01, P4-07,
+  P4-11 and P4-14 evidence: M5Stack ESP32 core 3.2.1, the bounded indexed Preferences store,
+  atomic workspace replacement and the pinned libssh2 controlled-transfer behavior.
+
+### Minimal design
+
+1. Build every Device profile list and selected-name display from `SshProfileSummary`. Keep the
+   existing create/select/delete/forget/key-install actions. `Make default` remains the sole action
+   that calls `selectSshProfile()`. Per-profile Connect, SFTP and Edit reject a non-selected summary
+   with an instruction to make it default first; they never silently change global/model authority.
+   For the already selected summary, terminal/SFTP/edit use the existing JIT loader. No
+   profile-by-index secret loader or alternate CRUD API is added.
+2. Extend the two existing capability lists with one `SSH host` row before `Back`. Its label uses
+   only the already loaded ceiling strings, cached available selected ID and the P4-14 predicate.
+   The modal returns only an empty or production-codec canonical profile ID and retains no loaded
+   project/chat document. After the modal closes, the handler canonically reloads the current
+   project/chat, mutates only `sshProfile`, saves once, and canonically reloads again after success
+   or failure. Active caches are replaced only from that final reload. A failed save plus failed
+   reload reports explicit unknown/committed-state uncertainty and is never retried automatically.
+   No raw-ID input or ID text is rendered.
+3. For upload/download, derive the exact destination from the current remote listing or workspace
+   filename. Show it before mutation. Pass `overwrite=false` unless that exact target was observed
+   and the user explicitly selected overwrite. Invoke only the controlled P4-07 method with a
+   60-second total deadline and an Escape-aware cancellation callback. Report success, failure or
+   unknown outcome without retry. Keep create-directory, rename and confirmed delete behavior
+   otherwise unchanged.
+4. Keep the existing Utilities entry, terminal, scrollback/history, trust prompt, mismatch block,
+   exact-profile forget and key-install boundaries. Add no card, screen class, route, schema,
+   storage field, framework, background task or retained diagnostic.
+
+### Frozen proof matrix
+
+- Cheap static/source: Device rendering/navigation and direct connect/edit code have no
+  `loadSshProfiles()` consumer; list labels use summaries, only the already selected
+  terminal/SFTP/edit path JIT-loads one profile, opaque IDs are never rendered and no non-selected
+  action changes selection or loads its secret. The inherited bounded CRUD writer is excluded from
+  this claim and remains source-identifiable as the P4-01 mutation owner.
+- Cheap static/source: Device upload/download have no legacy wrapper call; each shows the derived
+  destination, defaults overwrite false, reaches true only from its exact confirmation branch,
+  passes one 60-second total deadline and one cooperative Escape callback, and never retries an
+  unknown result.
+- Cheap static/source: the chooser returns only empty or production-codec output and retains no
+  authority document; each handler reloads before its one-field save and after every save outcome,
+  updates caches only from canonical reload, reports indeterminate durable state without retry,
+  never selects a profile and uses the same cached selected ID and ceiling predicate as request
+  planning. Existing terminal/history and host-mismatch code are unchanged.
+- Strict host/static suite and exact pinned 3.2.1 compile prove existing policy/codec/storage
+  contracts and firmware compatibility. Reuse accepted P4-07 transfer and P4-11 trust backend
+  evidence rather than re-running their internal scenarios.
+- Existing independent final-source runtime evidence is reused only for unchanged primitives:
+  P4-01 profile/ID/selected-JIT storage, P4-07 controlled transfer/overwrite/cancel/cleanup,
+  P4-11 mismatch block and P4-14 ceiling persistence/predicate/request-plan consistency. None is
+  relabelled as Device menu-input evidence.
+- Device UI wiring is split into independent source observations: Utilities reaches `runSshTool()`;
+  profile menus use summaries and selected-only consumers; project and chat capability screens own
+  their separate ceiling save/reload paths; upload and download own separate destination,
+  no-overwrite, overwrite and cancellation branches; terminal/history/mismatch code is unchanged.
+- Final-source input audit: the only entry points that execute these menu/modal behaviors are
+  physical M5Cardputer keyboard events through `KeyboardNavigation.ino`, `modalSelection()` and
+  `modalTextInput()`. Existing serial `HOTFIXNAVTEST`, `E2ETEST`, `SSHSESSIONTEST`, `SFTPTEST` and
+  `SFTPTRANSFERTEST` bypass those controls, and no existing serial/Web boundary injects Cardputer
+  keys. Therefore no unattended existing input can produce runtime UI acceptance. This limitation
+  is reported rather than hidden by a new retained/disposable diagnostic or parallel UI harness.
+- If Architect accepts a bounded manual exception, separate observations cover profile/security,
+  project ceiling, chat ceiling, upload, download and terminal entry/exit, with collision-checked
+  exact-owned fixtures, two-pass cleanup and original profile/project/chat/workspace/remote
+  inventory restoration. Otherwise those UI-runtime observations remain explicitly unproven and
+  the row cannot claim them from static or backend evidence.
+- The accepted runtime path, if authorized, records free heap, largest block, stack margin, reset
+  reason, operation latency and expected-card readiness/ownership. Idle/general state retains the
+  70-KiB floor; active SSH is compared with the existing active-SSH baseline and must not reset,
+  freeze or materially regress.
+
+### Forbidden effects
+
+- No all-profile secret materialization in Device list/navigation; no credential, key, passphrase,
+  opaque ID, private path or authority hash in display text, serial, logs, diagnostics or fixtures.
+- No ceiling-based profile selection, reconnect or authority elevation; invalid/stale/mismatched
+  ceilings remain unavailable and Off/Ask/mandatory confirmation remain unchanged.
+- No destination mutation before the explicit confirmation result; no overwrite default true,
+  final-path truncate/pre-delete, unknown-outcome retry, background transfer or unbounded RAM copy.
+- No Web assets/routes, model schemas/policy/catalog/audit changes, Safe Action UI, new terminal or
+  history behavior, profile/storage migration, known_hosts manager, recovery framework or Phase 5+
+  preparation.
+- No deletion or mutation outside collision-checked exact-owned fixtures; no changed user
+  selection/inventory after success or failure.
+
+### Expected write set and gate status
+
+- `.agents/P4_TRACEABILITY.md`.
+- `firmware/CardputerAssistant/CardputerAssistant.ino` for the existing project/chat capability
+  list labels and one public-summary ceiling chooser.
+- `firmware/CardputerAssistant/KeyboardNavigation.ino` for the two existing capability-screen
+  save/reload actions.
+- `firmware/CardputerAssistant/SshTools.ino` for summary-only Device profile navigation and the
+  controlled transfer confirmation/cancel invocation.
+- No other production, test, Web asset, route, storage, policy, workflow or diagnostic file.
+- Architect corrected pre-edit review: **GO**. The bounded corrections narrow secret evidence to
+  Device render/direct consumers, reload canonical authority around one-field ceiling saves,
+  reserve selection for explicit `Make default`, and keep the production write set at exactly four
+  paths. Architect accepted proportional final-source proof without a new key-injection seam or
+  UI harness: source/call-path evidence covers the new menu handlers, production-linked checks
+  cover summary/codec/predicate/save-reload/controlled-transfer boundaries, exact pinned compile
+  covers the final source, and retained Device evidence covers unchanged runtime primitives.
+  Physical key delivery through unchanged `modalSelection()`/`modalTextInput()` is not claimed as
+  independently automated or manually rerun because either would add an unsafe/out-of-scope input
+  path or require user participation. Production may proceed only with the frozen design.
+
+### Implemented boundary and proportional evidence
+
+- The coherent primary-agent patch changes exactly the frozen four tracked paths. Device SSH
+  inventory and profile menus now use `SshProfileSummary`; the direct menu contains no
+  `loadSshProfiles()` call. `Make default` is the sole selector, and non-selected Connect/SFTP/Edit
+  returns an explicit instruction without loading a secret or changing authority. Top-level and
+  selected-profile terminal/SFTP/edit paths retain `loadSshProfile()` JIT behavior. Create/delete
+  retain the explicitly excluded bounded P4-01 CRUD writer.
+- Existing project/chat capability screens now contain one SSH-host row. The label uses the P4-14
+  predicate and cached available selected ID and renders only inherit/bound plus
+  available/unavailable state. The chooser lists public profile labels, returns only empty or
+  production-codec output and never renders the opaque ID. Each handler reloads canonical state
+  after the modal, changes only `sshProfile`, writes once, reloads after every write outcome,
+  updates active cache only from canonical reload and reports not-committed, committed-despite-
+  error or unknown stored state without retry.
+- Device upload/download now show the derived remote/workspace destination before transfer.
+  Overwrite begins false, becomes true only when that exact destination was observed to exist and
+  the user confirms it, and only `uploadSftpFileControlled()`/
+  `downloadSftpFileControlled()` are called with one 60-second deadline and the existing Escape
+  keyboard as cooperative cancellation. The Device browser contains no legacy transfer-wrapper
+  call and does not retry failure or unknown outcome.
+- Disposable strict source/call-path check: pass. Exact changed-path count is four; Device
+  `runSshTool()` has zero full-profile list calls and one explicit selector call; both controlled
+  transfer methods, destination confirmation and cancellation callback are present; project/chat
+  save/reload owners are present. `git diff --check`: pass.
+- Project dependency pins: pass for M5Cardputer, M5Unified, M5GFX and ArduinoJson `7.2.1`.
+  CI-equivalent WSL C++ suite with an exact-owned `/tmp` ELF and trap cleanup: pass under
+  `-std=c++17 -Wall -Wextra -Werror`; it directly exercises the production P4-14 codec/predicate
+  and existing host-linked contracts.
+- The first observable exact compile found one active-row integration defect: Arduino did not
+  synthesize the cross-INO `modalSelection()` declaration for the helper defined earlier in the
+  main sketch. One exact forward declaration of the existing signature was added inside the same
+  anonymous namespace; no behavior or write set changed. The one justified rebuild then passed.
+- Final exact pinned build: M5Stack ESP32 `3.2.1`, exact FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`, sketch `3,435,138` bytes,
+  globals `65,668` bytes, local headroom `262,012` bytes. Binary `3,435,328` bytes, SHA-256
+  `82A617600D505712DA0668B4EF81D36E815D3E3EA7D2718CDFCC49268E43E45A`.
+  Compared with P4-15, sketch increases by `7,880` bytes, binary by `7,888` bytes and globals are
+  unchanged.
+- Per the explicit Architect proportionality decision, no upload, COM8, physical key input,
+  Device/Web fixture or synthetic UI-input path was used. Physical delivery through unchanged
+  modal primitives is not claimed as automated or manually observed. Accepted unchanged real-
+  device evidence remains owned by P4-01/P4-07/P4-11/P4-14; no new runtime latency/free-heap claim
+  is made. No device, profile, project/chat, remote or microSD state was mutated, so exact-owned
+  cleanup and restoration obligations are empty.
+- Fresh independent code review initially returned the one timestamp blocker recorded below; its
+  correction and blocker-only follow-up are now complete. P4-16 remains `in_progress`; no staging,
+  commit or push is permitted before mandatory personal Architect closure GO.
+
+### Bound-label correction
+
+- Pre-review reconciliation found one P4-16-owned display defect: the project screen passed its own
+  nonempty ceiling into a helper position that was labelled as inherited, so authority remained
+  fail-closed but the project row said `Inherit project` instead of `Bound`. Production and tests
+  were frozen before independent review.
+- Architect returned correction **GO** for the smallest existing-file fix. The helper now accepts
+  `(ownCeiling, parentProjectCeiling)`, labels any nonempty own ceiling `Bound`, labels an empty own
+  ceiling with a nonempty parent `Inherit project`, and otherwise labels `Inherit selected`. The
+  shared conjunctive P4-14 predicate receives parent as project and own as chat; project scope uses
+  an empty parent, so authority behavior is unchanged. The project and chat callers now pass those
+  exact roles. No predicate, policy, storage, schema, test or write-set change was made.
+- Disposable static proof after the correction: pass. Project own nonempty maps to `Bound`;
+  project empty maps to `Inherit selected`; chat own nonempty maps to `Bound`; chat empty with a
+  nonempty project parent maps to `Inherit project`; available/unavailable remains only the shared
+  predicate suffix. `git diff --check` and the exact pinned rebuild passed with the final resource
+  values and binary hash recorded above.
+
+### Independent code-review STOP and correction
+
+- The fresh read-only code reviewer found one active-row defect: the new chat-ceiling branch changed
+  both `sshProfile` and `summary.updatedAt`, contradicting the frozen one-field save and potentially
+  changing chat recency/order. No other mandatory finding was reported.
+- Architect returned correction **GO** for removal of only that new timestamp assignment. The
+  ceiling branch still reloads canonical state after the modal, mutates only `sshProfile`, writes
+  once, reloads after the outcome and updates active cache/status from canonical state. The adjacent
+  pre-existing ordinary chat-policy branch retains its own timestamp behavior. Production write
+  set and all authority/storage contracts are unchanged. The same reviewer receives one final
+  follow-up limited to this blocker after diff/static and compile evidence are stable.
+- Blocker-only static proof: pass. The ceiling branch contains no `summary.updatedAt`; the one
+  timestamp mutation in the ChatToolPolicy handler remains in the ordinary policy branch. Exact
+  pinned rebuild and options gate passed with sketch `3,435,138` bytes, globals `65,668`, local
+  headroom `262,012`, binary `3,435,328` and the final SHA-256 recorded above.
+- The same fresh reviewer used its single blocker-only follow-up and returned **GO**. It confirmed
+  the chat-ceiling branch now mutates only `sshProfile`, the sole timestamp assignment remains in
+  the ordinary policy branch, canonical reload/save/cache behavior is unchanged and the correction
+  introduced no unintended production change. Reviewer lifecycle is closed; no mandatory code-
+  review finding remains.
+
+### Architect closure GO
+
+Architect personally reviewed the exact four-path production/trace diff, ROADMAP boundary, raw
+source/static/host/build evidence, producer/consumer and inherited vendor/storage owners, resources,
+cleanup and residuals and returned **GO**. The accepted boundary is summary-only Device inventory,
+explicit-only profile selection, selected JIT direct consumers, non-elevating canonical project/chat
+ceiling controls, and destination-confirmed controlled workspace transfer. Existing terminal/history,
+host mismatch, bounded CRUD, model/Web/schema/policy and storage owners remain unchanged.
+
+The accepted proportional proof does not relabel compile/static checks as physical input behavior:
+unchanged modal key delivery was not automated or manually rerun, while predecessor real-device
+evidence retains ownership of the unchanged profile/transfer/mismatch/ceiling primitives. No new
+latency/free-heap claim is made. No Device, profile, project/chat, remote or microSD mutation occurred,
+so row-owned cleanup is empty. Accepted residuals remain the inherited bounded CRUD materialization,
+P4-07 crash-temp ownership and absent new physical-input observation.
+
+**Completed:** 2026-08-31 23:07:23 +03:00. No successor row is active until this exact P4-16 commit
+is published and its remote SHA is verified.

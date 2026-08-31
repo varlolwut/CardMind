@@ -1600,6 +1600,38 @@ String parentSftpPath(const String& path)
     return separator <= 0 ? String("/") : path.substring(0, separator);
 }
 
+bool deviceSftpTransferCancelled()
+{
+    M5Cardputer.update();
+    if (!M5Cardputer.Keyboard.isChange() ||
+        !M5Cardputer.Keyboard.isPressed()) {
+        return false;
+    }
+    const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+    return keys.esc || keyboardWordContains(keys, '`');
+}
+
+bool confirmDeviceSftpDestination(
+    const String& title,
+    const String& destination,
+    bool overwrite)
+{
+    return modalSelection(
+        title,
+        {"Cancel", overwrite ? "Overwrite existing target" : "Transfer to new target"},
+        0, "Destination: " + destination) == 1;
+}
+
+cardputer::OperationResult deviceSftpMutationResult(
+    const cardputer::SftpMutationResult& mutation)
+{
+    if (mutation.success) return {true, ""};
+    if (!mutation.error.isEmpty()) return {false, mutation.error};
+    return {false, mutation.outcomeUnknown
+        ? String("SFTP transfer outcome is unknown and was not retried")
+        : String("SFTP transfer failed")};
+}
+
 struct WorkspaceFileSelectionResult {
     bool success;
     bool selected;
@@ -1749,10 +1781,29 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
             std::string remoteName = selection.file.name.c_str();
             if (!modalTextInput("REMOTE NAME", "Destination filename", remoteName, 255,
                                 false, remoteName)) continue;
-            cardputer::showBusyScreen("SFTP UPLOAD", "Writing remote file...");
+            const String destination = joinSftpPath(path, remoteName.c_str());
+            bool overwrite = false;
+            bool destinationIsDirectory = false;
+            for (const cardputer::SftpEntry& entry : listed.entries) {
+                if (entry.name == remoteName.c_str()) {
+                    overwrite = true;
+                    destinationIsDirectory = entry.directory;
+                    break;
+                }
+            }
+            if (destinationIsDirectory) {
+                result = {false, "SFTP upload destination is an existing directory"};
+                break;
+            }
+            if (!confirmDeviceSftpDestination(
+                    "CONFIRM SFTP UPLOAD", destination, overwrite)) {
+                continue;
+            }
+            cardputer::showBusyScreen("SFTP UPLOAD", "Writing remote file... ESC cancels");
             cardputer::markOperation("sftp_upload");
-            result = client.uploadSftpFile(selection.file.name,
-                                           joinSftpPath(path, remoteName.c_str()), 60000);
+            result = deviceSftpMutationResult(client.uploadSftpFileControlled(
+                selection.file.name, destination, overwrite, 60000,
+                deviceSftpTransferCancelled));
             if (!result.success) break;
             continue;
         }
@@ -1795,9 +1846,23 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
             std::string localName = entry.name.c_str();
             if (!modalTextInput("DOWNLOAD TO SD", "Workspace filename", localName, 502,
                                 false, localName)) continue;
-            cardputer::showBusyScreen("SFTP DOWNLOAD", "Saving to microSD workspace...");
+            const cardputer::OperationResult readable = cardputer::requireSdReadAccess();
+            if (!readable.success) {
+                result = readable;
+                break;
+            }
+            const String localPath = cardputer::workspaceFilePath(localName.c_str());
+            const bool overwrite = SD.exists(localPath);
+            if (!confirmDeviceSftpDestination(
+                    "CONFIRM SFTP DOWNLOAD", localPath, overwrite)) {
+                continue;
+            }
+            cardputer::showBusyScreen(
+                "SFTP DOWNLOAD", "Saving to microSD workspace... ESC cancels");
             cardputer::markOperation("sftp_download");
-            result = client.downloadSftpFile(remotePath, localName.c_str(), 60000);
+            result = deviceSftpMutationResult(client.downloadSftpFileControlled(
+                remotePath, localName.c_str(), overwrite, 60000,
+                deviceSftpTransferCancelled));
             if (!result.success) break;
         } else if (action == 1) {
             std::string name = entry.name.c_str();
@@ -1837,27 +1902,18 @@ cardputer::OperationResult runSshTool()
 {
     String status;
     while (true) {
-        std::vector<cardputer::SshProfile> profiles;
+        std::vector<cardputer::SshProfileSummary> profiles;
         std::size_t selectedIndex = 0;
-        cardputer::OperationResult result = cardputer::loadSshProfiles(profiles, selectedIndex);
+        cardputer::OperationResult result =
+            cardputer::loadSshProfileSummaries(profiles, selectedIndex);
         if (!result.success) return result;
-        std::vector<cardputer::SshProfileSummary> summaries;
-        std::size_t summarySelected = 0;
-        result = cardputer::loadSshProfileSummaries(summaries, summarySelected);
-        if (!result.success || summaries.size() != profiles.size() ||
-            (!profiles.empty() && summarySelected != selectedIndex)) {
-            return {false, "SSH profile IDs do not match the Device inventory"};
-        }
         const String selectedName = profiles.empty() ? String("not configured")
                                                       : profiles[selectedIndex].name;
-        const bool selectedKeyInstalled = !profiles.empty() &&
-            cardputer::sshPrivateKeyIsInstalled(
-                profiles[selectedIndex].privateKeyId);
         const int action = modalSelection("SSH TOOL", {
             "Connect: " + selectedName,
             "SFTP: " + selectedName,
             "Manage profiles (" + String(profiles.size()) + ")",
-            String("Install private key: ") + (selectedKeyInstalled ? "yes" : "no"),
+            "Install/replace selected private key",
             "Terminal shortcuts",
             "Back to Tools"}, 0, status.isEmpty() ? "UP/DOWN  ENTER  ESC back" : status);
         status = "";
@@ -1870,10 +1926,15 @@ cardputer::OperationResult runSshTool()
             result = runSshTerminal();
             status = result.error;
         } else if (action == 1) {
-            result = runSftpBrowser(profiles[selectedIndex]);
+            cardputer::SshProfile profile;
+            result = cardputer::loadSshProfile(profile);
+            if (result.success && !cardputer::sshProfileIsComplete(profile)) {
+                result = {false, "Selected SSH profile is incomplete"};
+            }
+            if (result.success) result = runSftpBrowser(profile);
             status = result.success ? String("SFTP session closed") : result.error;
         } else if (action == 3) {
-            result = installSshKeyFromWorkspace(summaries[selectedIndex].id);
+            result = installSshKeyFromWorkspace(profiles[selectedIndex].id);
             status = result.success ? String("Private key installed") : result.error;
         } else if (action == 4) {
             cardputer::showTextViewer("SSH SHORTCUTS", {
@@ -1894,7 +1955,7 @@ cardputer::OperationResult runSshTool()
         } else {
             bool profilesDone = false;
             while (!profilesDone) {
-                result = cardputer::loadSshProfiles(profiles, selectedIndex);
+                result = cardputer::loadSshProfileSummaries(profiles, selectedIndex);
                 if (!result.success) return result;
                 std::vector<String> items;
                 for (std::size_t index = 0; index < profiles.size(); ++index) {
@@ -1926,20 +1987,42 @@ cardputer::OperationResult runSshTool()
                      "Forget trusted host key", "Delete profile", "Back"}, 0,
                     "UP/DOWN  ENTER  ESC back");
                 if (profileAction == 0) {
-                    result = cardputer::selectSshProfile(index);
-                    if (result.success) result = runSshTerminal();
+                    result = index == selectedIndex
+                        ? runSshTerminal()
+                        : cardputer::OperationResult{
+                              false, "Make this profile default before connecting"};
                     status = result.error;
                 } else if (profileAction == 1) {
-                    result = runSftpBrowser(profiles[index]);
+                    if (index != selectedIndex) {
+                        result = {false, "Make this profile default before opening SFTP"};
+                    } else {
+                        cardputer::SshProfile profile;
+                        result = cardputer::loadSshProfile(profile);
+                        if (result.success && !cardputer::sshProfileIsComplete(profile)) {
+                            result = {false, "Selected SSH profile is incomplete"};
+                        }
+                        if (result.success) result = runSftpBrowser(profile);
+                    }
                     status = result.error;
                 } else if (profileAction == 2) {
                     result = cardputer::selectSshProfile(index);
                     status = result.success ? String("Default profile selected") : result.error;
                 } else if (profileAction == 3) {
-                    cardputer::SshProfile edited;
-                    if (editSshProfile(profiles[index], edited)) {
-                        result = cardputer::saveSshProfileAt(edited, index);
-                        status = result.success ? String("Profile saved") : result.error;
+                    if (index != selectedIndex) {
+                        status = "Make this profile default before editing";
+                    } else {
+                        cardputer::SshProfile current;
+                        result = cardputer::loadSshProfile(current);
+                        if (!result.success) {
+                            status = result.error;
+                        } else {
+                            cardputer::SshProfile edited;
+                            if (editSshProfile(current, edited)) {
+                                result = cardputer::saveSshProfileAt(edited, index);
+                                status = result.success
+                                    ? String("Profile saved") : result.error;
+                            }
+                        }
                     }
                 } else if (profileAction == 4) {
                     result = cardputer::forgetTrustedSshHost(profiles[index].host,

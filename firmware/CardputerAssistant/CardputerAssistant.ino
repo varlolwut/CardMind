@@ -55,6 +55,9 @@ SET_LOOP_TASK_STACK_SIZE(16384);
 
 namespace {
 
+int modalSelection(const String& title, const std::vector<String>& items,
+                   std::size_t initialIndex, const String& footer);
+
 cardputer::OperationResult runSshCommandOutputStorageTest();
 cardputer::OperationResult runSshCommandOutputRemoteTest(
     String& retainedName,
@@ -720,6 +723,124 @@ std::vector<String> capabilityPolicyItems(
     }
     items.push_back("Back");
     return items;
+}
+
+constexpr std::size_t kSshProfileCeilingItemIndex =
+    cardputer::kToolCapabilityCount;
+constexpr std::size_t kScopedCapabilityBackItemIndex =
+    cardputer::kToolCapabilityCount + 1;
+
+String deviceSshProfileCeilingLabel(
+    const String& ownCeiling,
+    const String& parentProjectCeiling)
+{
+    const bool available = cardputer::sshProfileCeilingsAllowSelected(
+        cachedSshToolProfileId,
+        parentProjectCeiling.c_str(), parentProjectCeiling.length(),
+        ownCeiling.c_str(), ownCeiling.length());
+    String label = "SSH host: ";
+    if (!ownCeiling.isEmpty()) {
+        label += "Bound";
+    } else if (!parentProjectCeiling.isEmpty()) {
+        label += "Inherit project";
+    } else {
+        label += "Inherit selected";
+    }
+    label += available ? " (available)" : " (unavailable)";
+    return label;
+}
+
+std::vector<String> deviceScopedCapabilityPolicyItems(
+    const cardputer::ScopedToolPermissionPolicy& policy,
+    const String& ownCeiling,
+    const String& parentProjectCeiling)
+{
+    std::vector<String> items = capabilityPolicyItems(policy);
+    items.back() = deviceSshProfileCeilingLabel(
+        ownCeiling, parentProjectCeiling);
+    items.push_back("Back");
+    return items;
+}
+
+struct DeviceSshProfileCeilingChoice {
+    bool success;
+    bool changed;
+    String value;
+    String error;
+};
+
+DeviceSshProfileCeilingChoice chooseDeviceSshProfileCeiling(
+    const String& current)
+{
+    std::vector<cardputer::SshProfileSummary> profiles;
+    std::size_t selectedIndex = 0;
+    const cardputer::OperationResult loaded =
+        cardputer::loadSshProfileSummaries(profiles, selectedIndex);
+    if (!loaded.success) {
+        return {false, false, "", loaded.error};
+    }
+
+    std::vector<String> items;
+    std::vector<String> values;
+    items.reserve(profiles.size() + 2);
+    values.reserve(profiles.size() + 1);
+    items.push_back(String(current.isEmpty() ? "* " : "  ") +
+                    "Inherit selected profile");
+    values.push_back("");
+    std::size_t initialIndex = 0;
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        const cardputer::EncodedSshProfileId encoded =
+            cardputer::encodeSshProfileId(profiles[index].id);
+        if (encoded.error != cardputer::SshProfileIdCodecError::None) {
+            return {false, false, "", "Stored SSH profile ID is invalid"};
+        }
+        const String value(encoded.value.data());
+        const bool currentProfile = current == value;
+        if (currentProfile) initialIndex = index + 1;
+        String label = currentProfile ? "* " : "  ";
+        if (index == selectedIndex) label += "[default] ";
+        label += profiles[index].name + "  " + profiles[index].username +
+            "@" + profiles[index].host;
+        items.push_back(label);
+        values.push_back(value);
+    }
+    items.push_back("Cancel");
+    const int chosen = modalSelection(
+        "SSH HOST CEILING", items, initialIndex,
+        current.isEmpty() ? "Current: inherit  ENTER choose"
+                          : "Current: bound  ENTER choose");
+    if (chosen < 0 || static_cast<std::size_t>(chosen) == items.size() - 1) {
+        return {true, false, current, ""};
+    }
+    if (static_cast<std::size_t>(chosen) >= values.size()) {
+        return {false, false, "", "SSH host selection is outside the available profiles"};
+    }
+    const String selected = values[static_cast<std::size_t>(chosen)];
+    return {true, selected != current, selected, ""};
+}
+
+String deviceSshProfileCeilingSaveStatus(
+    const String& scope,
+    const String& previous,
+    const String& requested,
+    const cardputer::OperationResult& saved,
+    bool reloadSuccess,
+    const String& stored,
+    const String& reloadError)
+{
+    if (!reloadSuccess) {
+        return scope + " SSH host state unknown after save; reload failed: " +
+            reloadError;
+    }
+    if (stored == requested) {
+        return saved.success
+            ? scope + " SSH host saved"
+            : scope + " SSH host committed despite reported save failure";
+    }
+    if (stored == previous && !saved.success) {
+        return scope + " SSH host not changed: " + saved.error;
+    }
+    return scope + " SSH host save outcome unknown; stored state differs";
 }
 
 void clearChatScopedEphemeralState()
@@ -2067,7 +2188,9 @@ void renderChatToolPolicy()
     const cardputer::ChatDocumentResult chat =
         cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
     const std::vector<String> items = chat.success
-        ? capabilityPolicyItems(chat.chat.toolPolicy)
+        ? deviceScopedCapabilityPolicyItems(
+              chat.chat.toolPolicy, chat.chat.sshProfile,
+              activeProjectDocument.sshProfile)
         : std::vector<String>{"Back"};
     cardputer::showSelectionList(
         "CHAT CAPABILITIES", items, capabilityPolicyIndex,
@@ -2891,7 +3014,8 @@ void renderProjectToolPolicy()
     const cardputer::ProjectDocumentResult project =
         cardputer::loadProject(selectedProjectId);
     const std::vector<String> items = project.success
-        ? capabilityPolicyItems(project.project.toolPolicy)
+        ? deviceScopedCapabilityPolicyItems(
+              project.project.toolPolicy, project.project.sshProfile, "")
         : std::vector<String>{"Back"};
     cardputer::showSelectionList(
         "PROJECT CAPABILITIES", items, capabilityPolicyIndex,

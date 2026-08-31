@@ -218,7 +218,8 @@ void handleKeyboard()
 
     if (currentScreen == Screen::ProjectToolPolicy) {
         if (cancelPressed ||
-            (enterPressed && capabilityPolicyIndex == cardputer::kToolCapabilityCount)) {
+            (enterPressed && capabilityPolicyIndex ==
+                kScopedCapabilityBackItemIndex)) {
             capabilityPolicyIndex = 0;
             menuStatus = "";
             currentScreen = Screen::ProjectActions;
@@ -230,8 +231,50 @@ void handleKeyboard()
             renderProjectToolPolicy();
         } else if (downPressed) {
             capabilityPolicyIndex = std::min(
-                capabilityPolicyIndex + 1, cardputer::kToolCapabilityCount);
+                capabilityPolicyIndex + 1, kScopedCapabilityBackItemIndex);
             menuStatus = "";
+            renderProjectToolPolicy();
+        } else if (enterPressed && capabilityPolicyIndex ==
+                   kSshProfileCeilingItemIndex) {
+            const cardputer::ProjectDocumentResult current =
+                cardputer::loadProject(selectedProjectId);
+            if (!current.success) {
+                menuStatus = current.error;
+                renderProjectToolPolicy();
+                return;
+            }
+            const DeviceSshProfileCeilingChoice choice =
+                chooseDeviceSshProfileCeiling(current.project.sshProfile);
+            if (!choice.success) {
+                menuStatus = choice.error;
+                renderProjectToolPolicy();
+                return;
+            }
+            if (!choice.changed) {
+                menuStatus = "Project SSH host unchanged";
+                renderProjectToolPolicy();
+                return;
+            }
+            cardputer::ProjectDocumentResult fresh =
+                cardputer::loadProject(selectedProjectId);
+            if (!fresh.success) {
+                menuStatus = fresh.error;
+                renderProjectToolPolicy();
+                return;
+            }
+            const String previous = fresh.project.sshProfile;
+            fresh.project.sshProfile = choice.value;
+            const cardputer::OperationResult saved =
+                cardputer::saveProject(fresh.project);
+            const cardputer::ProjectDocumentResult canonical =
+                cardputer::loadProject(selectedProjectId);
+            if (canonical.success && selectedProjectId == activeProjectId) {
+                activeProjectDocument = canonical.project;
+            }
+            menuStatus = deviceSshProfileCeilingSaveStatus(
+                "Project", previous, choice.value, saved, canonical.success,
+                canonical.success ? canonical.project.sshProfile : String(),
+                canonical.error);
             renderProjectToolPolicy();
         } else if (enterPressed) {
             cardputer::ProjectDocumentResult project =
@@ -852,7 +895,8 @@ void handleKeyboard()
 
     if (currentScreen == Screen::ChatToolPolicy) {
         if (cancelPressed ||
-            (enterPressed && capabilityPolicyIndex == cardputer::kToolCapabilityCount)) {
+            (enterPressed && capabilityPolicyIndex ==
+                kScopedCapabilityBackItemIndex)) {
             capabilityPolicyIndex = 0;
             menuStatus = "";
             currentScreen = Screen::ChatActions;
@@ -864,8 +908,51 @@ void handleKeyboard()
             renderChatToolPolicy();
         } else if (downPressed) {
             capabilityPolicyIndex = std::min(
-                capabilityPolicyIndex + 1, cardputer::kToolCapabilityCount);
+                capabilityPolicyIndex + 1, kScopedCapabilityBackItemIndex);
             menuStatus = "";
+            renderChatToolPolicy();
+        } else if (enterPressed && capabilityPolicyIndex ==
+                   kSshProfileCeilingItemIndex) {
+            const cardputer::ChatDocumentResult current =
+                cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
+            if (!current.success) {
+                menuStatus = current.error;
+                renderChatToolPolicy();
+                return;
+            }
+            const DeviceSshProfileCeilingChoice choice =
+                chooseDeviceSshProfileCeiling(current.chat.sshProfile);
+            if (!choice.success) {
+                menuStatus = choice.error;
+                renderChatToolPolicy();
+                return;
+            }
+            if (!choice.changed) {
+                menuStatus = "Chat SSH host unchanged";
+                renderChatToolPolicy();
+                return;
+            }
+            cardputer::ChatDocumentResult fresh =
+                cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
+            if (!fresh.success) {
+                menuStatus = fresh.error;
+                renderChatToolPolicy();
+                return;
+            }
+            const String previous = fresh.chat.sshProfile;
+            fresh.chat.sshProfile = choice.value;
+            const cardputer::OperationResult saved =
+                cardputer::saveProjectChatMetadata(fresh.chat);
+            const cardputer::ChatDocumentResult canonical =
+                cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
+            if (canonical.success && selectedChatId == activeChatId) {
+                activeChatToolPolicy = canonical.chat.toolPolicy;
+                activeChatSshProfile = canonical.chat.sshProfile;
+            }
+            menuStatus = deviceSshProfileCeilingSaveStatus(
+                "Chat", previous, choice.value, saved, canonical.success,
+                canonical.success ? canonical.chat.sshProfile : String(),
+                canonical.error);
             renderChatToolPolicy();
         } else if (enterPressed) {
             cardputer::ChatDocumentResult chat =
