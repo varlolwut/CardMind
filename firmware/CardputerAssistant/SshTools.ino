@@ -74,9 +74,14 @@ cardputer::OperationResult connectTrustedSsh(const cardputer::SshProfile& profil
         client.close();
         return {false, trust.error};
     }
-    if (!trust.found || !trust.matches) {
+    if (trust.found && !trust.matches) {
+        client.close();
+        return {false,
+                "SSH host key changed; connection blocked; forget the trusted host key before reconnecting"};
+    }
+    if (!trust.found) {
         if (!confirmSshFingerprint(profile, client.hostKeyType(), client.fingerprint(),
-                                   trust.found && !trust.matches)) {
+                                   false)) {
             client.close();
             return {false, "SSH connection cancelled before trusting the host key"};
         }

@@ -58,7 +58,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-08 | Small fixed built-in Safe Actions set for logs, service state, containers, disk and processes | Reviewed fixed actions obey existing Off/Ask/ceiling/host-key/timeout/audit boundaries; no presets, editor, macros, persistence schema or action framework | completed |
 | P4-09 | Removed by user: Web terminal tabs; existing single terminal remains | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-10 | Removed by user: configurable Device terminal-history rotation and new viewer; existing terminal.log/old.log remains | Scope closed by explicit user decision; not implemented | removed_by_user |
-| P4-11 | Existing bounded known_hosts store with unconditional host-key-change block | Every mismatch blocks connection; user-removed pagination/rotation is not implemented | pending |
+| P4-11 | Existing bounded known_hosts store with unconditional host-key-change block | Every mismatch blocks connection; user-removed pagination/rotation is not implemented | completed |
 | P4-12 | Removed by user: separate SSH profile diagnostics feature | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-13 | Encrypted-at-rest evaluation and physical-access threat-model documentation only | No encrypted vault is implemented in P4; documentation states measured limitations and makes no unsupported encryption claim | pending |
 | P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | pending |
@@ -1764,3 +1764,170 @@ retained firmware test or a claim of post-correction Device acceptance.
 - Architect personal closure review returned explicit GO for this exact diff
   and evidence. P4-08 is completed; P4-11 remains pending until this row's
   commit is published and its exact remote SHA is verified.
+
+## P4-11 design gate
+
+**Status:** completed after Architect personal closure GO
+**Started:** 2026-08-31 12:12:37 +03:00.
+**Completed:** 2026-08-31 13:04:48 +03:00.
+**Pre-edit review:** Fresh bounded read-only review returned `GO`; the reviewer
+confirmed the direct-call/race guard, checked staged cleanup, 16-KiB boundary,
+existing atomic crash semantics, exact write set and proportional proof ownership.
+
+### Scope lock
+
+- ROADMAP Phase 4 requires explicit host-key change handling and acceptance that
+  a host-key mismatch always blocks connection.
+- The limit decision keeps the existing 16-KiB known_hosts store. The user
+  removed pagination/rotation; no list/clear manager or new storage format is
+  permitted.
+- P4-17 owns the later authenticated exact-selected-host Web forget control and
+  visible consolidated Web journey. P4-20 owns real changed-boundary mismatch
+  E2E, exact test-host deletion and byte-for-byte preservation of unrelated
+  entries. P4-21 only repeats final regression.
+
+### Inventory and ownership
+
+- Authority is /assistant/ssh/known_hosts, bounded by
+  kMaximumKnownHostsBytes = 16384; one tab-delimited line stores host, port and
+  a validated SHA-256 fingerprint. No credential or private key is stored
+  there.
+- initializeSshStorage() and every mutation reuse recoverAtomicSdFile(). The
+  existing .tmp/.bak primitive makes the target authoritative when present,
+  restores .bak when the target is absent, and removes stale .tmp.
+- loadTrustedSshFingerprint() rejects a directory, an authority larger than
+  16 KiB and an invalid selected fingerprint. checkTrustedSshHost() returns
+  found/matches without mutating state.
+- trustSshHost() currently rewrites a matching line even when its fingerprint
+  differs and can append a staged file beyond 16 KiB before commit. Those are
+  the two active-row defects.
+- Model ssh_command and model SFTP already close and fail before authentication
+  when trust is absent or mismatched. Pending confirmation hashes the current
+  stored trusted fingerprint into selected SSH authority identity.
+- Manual Device ensureSshConnection() and the Web SSH worker currently route
+  both unknown and mismatched hosts into the same trust prompt. Device profile
+  settings already expose exact-host forget; Web forget remains P4-17.
+- The installed M5Stack ESP32 3.2.1 File API exposes flush() and current size().
+  The existing staged-file primitive commits only target + ".tmp" through
+  target -> .bak, staged -> target, then checked backup cleanup.
+
+### Minimal design and transitions
+
+- Keep the existing file, line format, public APIs and SshTrustResult semantics.
+- In trustSshHost(), while copying the current authority, validate any exact
+  host/port fingerprint. A different stored fingerprint fails closed, removes
+  only the staged .tmp, preserves the old target and requires explicit
+  exact-host forget before a later reconnect can trust the replacement.
+- After flushing the staged file, read its vendor File::size() before commit.
+  Size above 16 KiB fails explicitly, removes only .tmp, and leaves the old
+  authority unchanged. Exactly 16 KiB remains valid.
+- Device and Web connection owners treat found && !matches as an immediate
+  explicit mismatch error, close the current connection and never enter the
+  trust/authentication continuation. Only !found retains first-host trust.
+- No automatic replacement, retry, wildcard cleanup or profile-delete coupling.
+
+### Crash and cleanup ownership
+
+- Before .tmp creation or on mismatch/overflow: target remains authoritative;
+  checked cleanup removes only .tmp. Cleanup failure returns an error and boot
+  or the next mutation retries the existing bounded recovery.
+- Crash while .tmp is written: target remains authoritative and boot removes
+  .tmp.
+- Crash after target -> .bak but before staged -> target: boot restores .bak
+  and removes .tmp.
+- Crash after staged -> target: new complete authority is authoritative; boot
+  removes stale .bak. No history scan or recovery framework is added.
+- SD absence/corruption/oversize is an explicit lookup or mutation failure and
+  therefore blocks connection.
+
+### Frozen proof matrix
+
+- Static/source: every model, SFTP, Device and Web consumer closes/fails before
+  authentication on mismatch; unknown-host trust is unchanged.
+- Static/source: direct trustSshHost() cannot replace a different existing
+  fingerprint; mismatch and staged-size overflow preserve target authority and
+  own checked .tmp cleanup; exactly 16 KiB may commit.
+- Static/source: no pagination/rotation, list/read route, free-host forget API,
+  profile-delete coupling, schema/policy or credential change.
+- One exact pinned M5Stack ESP32 3.2.1 compile proves firmware compatibility and
+  records flash/global RAM/binary hash. No upload or Device/serial recovery
+  chain is needed; P4-20 owns the real mismatch and exact-forget runtime
+  acceptance.
+- Independent code/security review is required before closure because this is
+  authoritative persisted security state.
+
+### Forbidden effects and expected write set
+
+- No new framework, storage schema, manager, pagination, rotation, background
+  task, retry, recovery engine, trust-on-mismatch path or automatic forget.
+- No Web asset/UI control, API read route, diagnostics, fixtures, tests that
+  mutate user trust, or exposure of fingerprints to the model.
+- Expected files only:
+  .agents/P4_TRACEABILITY.md,
+  firmware/CardputerAssistant/src/ssh_client.cpp,
+  firmware/CardputerAssistant/SshTools.ino, and
+  firmware/CardputerAssistant/src/web_console.cpp.
+
+**Independent pre-edit review:** one bounded reviewer returned `GO` on this
+frozen design, proof matrix, non-goals and exact write set before production
+edits began.
+
+**Code-review correction:** The fresh read-only reviewer found one active-row
+TOCTOU path: a host-key change between the Web worker check and the trust POST
+was rejected by the central guard, but the handler retained its pre-auth
+connection and `AwaitingTrust` state. The bounded correction closes and clears
+that connection on every failed trust mutation, publishes `Failed`, and derives
+the changed-key status from the still-authoritative store. The stale trace-only
+pre-edit-review wording was corrected; no other blocker was reported.
+
+### Implemented boundary and evidence
+
+- The row-owned write set is exactly this trace plus `ssh_client.cpp`,
+  `SshTools.ino` and `web_console.cpp`; generated artifacts and unrelated files
+  are excluded. Numeric diff snapshots and self-referential patch fingerprints
+  are intentionally not retained as row evidence.
+- `trustSshHost()` now validates every exact host/port entry while streaming.
+  A different or invalid selected fingerprint closes both files, invokes the
+  existing checked bounded recovery to remove only the staged `.tmp`, preserves
+  the authoritative target and returns an explicit blocked/forget-required
+  error. Duplicate exact-prefix lines are all scanned before commit.
+- The staged file is flushed and measured before atomic commit. Values above
+  16,384 bytes fail with checked staged cleanup; exactly 16,384 bytes remains
+  legal. No file format, public API, trust-result semantics or recovery owner
+  changed.
+- Device changed-key state closes and fails before the first-host trust prompt
+  or authentication. Web changed-key state records mismatch, clears
+  `AwaitingTrust`, closes and clears the pre-auth connection/credentials and
+  publishes `Failed`; only an unknown host reaches first-host trust. A trust-POST
+  TOCTOU failure performs the same fail/clear transition after re-reading the
+  still-authoritative exact trust state. Existing model SSH and model SFTP
+  mismatch paths remain fail-closed before authentication.
+- `git diff --check`, the exact four-path write-set check and strict static
+  ordering/invariant checks passed across direct trust, Device, Web, model SSH
+  and model SFTP. The focused TOCTOU check proved trust failure -> authoritative
+  recheck -> mismatch status -> clear -> `Failed` -> HTTP response.
+- After the concrete reviewer correction, one exact compile-only build used
+  FQBN `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`
+  and the sole resolved M5Stack ESP32 core `3.2.1`. Sketch use is 3,428,962
+  bytes; globals remain 65,628 bytes; the 3,429,152-byte binary has SHA-256
+  `6AF3DE3E211B7E657CF77BF37FA4AD762159AF3920B1D40BF89A01F0EC273E3F`.
+- The fresh independent code reviewer returned initial STOP only for the Web
+  trust-POST TOCTOU state and stale trace wording. Its single bounded follow-up
+  returned `GO` after both corrections; the reviewer was then closed.
+- No upload, COM8, Device/Web/HTTP action, fixture or persisted mutation occurred,
+  so exact-owned cleanup is not applicable and user SD/NVS/selection state is
+  unchanged. Globals are unchanged from the prior build; no runtime latency or
+  heap result is claimed.
+- Residual proof is explicit: real mismatch blocking, exact selected-host forget
+  and byte-for-byte unrelated `known_hosts` preservation remain P4-20 runtime
+  ownership; P4-17 owns the authenticated Web forget control and final visible
+  profile/security journey. P4-11 adds no such UI or runtime fixture.
+
+**Architect personal closure GO:** The Architect personally reviewed the exact
+current four-path `+213/-6` diff, corrected trace inventory, requirement/non-goal
+mapping, every trust producer/consumer, installed M5Stack ESP32 3.2.1
+`File::flush()`/`File::size()` semantics, atomic target/`.tmp`/`.bak` ownership,
+Device/Web/model/SFTP fail-before-auth paths, the Web trust-POST TOCTOU
+correction, compile/resources and the absence of a cleanup obligation. The
+accepted residual remains exclusively P4-17/P4-20 ownership; no runtime claim
+is added by this row.

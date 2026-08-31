@@ -3857,7 +3857,7 @@ void runWebSshWorker(void* parameter)
             vTaskDelete(nullptr);
             return;
         }
-        if (!trust.found || !trust.matches) {
+        if (trust.found && !trust.matches) {
             const String fingerprint = webSshClient.fingerprint();
             const String keyType = webSshClient.hostKeyType();
             portENTER_CRITICAL(&webSshStateMux);
@@ -3865,7 +3865,25 @@ void runWebSshWorker(void* parameter)
                           fingerprint.c_str());
             std::snprintf(webSshHostKeyType, sizeof(webSshHostKeyType), "%s",
                           keyType.c_str());
-            webSshHostChanged = trust.found && !trust.matches;
+            webSshHostChanged = true;
+            webSshAwaitingTrust = false;
+            portEXIT_CRITICAL(&webSshStateMux);
+            completeWebSshWorker(
+                WebSshStage::Failed,
+                "SSH host key changed; connection blocked; forget the trusted host key before reconnecting",
+                true);
+            vTaskDelete(nullptr);
+            return;
+        }
+        if (!trust.found) {
+            const String fingerprint = webSshClient.fingerprint();
+            const String keyType = webSshClient.hostKeyType();
+            portENTER_CRITICAL(&webSshStateMux);
+            std::snprintf(webSshFingerprint, sizeof(webSshFingerprint), "%s",
+                          fingerprint.c_str());
+            std::snprintf(webSshHostKeyType, sizeof(webSshHostKeyType), "%s",
+                          keyType.c_str());
+            webSshHostChanged = false;
             webSshAwaitingTrust = true;
             webSshStage = WebSshStage::AwaitingTrust;
             webSshWorkerStackFree = uxTaskGetStackHighWaterMark(nullptr);
@@ -3998,6 +4016,13 @@ void handleSshTrust()
         result = startWebSshWorker(true);
     }
     if (!result.success) {
+        const SshTrustResult trust = checkTrustedSshHost(
+            webSshProfile.host, webSshProfile.port, webSshFingerprint);
+        portENTER_CRITICAL(&webSshStateMux);
+        webSshHostChanged = trust.success && trust.found && !trust.matches;
+        portEXIT_CRITICAL(&webSshStateMux);
+        clearWebSshConnection();
+        publishWebSshStage(WebSshStage::Failed, result.error);
         sendWebJsonError(server, 502, result.error);
         return;
     }

@@ -1848,7 +1848,19 @@ OperationResult trustSshHost(const String& host, std::uint16_t port,
             continue;
         }
         if (line.startsWith(prefix)) {
-            line = prefix + fingerprint;
+            const String trustedFingerprint = line.substring(prefix.length());
+            if (!isValidSshFingerprint(trustedFingerprint) ||
+                trustedFingerprint != fingerprint) {
+                source.close();
+                output.close();
+                const OperationResult cleaned = recoverAtomicSdFile(kSshKnownHostsPath);
+                const String error = isValidSshFingerprint(trustedFingerprint)
+                    ? String("SSH host key changed; connection blocked; forget the trusted host key before reconnecting")
+                    : String("SSH known-hosts entry is invalid; connection blocked");
+                return {false, cleaned.success
+                    ? error
+                    : error + "; staged cleanup failed: " + cleaned.error};
+            }
             replaced = true;
         }
         if (output.println(line) == 0) {
@@ -1867,7 +1879,15 @@ OperationResult trustSshHost(const String& host, std::uint16_t port,
         return {false, "Failed while appending SSH trusted host"};
     }
     output.flush();
+    const std::size_t stagedBytes = output.size();
     output.close();
+    if (stagedBytes > kMaximumKnownHostsBytes) {
+        const OperationResult cleaned = recoverAtomicSdFile(kSshKnownHostsPath);
+        const String error = "SSH known-hosts update exceeds the 16-KiB limit";
+        return {false, cleaned.success
+            ? error
+            : error + "; staged cleanup failed: " + cleaned.error};
+    }
     return commitStagedSdFile(kSshKnownHostsPath, kSshKnownHostsTemporaryPath);
 }
 
