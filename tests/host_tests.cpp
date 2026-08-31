@@ -1430,6 +1430,30 @@ void testJsonStringReader()
     require(escaped.success && escaped.value == "quote: \" slash: \\ unicode: П emoji: 😀",
             "Escaped JSON string decoding failed");
 
+    const std::string canonicalCommand =
+        "{\"command\":\"printf ok\",\"max_inline_output_bytes\":16384,"
+        "\"timeout_ms\":60000}";
+    const cardputer::json_reader::JsonStringValueResult decodedCommand =
+        cardputer::readCanonicalStringArgument(
+            canonicalCommand, "command", 1024);
+    require(decodedCommand.success && decodedCommand.value == "printf ok",
+            "Canonical SSH command options blocked command extraction");
+
+    const std::string canonicalAction =
+        "{\"action\":\"disk\",\"max_inline_output_bytes\":16384,"
+        "\"timeout_ms\":60000}";
+    const cardputer::json_reader::JsonStringValueResult decodedAction =
+        cardputer::readCanonicalStringArgument(
+            canonicalAction, "action", 32);
+    require(decodedAction.success && decodedAction.value == "disk",
+            "Canonical SSH Safe Action options blocked action extraction");
+
+    const std::string oversizedCanonicalField =
+        "{\"action\":\"disk\",\"abcdefghijklmnopqrstuvwx\":true}";
+    require(!cardputer::readCanonicalStringArgument(
+                 oversizedCanonicalField, "action", 32).success,
+            "Canonical tool argument key above 23 bytes was accepted");
+
     const std::string duplicateRecord =
         "{\"content\":\"first\",\"content\":\"second\"}";
     MemoryJsonReader duplicateReader(duplicateRecord);

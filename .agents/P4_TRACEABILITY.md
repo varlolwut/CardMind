@@ -573,8 +573,144 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
 
 ## P4-04 design gate
 
-**Status:** completed after the approved validator correction
+**Status:** completed after Architect personal closure GO
 **Started:** 2026-08-30 21:24:34 +03:00.
+
+### Second approved reopen gate (2026-08-31)
+
+- P4-08 A/B/C proved canonical project/chat load and pending save/load/clear both
+  before and after direct SSH execution. Only `loadPendingToolPreview` failed:
+  `readCanonicalStringArgument` still limits canonical field names to 16 bytes,
+  while P4-04 introduced the 23-byte `max_inline_output_bytes` key.
+- Frozen correction: in `pending_tool_call.cpp`, replace only that stale literal
+  with one narrowly named local `constexpr` equal to
+  `sizeof("max_inline_output_bytes") - 1`. Do not change value limits, the generic
+  JSON reader, the 64-byte SD metadata limit, schemas, serializers,
+  project/chat storage, policy, executor, preview content or architecture.
+- Focused host/static proof: canonical P4-04 command/action objects containing
+  `timeout_ms` and `max_inline_output_bytes` extract `command`/`action`, retain
+  current value bounds, and reject a key above the exact 23-byte ceiling.
+- Focused device proof: on one exact-owned canonical project/chat, Ask must pass
+  save/load and preview, reach `ask_execute`, execute once, produce the expected
+  audit record, clear exact pending/output, restore selection/inventories, and
+  leave the device responsive. One exact-core build/upload is permitted.
+- P4-08 is paused while this owner is active. Its production and disposable A/B/C
+  diagnostic hunks remain frozen and must not enter the P4-04 correction commit.
+- The first post-upload Device attempt stopped before fixture creation or the changed
+  boundary because its disposable runner used one initial `PING` instead of the
+  project's bounded three-attempt serial synchronization. No ledger, project, chat,
+  pending call or output was created, and both disposable files were removed. This is
+  a harness-readiness failure; the material correction is limited to reusing the
+  existing bounded serial handshake with no rebuild or upload.
+- The corrected runner then reused the established CRLF and three-attempt `PING`
+  handshake but COM8 still produced no `PONG`. It again stopped before Web Console,
+  fixture creation or the changed boundary; no ledger or exact-owned/user state was
+  created and the disposable files were removed. This is an external device-readiness
+  blocker. Further unchanged serial attempts are stopped pending Architect direction;
+  production, build output and the frozen P4-08 diff remain unchanged.
+- Architect authorized one non-flashing recovery boundary. The project-local
+  `m5stack/tools/esptool_py/4.9.dev3` executable completed `--no-stub chip_id`
+  against ESP32-S3 and issued the vendor `hard_reset` without writing or erasing
+  flash. COM8 then reappeared in the port-name inventory, but the immediate passive
+  capture could not open it (`Access to the path 'COM8' is denied`). No boot, panic or
+  dispatcher observation and no fixture mutation followed. The exact external boundary
+  was reported and no reset/probe/serial retry was made.
+- Fresh independent read-only code review returned `GO` with no correction blockers:
+  the exact 23-byte local ceiling is used by both production preview fields, the new
+  host cases cover command/action and reject 24 bytes, existing value-bound evidence
+  remains intact, and P4-08 was explicitly excluded. The reviewer was closed. Its sole
+  residual risk is the still-blocked real-device Ask preview observation.
+- After Architect independently proved that the re-enumeration lock had cleared, the
+  one authorized focused proof opened COM8 successfully without another reset, build
+  or upload. The established three-attempt readiness handshake nevertheless received
+  no `PONG`. The run stopped before Web Console and before ledger/fixture creation; no
+  project, chat, pending call, output or user state changed, and the disposable files
+  were removed. The new exact external boundary is an open serial port with no
+  application-dispatcher response; no repeat or production mutation followed.
+- The final authorized automatic recovery used the project-local esptool with
+  `--after soft_reset --no-stub chip_id`; ROM communication and soft reset completed
+  without flash write/erase. The subsequent open/capture/handshake process exceeded
+  its calculated bounded window and emitted no BOOT/FATAL/panic marker or `PONG`; it
+  was interrupted without a repeat. Because re-enumeration/open backoff, passive
+  capture and read waits were bounded, the exact residual transport boundary is an OS
+  SerialPort open-or-write call that did not return; the disposable probe had no
+  sub-stage marker capable of distinguishing those two calls. No Web Console,
+  credential, ledger, fixture, pending call or output was created.
+- The user then completed the required physical power-cycle. After restoring the
+  canonical visible plan, the single authorized read-only check opened COM8 and sent
+  the established three bounded `PING` attempts with a one-second write timeout, but
+  received no `PONG`; `STATUS` was therefore not sent. No reset, build, upload, Web
+  Console, fixture or data mutation occurred. Normal application-dispatcher readiness
+  remains externally blocked after the physical reboot, so the focused Ask proof and
+  correction commit remain gated.
+- The user directly observed a live normal display with the main cards after that boot.
+  This proves that setup completed and the main UI loop is running, rejects the prior
+  early-startup/FATAL hypothesis, and narrows the missing `PONG` to the application
+  HWCDC/USB-serial transport boundary. The earlier hard-reset, soft-reset and physical
+  power-cycle escalation was not required for acceptance and violated the user's Device
+  test-safety boundary. It must not be repeated or extended; P4-04 remains frozen for a
+  proof redesign that performs no further Device recovery action.
+- The Architect's proposed runtime-preview waiver was explicitly superseded before
+  commit or closure. Ordinary independent Device/Web/HTTP/Browser actions and the
+  existing authorized credential path remain allowed; only a recovery-escalation chain
+  after readiness loss is prohibited. P4-04 therefore remains `in_progress` for one
+  minimal authenticated Web Console proof through existing boundaries: exact-owned
+  project/chat, pending preview, one approval/execution/audit observation, exact cleanup
+  and restoration. That proof must not use reset, rebuild/reupload, power/card action or
+  another serial-readiness probe. P4-08 production and diagnostic hunks remain frozen.
+- The single direct in-app Browser navigation to the established local Web Console
+  address returned `ERR_CONNECTION_REFUSED` before authentication, fixture creation or
+  any CardMind state change. The HTTP handler is therefore not active. Starting the
+  existing console now requires either the terminated serial test path or manual Device
+  UI participation; there is no existing permitted automated Web entry point. Per the
+  superseding decision, the Web proof stopped at this exact boundary without retry,
+  recovery action or automatic waiver. P4-04 remains `in_progress` and P4-08 remains
+  frozen.
+- Architect closure review returned `STOP`: the retained host cases duplicated the
+  23-byte field-name ceiling and called generic `json_reader::readObjectStringField`
+  directly, while the host link did not include `pending_tool_call.cpp`. They therefore
+  could remain green if the production preview boundary regressed to 16 bytes.
+- Architect-reviewed minimal correction: move the existing bounded canonical reader and
+  exact 23-byte `readCanonicalStringArgument` into the already host-linked
+  `pending_tool_preview.h/.cpp` as one exported pure helper. The three P4-04-owned
+  production preview extraction sites (read name, write content and SSH command) and the
+  focused host cases use that same helper. Command/action canonical objects with
+  `max_inline_output_bytes` must parse and a 24-byte field name must fail. The frozen
+  P4-08 Safe Action worktree consumer already resolves through the helper, but it is not
+  P4-04 evidence or commit ownership. No schema, storage, policy, router, SSH behavior or
+  P4-08 change is permitted.
+- Correction evidence: `git diff --check` and strict static ownership checks passed with
+  one exported definition, three P4-04-owned production preview callsites, three focused
+  host calls, no local reader in `pending_tool_call.cpp`, and no duplicated ceiling in
+  the tests. The fourth current worktree callsite is the excluded frozen P4-08 Safe Action
+  consumer and is not counted as P4-04 evidence.
+  The CI-equivalent WSL C++17 `-Wall -Wextra -Werror` host link, including
+  `pending_tool_preview.cpp`, passed and its exact-owned temporary ELF was removed.
+- One exact pinned compile passed with the required Cardputer FQBN and the only resolved
+  M5Stack ESP32 core at `3.2.1`: sketch 3,436,814 bytes and global RAM 65,628 bytes.
+  The 3,437,008-byte binary has SHA-256
+  `7A3D04E8AB8A5555A1D537D1830D5C2DAA02EA3430A99769786919026DE9144E`.
+  No upload, COM8, Web/HTTP/Browser, fixture or Device action occurred. P4-04 remains
+  under closure review; P4-08 remains frozen.
+- Architect personally reviewed the actual row-owned correction, all three committed
+  preview consumers, generic-reader semantics, host linkage/test invocation, trace
+  ownership, resources and cleanup, and returned explicit closure `GO`. The accepted
+  basis is the single exact 23-byte helper in `pending_tool_preview`, three P4-04
+  consumers using it, retained tests invoking that production helper and rejecting a
+  field above 23 bytes, strict host/static success, exact pinned compile success and
+  unchanged 65,628-byte global RAM. No schema, storage, policy, executor or Device
+  behavior was added.
+- Explicit residual risk: post-fix `loadPendingToolPreview` was not observed on the
+  Cardputer because the separately owned HWCDC path lost readiness and the Web handler
+  was inactive. Pre-fix Device A/B/C localized the exact helper boundary; the direct
+  production-helper host test plus firmware compile is accepted as proportional closure
+  evidence. No fixture existed and the exact-owned temporary host ELF was removed.
+- Before isolated staging, the frozen P4-08-only tracked patch relative to
+  `f439ff09b1c6dfa41c22fb9d137e047a5ae69eaf` had SHA-256
+  `76B83FBEB2D2694057617AE8ABCC7C3BBE3678B2B651546C53494C40AC369227`
+  over 60,842 normalized bytes. It remains outside P4-04 ownership.
+
+**Completed:** 2026-08-31 10:49:14 +03:00.
 
 ### Approved reopen gate
 
@@ -630,6 +766,9 @@ The bounded ordering is possible without reopening P4-01 or adding storage state
 - Update only `api_client.cpp`, `pending_tool_call.cpp`, `ssh_tool.h/.cpp`, `ssh_client.cpp`, focused
   `tests/host_tests.cpp`, and, only for a small no-network parser/default/bounds Device observation,
   the existing `CardputerAssistant.ino`, `SshTools.ino` and `SerialDiagnostics.ino` diagnostic path.
+- The exact write set for the second preview-reader correction is
+  `pending_tool_preview.h/.cpp`, `pending_tool_call.cpp`, focused `tests/host_tests.cpp`,
+  and this trace. P4-08 hunks in shared files remain frozen and excluded.
 - The row-owned commit also includes this trace update. It includes no P4-05 behavior or generated
   build/test artifacts.
 

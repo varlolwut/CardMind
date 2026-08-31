@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app_types.h"
+#include "json_string_reader.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,10 @@ struct PendingToolPreviewBodyResult {
     String error;
 };
 
+json_reader::JsonStringValueResult readCanonicalStringArgument(
+    const std::string& arguments,
+    const char* field,
+    std::size_t maximumBytes);
 PendingToolPreviewBodyResult buildPendingFileReplacementPreview(
     const std::string& currentPrefix,
     std::uint32_t currentBytes,
