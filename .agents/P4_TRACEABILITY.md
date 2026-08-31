@@ -61,10 +61,10 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-11 | Existing bounded known_hosts store with unconditional host-key-change block | Every mismatch blocks connection; user-removed pagination/rotation is not implemented | completed |
 | P4-12 | Removed by user: separate SSH profile diagnostics feature | Scope closed by explicit user decision; not implemented | removed_by_user |
 | P4-13 | Encrypted-at-rest evaluation and physical-access threat-model documentation only | No encrypted vault is implemented in P4; documentation states measured limitations and makes no unsupported encryption claim | completed |
-| P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | pending |
+| P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | completed |
 | P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | pending |
 | P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | pending |
-| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and acceptance are observable without terminal tabs or a separate journey subsystem; first real Cardputer private-key auth E2E runs here, with at most one authenticated CSRF-protected forget action for the exact selected profile whose host/port are resolved server-side | pending |
+| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and acceptance are observable without terminal tabs or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; first real Cardputer private-key auth E2E runs here, with at most one authenticated CSRF-protected forget action for the exact selected profile whose host/port are resolved server-side | pending |
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
 | P4-20 | Changed-boundary-only recovery and security acceptance | Verify only Phase 4 changed boundaries, including mismatch block, deletion of only the exact test-host known_hosts entry and byte-for-byte preservation of unrelated entries; broad re-certification of unchanged NVS/SD was removed by user | pending |
@@ -2065,3 +2065,399 @@ sdkconfig facts, installed ordinary NVS APIs, completed P4-01/P4-02 logical
 controls, documentation links and every physical-access/encryption/secure-erasure
 claim. The review confirmed no secret/private path/internal ID disclosure and no
 production, resource or cleanup obligation.
+
+**Publication:** local row checker passed for the exact two allowed paths.
+Commit `5002d316b8ae1c0a54723d99d7abeb6622fcfbb9` has exact required
+Author/Committer and authenticated GitHub MCP resolves the phase branch to that
+exact SHA. The publication report was sent to Architect before P4-14 activation.
+
+## P4-14 design gate
+
+**Status:** completed
+**Started:** 2026-08-31 13:52:41 +03:00.
+**Completed:** 2026-08-31 18:28:11 +03:00.
+
+### Scope lock
+
+- ROADMAP Phase 4 requires per-project and per-chat SSH profile ceilings so model
+  permission can use only an explicitly bounded remote profile without increasing global
+  authority.
+- The ceiling identity is the P4-01 non-zero opaque `uint64_t` profile ID. Its canonical
+  persisted/authenticated representation is exactly 16 lowercase hexadecimal characters;
+  profile name and NVS index are never authority.
+- An empty project or chat ceiling inherits its parent/global selection. A non-empty
+  ceiling is conjunctive: every non-empty project/chat value must parse exactly and equal
+  the one globally selected, currently available profile ID. A mismatch, malformed value,
+  deleted profile, recreated profile at the same index, or unavailable selected profile
+  makes `SshRead`, `SshMutate`, and `SftpReadWrite` unavailable.
+- A ceiling never selects or reconnects a profile. It only narrows the current global
+  selected-profile authority and remains subordinate to the existing global -> project ->
+  chat -> message permission hierarchy, mandatory confirmations, trust checks, pending
+  authority identity, audit, timeout, output and cancellation boundaries.
+- The rule applies only to model-issued `ssh_command`, fixed Safe Actions and model SFTP.
+  Existing direct-user Device/Web terminal, manual SFTP and transfer authority is unchanged.
+
+### Explicit non-goals
+
+- No profile set/list ceiling, wildcard, name/index matching, profile auto-selection,
+  fallback, role system, new capability, policy framework or permission hierarchy.
+- No secret/key/password/passphrase persistence or exposure change, no SSH profile storage
+  rewrite, no transaction/recovery layer and no background execution.
+- No Device or WebUI controls/assets in this row; P4-16/P4-17 own those journeys. P4-14
+  provides only the persisted/runtime contract and existing authenticated API fields needed
+  by those later controls.
+- No manual terminal restriction and no change to arbitrary-command/Safe-Action/SFTP
+  classification or confirmation semantics.
+- No profile ID in model schemas, prompts, chat context, tool arguments/results, audit,
+  serial output or Shared-workspace project bundles.
+
+### Inventory and ownership
+
+- `ProjectDocument::sshProfile` already persists as project JSON `ssh_profile`, is copied by
+  duplicate-project, and is currently treated by `resolveChatToolPermissions` as a blanket
+  SSH disable whenever non-empty. It is a forward-compatible string field, not yet a stable
+  ID contract and has no current UI writer.
+- `ChatDocument` has no SSH ceiling. Project-chat metadata version 1 is written atomically by
+  `writeAtomicJsonSdFile`; its reader already permits optional typed fields. The narrow
+  compatible extension is an optional `ssh_profile` string that defaults empty for existing
+  metadata and is emitted on the next metadata save; no format-version migration is needed.
+- `saveProject` and `saveProjectChatMetadata` increment authoritative project/chat revisions.
+  Their existing atomic SD replacement/recovery owns crash, SD-removal, write failure and
+  retry behavior. P4-14 adds no cross-store transaction: a profile selection or metadata
+  change is independently authoritative, and any intermediate mismatch denies model SSH.
+- `resolveChatToolPermissions` is the single availability producer for all three SSH
+  capabilities before `buildToolRequestPlan`; its consumers are Device prompt/permission/
+  pending paths, voice, Web prompt/retry/pending/state paths and retained serial policy
+  diagnostics. Every caller currently supplies only a Boolean `sshToolIsAvailable()` result.
+- The Device capability view is not allowed to read SD/NVS while rendering. It currently
+  builds a synthetic active `ChatDocument` from cached `activeChatToolPolicy` only, so the
+  new chat ceiling must be cached beside the existing active-chat model/instructions/policy
+  fields. `activateChat`, `createAndActivateChat`, project/chat reload and the existing
+  exact-owned diagnostic create/restore assignments are the complete replacement writers;
+  project switching clears the cached value. Unrelated title/model/instructions/policy/draft
+  saves preserve it. Every resolver view must pass both the cached policy and cached ceiling.
+- Device SSH availability is currently a cached Boolean. Its complete refresh owners are
+  startup, the four provisioning-portal returns in `KeyboardNavigation.ino`, the direct Device
+  SSH Tools return, and Web Console return. `runSshTool()` can create/select/edit/delete profiles
+  and install a private key, so its caller must refresh after both identity and completeness
+  mutations. Web Console already calls `initializeChats()` to reload active project/chat state,
+  but does not refresh SSH availability after its profile CRUD handlers. P4-14 replaces the
+  Boolean with the selected available profile ID, refreshes it at all seven owners, and never
+  performs an SD/NVS read from a render function.
+- `sshToolIsAvailable()` loads only the selected runtime profile and checks its existing
+  completeness. `loadSshProfile` already obtains and revalidates the selected public summary
+  before JIT-reading that selected profile's secrets; the minimal extension returns that same
+  summary ID with the loaded profile so availability and identity cannot race or be paired
+  across two independent loads.
+- Pending SSH/SFTP records already bind project/chat revisions and a SHA-256 identity over the
+  selected opaque profile ID, host, port, username, auth mode, private-key ID and trusted host
+  fingerprint. Approval reloads the current project/chat, rebuilds the current request plan,
+  requires the schema to remain included and revalidates the authority identity; P4-14 does
+  not alter the pending format.
+- The authenticated Web chat state already carries project/chat policy metadata. Existing
+  project and chat settings routes are authenticated/CSRF-protected persistence owners; they
+  can carry optional canonical ceiling IDs without a new route. P4-16/P4-17 later add controls.
+- `handleProjectSettingsRawComplete()` currently saves from `activeProject` and refreshes only the
+  project summary list. Because `saveProject()` derives but does not write back the incremented
+  revision, a second save in the same Web session can reuse a stale revision. P4-14 owns one
+  handler-local canonical project reload/assignment after a successful save; `saveProject()` and
+  its other callers remain unchanged. The chat settings handler already reloads active chat after
+  save and needs no corresponding rewrite.
+- Project bundles live in Shared workspace and can be read by workspace tools. They must not
+  export local opaque authority IDs. Existing project bundle `ssh_profile` remains present as
+  an empty compatibility field; import clears it, and chat ceilings are not exported/imported.
+  Imported chat SSH policies remain forced Off by the existing import boundary.
+- Profile deletion does not rewrite project/chat metadata. The immutable stale ID remains
+  visibly configured but unavailable, so deletion/recreation at the same index cannot redirect
+  authority. Metadata cleanup remains owned by explicit project/chat edit or deletion.
+- Device prompt execution constructs the request plan and synchronously invokes the model/tool
+  callback on the main loop stack; its cancellation callback only calls `M5Cardputer.update()`
+  and reads Escape, and does not dispatch keyboard menus or profile mutation. Web prompt/retry
+  execution and direct tool dispatch remain inside one synchronous `server.handleClient()`
+  callback; no nested `handleClient()` exists, and all profile save/select/delete handlers run
+  only as separate callbacks. The Web SSH worker does not mutate profiles. Therefore no profile
+  selection/edit/delete can interleave between plan construction and direct-Allow JIT load.
+  Ask remains the only cross-turn path and retains its existing revision/authority revalidation.
+
+### Minimal design
+
+1. Add exact pure profile-ID parse/format helpers to the already existing, host-linked
+   `tool_policy.h/.cpp`, shared by persistence settings, authenticated state, runtime policy and
+   retained host tests. The parser accepts exactly 16 lowercase hexadecimal characters representing
+   a non-zero `uint64_t`; the formatter emits that exact representation. Settings accept empty or
+   any parser-valid ID independently of the currently selected profile. No Web/storage/test caller
+   reimplements the length/hex/zero rule, and no new codec module or build plumbing is introduced.
+2. Add one host-testable authority predicate to existing `tool_policy`: parse each non-empty
+   project/chat ceiling through the shared codec and conjunctively compare it to a non-zero
+   available selected ID. Invalid or mismatched input returns false; it never mutates policy and
+   remains separate from settings validation.
+3. Extend the existing selected-profile JIT loader to return the already verified public profile
+   ID with the runtime profile. Expose `sshToolAvailableProfileId()` returning that ID only when
+   the same profile is complete, otherwise zero; retain `sshToolIsAvailable()` as the Boolean
+   compatibility wrapper for direct-user/non-policy consumers and clear loaded secret strings.
+4. Replace the Device cached availability Boolean with the available selected profile ID. Cache
+   the active chat ceiling beside its other active fields, update it on every active chat load,
+   create, reload, clear and exact-owned diagnostic replacement, and refresh the selected ID at
+   startup, all four provisioning returns, direct Device SSH Tools return and Web Console return.
+   Device display and request-plan construction use these same caches; no render performs
+   persistence I/O. Static ownership proves every non-diagnostic profile selection/profile CRUD/
+   private-key installation path returns through one of these refresh sites.
+5. Replace only the router's Boolean SSH availability input with the available selected profile
+   ID. Use the pure ceiling predicate once and apply its Boolean result identically to `SshRead`,
+   `SshMutate` and `SftpReadWrite`; leave `resolveToolPolicy` unchanged.
+6. Add optional chat `ssh_profile` persistence with empty legacy default and atomic existing
+   writer ownership. Preserve the existing project field and tighten only new authenticated
+   writes to empty-or-canonical values; malformed legacy persisted values remain readable but
+   fail closed in policy resolution.
+7. Expose project/chat ceiling strings and the formatted selected available profile ID only in the
+   authenticated chat-state response. Existing project/chat settings handlers accept optional
+   ceiling values: missing preserves, empty clears, and any shared-codec-valid non-zero ID saves
+   even when it is not currently selected; malformed input fails before save. After each successful
+   project settings save, reload and assign the canonical stored project in that handler before any
+   subsequent request; this preserves the saved ceiling and current revision without changing
+   `saveProject()` globally. Web displayed capability state and request plans both resolve from the
+   same current available ID.
+8. Keep opaque IDs out of portable Shared-workspace bundles by exporting/importing an empty
+   project compatibility field and not adding a chat ceiling field to bundle records.
+9. Do not add selected identity to `ToolRequestPlan`: direct-Allow execution cannot interleave
+   profile mutation under the existing single main-loop/WebServer scheduling described above.
+   Retain a static scheduling proof for that exclusion; if a re-entrant mutation owner is later
+   found, stop before implementation rather than silently relying on this design.
+
+### Frozen proof matrix
+
+- Pure host cases: unavailable/zero selected ID denies; both empty ceilings preserve existing
+  availability; project-only, chat-only and both matching the selected ID allow; either mismatch
+  denies; malformed length/uppercase/non-hex/zero IDs deny; changing selected ID proves stale
+  delete/recreate authority cannot redirect.
+- Codec host cases call the production parser/formatter directly: all non-zero uint64 boundaries
+  round-trip as 16 lowercase hex; empty, short/long, uppercase, non-hex and zero reject. Settings
+  validation accepts empty or any canonical non-zero ID without consulting current selection.
+- Policy host cases execute the production ceiling predicate and prove its matching/mismatching
+  result cannot elevate global/project/chat Off or change Ask/mandatory behavior; Files/Web remain
+  unchanged. Applying that one result identically to `SshRead`, `SshMutate` and `SftpReadWrite` in
+  `tool_router` is static wiring evidence; the retained host binary does not link or call the router.
+- Storage/static cases: old project-chat metadata without `ssh_profile` loads as empty; save/load
+  retains canonical chat ID; project and chat metadata revision changes invalidate a pending
+  approval; all resolver callers provide the same selected available ID; profile name/index are
+  absent from ceiling matching.
+- Revision integration cases: two successive authenticated project ceiling updates/clear in one
+  Web session each reload the canonical project and advance its stored revision; a pending call
+  created before either change is stale. The saved ceiling survives each reload. Existing chat
+  save/reload behavior advances chat revision without a broad persistence rewrite.
+- Disposable read-only Device/static inventory: every active-chat replacement refreshes policy and ceiling together;
+  unrelated saves preserve the cached ceiling; startup, four provisioning returns, direct Device
+  SSH Tools return and Web Console return refresh the selected available ID; every non-diagnostic
+  profile/completeness mutation reaches one of those sites; no render path loads profile or chat
+  persistence.
+- Resolver consistency host/runtime cases: for matching, project-mismatch and chat-mismatch inputs,
+  Device and Web displayed capability resolution has the same SSH availability and included schema
+  result as `resolveChatToolRequestPlan` built from the same project/chat/current-ID state.
+- Authenticated API/static/Web cases: project/chat state returns only the two non-secret IDs;
+  settings preserve on omission, clear on empty, reject malformed values and save any canonical
+  non-zero value without requiring current selection; no Web asset/control is added in this row.
+- Security/static cases: no ceiling key appears in model schema/request/result producers, audit,
+  serial result or bundle output; bundle import/export clears local authority; pending authority
+  still binds selected ID and trusted fingerprint.
+- Disposable read-only scheduling inventory: Device plan construction through direct execution is one main-loop call
+  stack; Web plan construction through direct execution is one non-reentrant `handleClient()`
+  callback; cancellation, model streaming and the Web SSH worker expose no profile CRUD call.
+  Therefore direct-Allow cannot switch authority, while Ask continues to revalidate current
+  revisions and selected authority before execution.
+- Focused runtime after review: one collision-checked exact-owned project/chat and two existing
+  profile IDs prove matching access, project mismatch, chat mismatch, stale ID after selection
+  change, reboot persistence, authenticated state/update behavior and exact restore/cleanup. The
+  test must not change manual terminal authority or require recovery escalation.
+- Resource/build: strict host/static/Web checks first, then one exact pinned 3.2.1 build/upload and
+  only the changed policy/persistence boundary if normal Device readiness is available. Measure
+  free heap, largest block, stack and policy-resolution latency against the retained idle/active-SSH
+  baselines; no reset/freeze and no material latency regression.
+
+### Forbidden effects
+
+- No ceiling may select a profile, turn an unavailable capability into available, override Off/
+  Ask/mandatory confirmation, or survive a current-ID mismatch by matching name or index.
+- Authenticated settings validation must not require a ceiling to equal the current selection;
+  only runtime authority matching compares against the current available selected ID.
+- No invalid/stale metadata may fall back to the globally selected profile; it fails closed.
+- No secret or key bytes/path, private-key binding, trusted fingerprint or internal authority hash
+  may enter project/chat metadata, authenticated state, bundle, model context, logs or diagnostics.
+- No bundle/import, failed save, SD removal, cancellation or reboot may broaden authority or leave
+  a partial ceiling grant. Existing atomic metadata remains the sole recovery owner.
+- No Device/Web UI redesign, manual terminal behavior change, new storage/policy abstraction,
+  profile mutation, broad migration or unrelated hardening.
+
+### Expected write set
+
+- `.agents/P4_TRACEABILITY.md`.
+- `firmware/CardputerAssistant/src/app_types.h`.
+- `firmware/CardputerAssistant/src/project_chat_storage.cpp`.
+- `firmware/CardputerAssistant/src/project_bundle.cpp`.
+- `firmware/CardputerAssistant/src/tool_policy.h` and `tool_policy.cpp`.
+- `firmware/CardputerAssistant/src/tool_router.h` and `tool_router.cpp`.
+- `firmware/CardputerAssistant/src/ssh_client.h` and `ssh_client.cpp`.
+- `firmware/CardputerAssistant/src/ssh_tool.h` and `ssh_tool.cpp`.
+- Existing Device cache/router consumers only: `firmware/CardputerAssistant/CardputerAssistant.ino`,
+  `DeviceMenus.ino`, `KeyboardNavigation.ino`, `VoiceAndSpeech.ino`, `SerialDiagnostics.ino` and
+  `src/web_console.cpp`. `KeyboardNavigation.ino` owns both the four provisioning refreshes and the
+  direct SSH Tools return refresh; `web_console.cpp` owns the handler-local canonical project reload.
+- Existing authenticated state owner `firmware/CardputerAssistant/src/web_console_state.h` and
+  `web_console_state.cpp`.
+- Existing authenticated route/header owner
+  `firmware/CardputerAssistant/src/web_console_routes.cpp`; this path was added only after the
+  runtime A/B proved the project raw request boundary dropped the optional query argument and the
+  installed WebServer 3.2.1 `hasHeader` contract proved that an empty collected header cannot encode
+  clear without an explicit non-empty envelope.
+- Retained proportional checks only: `tests/host_tests.cpp`, which calls the production codec and
+  conjunctive authority predicate. Call-site, cache-owner and scheduling ownership use a disposable
+  read-only inventory; authenticated settings/state/revision behavior uses the focused runtime path.
+- Any need for another production file is a scope signal: stop and simplify or reclassify before
+  expanding this list.
+
+### Review gate
+
+- Architect pre-edit review returned `STOP` on 2026-08-31 for three concrete omissions: the Device
+  active-chat/selected-ID cache lifecycle, separation of canonical settings codec from runtime
+  authority matching, and the stale direct-Allow scheduling gap. The corrected frozen design above
+  now inventories every cache refresh owner (including four `KeyboardNavigation.ino` returns and
+  Web Console return), uses one shared codec without selection-dependent write validation, and
+  records the non-reentrant Device/Web scheduling exclusion. Production edits remain forbidden
+  pending one bounded Architect re-review of this consolidated correction.
+- That bounded re-review returned `STOP` on two remaining omissions: the direct Device SSH Tools
+  return was missing from cache refresh ownership, and repeated project settings saves could reuse
+  stale `activeProject.summary.revision`. The final correction above adds the exact SSH Tools return
+  (including private-key installation), proves all non-diagnostic mutation returns, and confines
+  canonical project reload/assignment to the successful Web handler. Production edits remain
+  forbidden pending final bounded Architect GO on this gate.
+- Architect then simplified ownership before implementation: the two pure canonical ID helpers and
+  conjunctive matcher stay in the existing host-linked `tool_policy.h/.cpp`; no
+  `ssh_profile_id.*` module or workflow edit is permitted. This does not change the cache or revision
+  corrections. Final bounded Architect pre-edit review returned `GO` on 2026-08-31 for this exact
+  frozen design and write set. Any newly discovered production path or required file reopens the
+  minimality gate before expansion.
+- Architect review of the initial evidence patch returned `STOP` on two concrete proof/ownership
+  defects. First, the added P4-14 block in `tests/web_console_ui_test.mjs` read multiple production
+  sources and asserted literal fragments, exact cache-refresh counts and source ordering instead of
+  executing the changed boundary; the complete P4-14 imports/reads/assertions are absent and were
+  not replaced. Second, the two `runUiSearchEndToEndTest()` active-chat replacement paths refreshed
+  the SSH ceiling but not the matching cached tool policy; each now assigns policy and ceiling from
+  the same created/restored chat object. The retained host cases execute the production codec and
+  predicate, disposable read-only inventory owns call-site/cache/scheduling proof, and the frozen
+  authenticated runtime scenario owns settings/state/revision observations. Expensive evidence is
+  paused pending Architect review of this corrected mapping and exact diff.
+- Architect correction review then returned `GO` for continued verification. Strict production-helper
+  host tests and the unchanged WebUI smoke passed, and the current pinned 3.2.1 source compiled at
+  3,436,930 flash bytes with 65,668 global bytes. The first unattended runtime attempt retained normal
+  Device/Web readiness and completed exact-owned project/profile/pending cleanup, but its first
+  post-save assertion combined project ceiling, chat ceiling and selected available ID and therefore
+  could not assign the mismatch to production or harness state. The pre-A/B assumption that query
+  arguments remained parsed for a `text/plain` POST was disproved by the narrower probe and installed
+  ESP32 WebServer 3.2.1 source: the raw-handler branch does not call `_parseArguments(searchStr)`, query
+  arguments are parsed only in non-raw/form branches, and `hasArg` may observe stale prior arguments.
+  No production defect was assigned until A/B localized the raw request input boundary. The failed
+  attempt is classified as insufficient harness observability and is not repeated unchanged. One
+  narrower disposable A/B probe may distinguish project
+  persistence, chat persistence and selected-ID availability before the full runtime proof resumes.
+- The authorized narrower A/B probe retained normal project/profile cleanup and separately observed
+  `project_saved=false`, `chat_saved=true`, and selected available profile ID unchanged/non-zero before
+  and after both saves. It therefore assigns the failure to the authenticated project raw-settings
+  input boundary before `saveProject`, not to profile availability, chat metadata persistence or state
+  formatting. The exact-owned project/profile inventory was restored; the one temporary probe file
+  left by a PowerShell finalizer spelling error was identified by its exact GUID path and removed with
+  literal-path verification. Production remains frozen. The smallest proposed correction is one
+  collected optional encoded SSH-profile header on the existing raw project-settings route: missing
+  preserves, encoded empty clears, encoded canonical ID saves through the existing validator. This
+  would add only existing route owner `web_console_routes.cpp` to the write set; no new route, codec,
+  storage field, compatibility layer or framework is justified. Architect ownership approval is
+  required before expanding the frozen path set or editing production.
+- Architect ownership/design review returned `GO` for exactly one correction: collect
+  `X-CardMind-Ssh-Profile-Encoded` in the existing header owner and consume only that header in the
+  existing project raw-settings handler. Missing preserves; exact `v1:` clears; exact
+  `v1:<16-lowerhex-nonzero-ID>` strips the prefix and then uses the existing production validator;
+  every other non-empty value fails before save. The query argument becomes unsupported/ignored,
+  with no dual path or fallback. This expands the frozen write set only by
+  `web_console_routes.cpp`; no helper, codec, route, schema, storage field, UI asset or retained
+  source-text test is authorized.
+- Final-runtime holder observed the ordinary COM8 dispatcher answer one `PING` with `PONG`, then
+  timed out because it incorrectly required exact equality with `WEB_CONSOLE result=ready` even
+  though firmware emits `WEB_CONSOLE result=ready address=...`; canonical retained harnesses match
+  that marker as a prefix. HTTP login, fixtures and model execution never started, the exact-owned
+  disposable file was removed, and no serial/recovery chain followed. Architect therefore
+  reclassified the event as a diagnostic harness defect: normal Device/Web readiness was not shown
+  lost, and the earlier P4-17 backend-proof deferral is superseded. One HTTP-only authenticated
+  lifecycle against the already-started Web Console now owns the remaining P4-14 backend evidence
+  and must close the console through its existing authenticated CSRF-protected route after exact
+  cleanup, with no HTTP or serial probe afterward. P4-17 retains only its real UI-control journey as
+  the production header producer; it does not inherit this backend proof.
+- That one HTTP-only lifecycle proved the established Web Console, authenticated login/session and
+  baseline project/chat/workspace/SSH/pending/status reads were healthy, then stopped at its bounded
+  `profiles` setup/discovery stage before creating the project fixture or exercising any ceiling
+  header. The disposable report intentionally exposed no profile identity or credential and did not
+  distinguish a capacity/precondition rejection from another operation inside that bounded stage;
+  no second HTTP lifecycle is permitted to refine it. Its two-pass exact-owned cleanup and original
+  selection/inventory verification passed, the reset/resource consistency check passed, the
+  authenticated CSRF-protected console close passed, and the exact disposable file was removed.
+  No HTTP or serial operation followed. The real header and match/mismatch runtime observations
+  therefore remain unobserved pending Architect closure/evidence ownership decision; this failure
+  is not evidence of a production defect.
+- Final source with the collected encoded-header boundary passed the exact pinned M5Stack ESP32
+  3.2.1 compile: 3,437,062 flash bytes and 65,668 global bytes, leaving 262,012 bytes for local
+  variables. This supersedes the earlier pre-header 3,436,930-byte flash snapshot for final-source
+  compatibility. No post-header Device runtime heap, largest-block, stack or latency measurement is
+  claimed; the terminated HTTP lifecycle observed only a Boolean reset/resource consistency pass.
+- Fresh bounded read-only code review returned `STOP` on evidence ownership only and found no
+  row-owned production defect. It confirmed the installed WebServer 3.2.1 raw/header semantics,
+  header-only minimality, producer/consumer paths and exact cleanup. Its resource-record blocker is
+  resolved by the final-source compile evidence above. Its remaining blocker is the explicitly
+  unobserved authenticated preserve/clear/canonical save+reload and match/mismatch runtime behavior,
+  which requires an Architect canonical acceptance/ownership decision; no production correction or
+  additional Device/Web lifecycle is indicated or permitted.
+- Architect personal closure review also returned evidence-only `STOP`: it found no row-owned code,
+  authority, secret-exposure, minimality, vendor-semantics, resource or cleanup defect in the actual
+  22-path diff, but rejected completion because neither compilation/static router wiring nor the
+  production-helper host cases execute the changed authenticated route. The approved materially
+  narrower proof removes profile discovery/CRUD and model/tool execution: after one exact final-source
+  pinned upload, it uses only the already-selected available profile ID to observe project/chat
+  preserve, clear, canonical reload, malformed no-write and matching/mismatching capability state in
+  one canonical Web Console lifecycle. First real readiness loss or unavailable selected-ID ends the
+  path without recovery escalation.
+- The exact final-source image was then uploaded once through the pinned 3.2.1 toolchain boundary:
+  the 3,437,248-byte binary write completed and its flash hash verified. One subsequent canonical
+  lifecycle answered the single readiness handshake, emitted the prefix-matched Web Console ready
+  marker, kept one serial owner active throughout authenticated HTTP work and stopped normally after
+  one `EXIT`; no reset, retry, recovery action, profile CRUD, model/tool call or remote mutation ran.
+- That authenticated lifecycle observed the changed route before its only failed expectation:
+  project canonical save/reload, missing-header preserve, exact `v1:` clear and canonical restore
+  passed; raw-ID, `v2:` and uppercase malformed headers each returned 400 without changing the
+  stored ceiling/revision; chat canonical save, omitted-field preserve, exact empty clear and
+  canonical restore passed; the already-selected available profile remained canonical, non-zero and
+  unchanged. A distinct canonical synthetic project ceiling was accepted and survived state reload.
+- The lifecycle then stopped at the disposable assertion that every mismatched SSH capability must
+  literally report `effective=unavailable, source=availability`: `sr` did not. Read-only ownership
+  analysis classifies this as a proof expectation defect, not a production defect. A newly created
+  chat's existing upper policy is SSH `Off`, and unchanged `resolveToolPolicy` intentionally preserves
+  the stronger `Deny` and its policy source when availability is false; only non-denied permissions
+  are rewritten to `Unavailable/Availability`. The shared production ceiling predicate and router
+  wiring still make the mismatched availability input false for all three SSH capabilities, but this
+  run did not observe a non-denied policy case and therefore does not claim the literal unavailable
+  state for project/chat mismatch.
+- Before surfacing that test-stage failure, the script completed both exact-owned cleanup passes,
+  verified original project/chat/workspace inventory and selection plus the unchanged selected
+  available profile and reset reason, and reported no cleanup error. The holder stopped Web Console
+  normally and removed the exact script/stdout/stderr paths; literal absence of all three disposable
+  paths was verified. No HTTP or serial operation followed. Failure-path output intentionally did not
+  publish heap/largest-block/stack/latency values, so no new runtime resource measurement is claimed.
+  Production remains frozen and the composite lifecycle is not repeated; Architect must decide
+  whether the stronger inherited `Deny` plus direct production-predicate evidence is sufficient or
+  explicitly authorize a different, narrower non-denied-policy observation.
+- Architect personal closure review returned `GO` on 2026-08-31 for the exact current 22-path diff
+  and evidence. It accepted the stronger-Deny interpretation: the shared P4-14 predicate makes SSH
+  availability false for a mismatch, `tool_router` applies that same false value to `SshRead`,
+  `SshMutate` and `SftpReadWrite`, and unchanged `resolveToolPolicy` correctly preserves an already
+  stronger explicit `Deny`/policy source instead of replacing it with
+  `Unavailable`/`Availability`. Production host evidence covers both precedence cases, so the
+  disposable literal-state expectation was wrong while the required forbidden effect was proven:
+  a mismatch cannot grant or redirect SSH authority. The review also accepted the final-source
+  compile/upload evidence, authenticated project/chat route observations, exact cleanup and the
+  truthful absence of failure-path numeric runtime metrics; no further Device/Web lifecycle or
+  production/test correction is required.

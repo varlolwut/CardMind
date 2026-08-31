@@ -105,6 +105,8 @@ using SshCommandOutputCallback =
     std::function<OperationResult(const std::uint8_t*, std::size_t)>;
 
 OperationResult loadSshProfile(SshProfile& profile);
+OperationResult loadSshProfileWithId(SshProfile& profile,
+                                     std::uint64_t& profileId);
 OperationResult loadSelectedSshAuthority(SshAuthoritySummary& authority);
 OperationResult saveSshProfile(const SshProfile& profile);
 OperationResult loadSshProfileSummaries(

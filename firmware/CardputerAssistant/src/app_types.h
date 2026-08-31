@@ -150,6 +150,7 @@ struct ChatDocument {
     std::string instructions;
     std::string draft;
     ScopedToolPermissionPolicy toolPolicy = defaultNewChatToolPermissionPolicy();
+    String sshProfile;
     String projectId;
     std::string contextSummary;
     std::uint32_t summarizedMessageCount = 0;

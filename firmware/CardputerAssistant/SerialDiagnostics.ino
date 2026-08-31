@@ -183,7 +183,7 @@ void runWebSearchRoundTripTest()
         cardputer::resolveChatToolRequestPlan(
             requestSettings, project, chat,
             {cardputer::ToolMessageIntentMode::Required, webGroup},
-            false, false, webStorageWritable, false);
+            false, false, webStorageWritable, 0);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {
         Serial.printf(
@@ -5143,7 +5143,7 @@ void runToolApiTest()
         cardputer::resolveChatToolRequestPlan(
             requestSettings, project, chat,
             {cardputer::ToolMessageIntentMode::Required, filesGroup},
-            true, true, true, false);
+            true, true, true, 0);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {
         Serial.printf(

@@ -1314,6 +1314,14 @@ OperationResult loadSshProfileSummaries(
 
 OperationResult loadSshProfile(SshProfile& profile)
 {
+    std::uint64_t profileId = 0;
+    return loadSshProfileWithId(profile, profileId);
+}
+
+OperationResult loadSshProfileWithId(SshProfile& profile,
+                                     std::uint64_t& profileId)
+{
+    profileId = 0;
     std::vector<SshProfileSummary> profiles;
     std::size_t selectedIndex = 0;
     const OperationResult result = loadSshProfileSummaries(profiles, selectedIndex);
@@ -1377,6 +1385,7 @@ OperationResult loadSshProfile(SshProfile& profile)
         privateKeyPassphrase,
         privateKeyIdFound ? privateKeyId : 0,
     };
+    profileId = selected.id;
     return {true, ""};
 }
 

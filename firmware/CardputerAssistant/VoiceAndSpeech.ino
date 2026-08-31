@@ -328,7 +328,7 @@ void retryLastRequest()
             fileWorkspaceReady &&
                 currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
-            cardputer::sshToolIsAvailable());
+            cachedSshToolProfileId);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {
         menuStatus = planError;

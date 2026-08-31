@@ -27,6 +27,7 @@ struct SshSafeActionArgumentsResult {
 };
 
 bool isSshToolName(const std::string& name);
+std::uint64_t sshToolAvailableProfileId();
 bool sshToolIsAvailable();
 SshCommandArgumentsResult parseSshCommandArguments(
     const std::string& argumentsJson);

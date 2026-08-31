@@ -51,7 +51,7 @@ JsonDocument buildProjectHeader(const ProjectDocument& project,
     header["model"] = project.model;
     header["api_profile"] = project.apiProfile;
     header["tool_policy"] = encodedToolPolicy;
-    header["ssh_profile"] = project.sshProfile;
+    header["ssh_profile"] = "";
     header["context_byte_budget"] = project.contextByteBudget;
     header["maximum_output_tokens"] = project.maximumOutputTokens;
     header["automatic_compaction"] = project.automaticCompaction;
@@ -350,7 +350,7 @@ ProjectDocumentResult importProjectBundle(const String& filename)
     imported.model = header["model"].as<const char*>();
     imported.apiProfile = header["api_profile"].as<const char*>();
     imported.toolPolicy = importedToolPolicy;
-    imported.sshProfile = header["ssh_profile"].as<const char*>();
+    imported.sshProfile.clear();
     imported.contextByteBudget = header["context_byte_budget"].as<std::uint32_t>();
     imported.maximumOutputTokens = header["maximum_output_tokens"].as<std::uint32_t>();
     imported.automaticCompaction = header["automatic_compaction"].as<bool>();

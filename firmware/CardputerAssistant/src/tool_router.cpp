@@ -241,7 +241,7 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
-    bool sshAvailable)
+    std::uint64_t selectedSshProfileId)
 {
     ToolAvailabilitySet availability = {};
     const bool webAvailable = webStorageWritable &&
@@ -254,12 +254,16 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
         filesReadable;
     availability[static_cast<std::size_t>(
         ToolCapability::FilesWriteDelete)] = filesWritable;
+    const bool sshAvailable = sshProfileCeilingsAllowSelected(
+        selectedSshProfileId,
+        project.sshProfile.c_str(), project.sshProfile.length(),
+        chat.sshProfile.c_str(), chat.sshProfile.length());
     availability[static_cast<std::size_t>(ToolCapability::SshRead)] =
-        sshAvailable && project.sshProfile.isEmpty();
+        sshAvailable;
     availability[static_cast<std::size_t>(ToolCapability::SshMutate)] =
-        sshAvailable && project.sshProfile.isEmpty();
+        sshAvailable;
     availability[static_cast<std::size_t>(ToolCapability::SftpReadWrite)] =
-        sshAvailable && project.sshProfile.isEmpty();
+        sshAvailable;
     return resolveToolPolicy(
         defaultGlobalToolPermissionPolicy(), settings.masterToolPolicy,
         project.toolPolicy, chat.toolPolicy, intent, availability);
@@ -273,11 +277,11 @@ ToolRequestPlan resolveChatToolRequestPlan(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
-    bool sshAvailable)
+    std::uint64_t selectedSshProfileId)
 {
     const ToolPolicyResolutionResult resolution = resolveChatToolPermissions(
         settings, project, chat, intent, filesReadable, filesWritable,
-        webStorageWritable, sshAvailable);
+        webStorageWritable, selectedSshProfileId);
     return buildToolRequestPlan(resolution, intent);
 }
 

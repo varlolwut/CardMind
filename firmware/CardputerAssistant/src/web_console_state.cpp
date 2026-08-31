@@ -131,6 +131,7 @@ OperationResult buildWebConsoleChatState(
     const ProjectDocument& activeProject,
     const ChatDocument& activeChat,
     const ToolPolicyResolutionResult& toolPermissions,
+    std::uint64_t availableSshProfileId,
     std::size_t maximumContextBytes,
     std::uint32_t revision,
     JsonDocument& document)
@@ -143,6 +144,12 @@ OperationResult buildWebConsoleChatState(
         chatPolicy.error != ToolPolicyCodecError::None ||
         toolPermissions.error != ToolPolicyContractError::None) {
         return {false, "Tool permission policy could not be encoded"};
+    }
+    const EncodedSshProfileId encodedAvailableProfile =
+        encodeSshProfileId(availableSshProfileId);
+    if (availableSshProfileId != 0 &&
+        encodedAvailableProfile.error != SshProfileIdCodecError::None) {
+        return {false, "Available SSH profile ID could not be encoded"};
     }
     for (std::size_t index = 0; index < kToolCapabilityCount; ++index) {
         if (scopedPermissionName(activeProject.toolPolicy[index]) == nullptr ||
@@ -172,6 +179,14 @@ OperationResult buildWebConsoleChatState(
     document["chat_tool_policy"] = JsonString(
         chatPolicy.encoded.value.data(), kEncodedToolPolicyLength,
         JsonString::Copied);
+    document["project_ssh_profile"] = activeProject.sshProfile;
+    document["chat_ssh_profile"] = activeChat.sshProfile;
+    document["ssh_available_profile_id"] = "";
+    if (availableSshProfileId != 0) {
+        document["ssh_available_profile_id"] = JsonString(
+            encodedAvailableProfile.value.data(), encodedAvailableProfile.length,
+            JsonString::Copied);
+    }
     document["chat_model"] = activeChat.model;
     document["ssh_tools_enabled"] = legacySshToolsEnabled(
         activeChat.toolPolicy);

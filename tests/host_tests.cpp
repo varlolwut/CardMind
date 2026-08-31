@@ -790,6 +790,46 @@ void testPendingToolPreview()
             "File preview accepted inconsistent completeness metadata");
 }
 
+void testSshProfileCeilings()
+{
+    const auto one = cardputer::decodeSshProfileId(
+        "0000000000000001", 16);
+    const auto maximum = cardputer::decodeSshProfileId(
+        "ffffffffffffffff", 16);
+    require(one.error == cardputer::SshProfileIdCodecError::None &&
+                one.profileId == 1 &&
+                maximum.error == cardputer::SshProfileIdCodecError::None &&
+                maximum.profileId == UINT64_MAX,
+            "Canonical SSH profile IDs did not decode exactly");
+    const auto encoded = cardputer::encodeSshProfileId(UINT64_MAX);
+    require(encoded.error == cardputer::SshProfileIdCodecError::None &&
+                std::string(encoded.value.data(), encoded.length) ==
+                    "ffffffffffffffff",
+            "SSH profile ID formatter did not emit 16 lowercase hex characters");
+    require(cardputer::encodeSshProfileId(0).error ==
+                cardputer::SshProfileIdCodecError::InvalidValue &&
+                cardputer::isValidSshProfileCeiling("", 0) &&
+                !cardputer::isValidSshProfileCeiling("0000000000000000", 16) &&
+                !cardputer::isValidSshProfileCeiling("0000000000000001x", 17) &&
+                !cardputer::isValidSshProfileCeiling("000000000000000A", 16) &&
+                !cardputer::isValidSshProfileCeiling("000000000000000g", 16),
+            "SSH profile ceiling validation accepted a noncanonical ID");
+    require(cardputer::sshProfileCeilingsAllowSelected(
+                1, "", 0, "", 0) &&
+                cardputer::sshProfileCeilingsAllowSelected(
+                    1, "0000000000000001", 16, "", 0) &&
+                cardputer::sshProfileCeilingsAllowSelected(
+                    1, "0000000000000001", 16,
+                    "0000000000000001", 16) &&
+                !cardputer::sshProfileCeilingsAllowSelected(
+                    0, "", 0, "", 0) &&
+                !cardputer::sshProfileCeilingsAllowSelected(
+                    1, "0000000000000002", 16, "", 0) &&
+                !cardputer::sshProfileCeilingsAllowSelected(
+                    1, "", 0, "0000000000000002", 16),
+            "Project/chat SSH ceilings did not conjunctively narrow selected authority");
+}
+
 void testToolPolicyPrecedence()
 {
     const std::array<cardputer::ToolPermission, 3> permissions = {
@@ -1980,6 +2020,7 @@ int main()
         testLargePromptTitle();
         testInstructionPrecedence();
         testToolPolicyContracts();
+        testSshProfileCeilings();
         testToolMessageIntent();
         testToolMessageIntentCodec();
         testToolCatalogAndRequestPlan();

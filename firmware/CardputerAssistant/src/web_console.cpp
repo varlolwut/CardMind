@@ -57,6 +57,7 @@ constexpr const char* kPromptFrameContentType =
     "application/vnd.cardmind.prompt-v1";
 constexpr const char* kToolIntentHeader = "X-CardMind-Tool-Intent";
 constexpr const char* kToolPolicyHeader = "X-CardMind-Tool-Policy";
+constexpr const char* kSshProfileHeader = "X-CardMind-Ssh-Profile-Encoded";
 constexpr std::size_t kMaximumWebFileChunkBytes = 12288;
 
 struct RawTextRequestState {
@@ -929,7 +930,7 @@ WebPendingContinuationInputs loadWebPendingContinuationInputs()
     const bool writable = storage.state == SdStorageState::Ready;
     result.plan = resolveChatToolRequestPlan(
         consoleSettings, project.project, chat.chat, webPendingContext.intent,
-        readable, writable, writable, sshToolIsAvailable());
+        readable, writable, writable, sshToolAvailableProfileId());
     result.error = webToolRequestPlanError(result.plan);
     if (result.error.isEmpty() &&
         (entry == nullptr ||
@@ -1626,14 +1627,17 @@ void handleState()
         const bool readable = storage.state == SdStorageState::Ready ||
                               storage.state == SdStorageState::Full;
         const bool writable = storage.state == SdStorageState::Ready;
+        const std::uint64_t availableSshProfileId =
+            sshToolAvailableProfileId();
         const ToolPolicyResolutionResult toolPermissions =
             resolveChatToolPermissions(
                 consoleSettings, activeProject, activeChat,
                 {ToolMessageIntentMode::Auto, 0}, readable, writable,
-                writable, sshToolIsAvailable());
+                writable, availableSshProfileId);
         const OperationResult built = buildWebConsoleChatState(
             requestSettings, activeProject, activeChat, toolPermissions,
-            activeProject.contextByteBudget, chatRevision, document);
+            availableSshProfileId, activeProject.contextByteBudget,
+            chatRevision, document);
         if (!built.success) {
             sendWebJsonError(server, 500, built.error);
             return;
@@ -1990,7 +1994,7 @@ void processWebPrompt(std::string prompt,
     const ToolRequestPlan toolPlan = resolveChatToolRequestPlan(
         consoleSettings, activeProject, storedChat.chat, intent,
         toolStorageReadable, toolStorageWritable, toolStorageWritable,
-        sshToolIsAvailable());
+        sshToolAvailableProfileId());
     if (toolPlan.error != ToolPolicyContractError::None) {
         sendWebJsonError(server, 500, "Tool permission policy could not be resolved");
         return;
@@ -2120,7 +2124,7 @@ void handlePromptRetry()
     const ToolRequestPlan toolPlan = resolveChatToolRequestPlan(
         consoleSettings, activeProject, stored.chat, retryIntent,
         toolStorageReadable, toolStorageWritable, toolStorageWritable,
-        sshToolIsAvailable());
+        sshToolAvailableProfileId());
     if (toolPlan.error != ToolPolicyContractError::None) {
         sendWebJsonError(server, 500, "Tool permission policy could not be resolved");
         return;
@@ -2441,7 +2445,7 @@ void handlePendingAllowChat()
                 const ToolRequestPlan updatedPlan = resolveChatToolRequestPlan(
                     consoleSettings, project.project, updatedChat.chat,
                     webPendingContext.intent, readable, writable, writable,
-                    sshToolIsAvailable());
+                    sshToolAvailableProfileId());
                 if (webToolRequestPlanError(updatedPlan).isEmpty() &&
                     entry != nullptr &&
                     toolRequestPlanIncludesSchema(updatedPlan, entry->schema)) {
@@ -2622,6 +2626,21 @@ void handleProjectSettingsRawComplete()
         sendWebJsonError(server, 400, "Project tool policy is invalid");
         return;
     }
+    const bool sshProfileProvided = server.hasHeader(kSshProfileHeader);
+    String requestedSshProfile = activeProject.sshProfile;
+    if (sshProfileProvided) {
+        const String encodedSshProfile = server.header(kSshProfileHeader);
+        if (!encodedSshProfile.startsWith("v1:")) {
+            sendWebJsonError(server, 400, "Project SSH profile ID is invalid");
+            return;
+        }
+        requestedSshProfile = encodedSshProfile.substring(3);
+    }
+    if (!isValidSshProfileCeiling(
+            requestedSshProfile.c_str(), requestedSshProfile.length())) {
+        sendWebJsonError(server, 400, "Project SSH profile ID is invalid");
+        return;
+    }
     std::uint32_t contextBytes = 0;
     std::uint32_t outputTokens = 0;
     const String automaticCompaction = server.header("X-CardMind-Auto-Compact");
@@ -2643,12 +2662,14 @@ void handleProjectSettingsRawComplete()
     const bool previousAutomaticCompaction = activeProject.automaticCompaction;
     const ScopedToolPermissionPolicy previousToolPolicy =
         activeProject.toolPolicy;
+    const String previousSshProfile = activeProject.sshProfile;
     activeProject.instructions = std::move(request.body);
     activeProject.model = model;
     activeProject.contextByteBudget = contextBytes;
     activeProject.maximumOutputTokens = outputTokens;
     activeProject.automaticCompaction = automaticCompaction == "1";
     activeProject.toolPolicy = decodedToolPolicy.policy;
+    activeProject.sshProfile = requestedSshProfile;
     OperationResult result = saveProject(activeProject);
     if (!result.success) {
         activeProject.instructions = std::move(previousInstructions);
@@ -2657,9 +2678,16 @@ void handleProjectSettingsRawComplete()
         activeProject.maximumOutputTokens = previousOutputTokens;
         activeProject.automaticCompaction = previousAutomaticCompaction;
         activeProject.toolPolicy = previousToolPolicy;
+        activeProject.sshProfile = previousSshProfile;
         sendWebJsonError(server, 500, result.error);
         return;
     }
+    ProjectDocumentResult stored = loadProject(activeProject.summary.id);
+    if (!stored.success) {
+        sendWebJsonError(server, 500, stored.error);
+        return;
+    }
+    activeProject = std::move(stored.project);
     result = refreshProjects();
     if (!result.success) {
         sendWebJsonError(server, 500, result.error);
@@ -3040,12 +3068,17 @@ void handleChatSettings()
             encodedToolPolicy.c_str(), encodedToolPolicy.length());
     String model = server.arg("model");
     model.trim();
+    const bool sshProfileProvided = server.hasArg("ssh_profile");
+    const String requestedSshProfile = sshProfileProvided
+        ? server.arg("ssh_profile") : activeChat.sshProfile;
     const std::string modelUtf8 = model.c_str();
     if (decodedToolPolicy.error != ToolPolicyCodecError::None ||
-        modelUtf8.size() > 240 || !isValidUtf8(modelUtf8)) {
+        modelUtf8.size() > 240 || !isValidUtf8(modelUtf8) ||
+        !isValidSshProfileCeiling(
+            requestedSshProfile.c_str(), requestedSshProfile.length())) {
         sendWebJsonError(
             server, 400,
-            "Chat settings require a valid tool policy and UTF-8 model up to 240 bytes");
+            "Chat settings require a valid tool policy, model and SSH profile ID");
         return;
     }
     ChatDocumentResult updated = loadProjectChatMetadata(
@@ -3056,6 +3089,7 @@ void handleChatSettings()
     }
     updated.chat.toolPolicy = decodedToolPolicy.policy;
     updated.chat.model = model;
+    updated.chat.sshProfile = requestedSshProfile;
     updated.chat.summary.updatedAt = currentTimestamp();
     OperationResult result = saveProjectChatMetadata(updated.chat);
     if (result.success) {

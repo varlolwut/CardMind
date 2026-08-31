@@ -144,6 +144,7 @@ StorageSizeResult measureUpdatedProjectChatMetadata(
     document["draft"] = chat.draft.c_str();
     document["tool_policy"] = policy.encoded.value.data();
     document["ssh_tools_enabled"] = legacySshToolsEnabled(chat.toolPolicy);
+    document["ssh_profile"] = chat.sshProfile;
     document["context_summary"] = chat.contextSummary.c_str();
     document["summarized_message_count"] = chat.summarizedMessageCount;
     document["model"] = chat.model;
@@ -431,6 +432,10 @@ OperationResult validateProjectChatMetadataValues(const ChatDocument& chat)
     if (chat.model.length() > kMaximumProjectChatModelBytes ||
         !isValidUtf8(chat.model.c_str())) {
         return {false, "Project chat model must be valid UTF-8 up to 240 bytes"};
+    }
+    if (chat.sshProfile.length() > 120 ||
+        !isValidUtf8(chat.sshProfile.c_str())) {
+        return {false, "Project chat SSH profile must be valid UTF-8 up to 120 bytes"};
     }
     if (chat.summarizedMessageCount > chat.summary.messageCount) {
         return {false, "Project chat summary covers more messages than the chat contains"};
@@ -774,12 +779,15 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
     filter["revision"] = true;
     filter["tool_policy"] = true;
     filter["ssh_tools_enabled"] = true;
+    filter["ssh_profile"] = true;
     filter["summarized_message_count"] = true;
     filter["model"] = true;
     JsonDocument document;
     const DeserializationError error = deserializeJson(
         document, file, DeserializationOption::Filter(filter));
     const JsonVariantConst model = document.as<JsonObjectConst>()["model"];
+    const JsonVariantConst sshProfile =
+        document.as<JsonObjectConst>()["ssh_profile"];
     if (error || !document["version"].is<std::uint32_t>() ||
         document["version"].as<std::uint32_t>() != kProjectChatFormatVersion ||
         !document["project_id"].is<const char*>() || !document["id"].is<const char*>() ||
@@ -795,6 +803,9 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
     if (!model.isUnbound() && !model.is<const char*>()) {
         return {false, {}, "Project chat model must be a string when present"};
     }
+    if (!sshProfile.isUnbound() && !sshProfile.is<const char*>()) {
+        return {false, {}, "Project chat ssh_profile must be a string when present"};
+    }
     ChatDocument chat;
     chat.projectId = document["project_id"].as<const char*>();
     chat.summary.id = document["id"].as<const char*>();
@@ -806,6 +817,9 @@ ChatDocumentResult parseProjectChatMetadata(File& file,
     chat.summary.revision = document["revision"].as<std::uint32_t>();
     if (!model.isUnbound()) {
         chat.model = model.as<const char*>();
+    }
+    if (!sshProfile.isUnbound()) {
+        chat.sshProfile = sshProfile.as<const char*>();
     }
     const bool sshToolsEnabled = document["ssh_tools_enabled"].as<bool>();
     const JsonVariantConst canonicalPolicy =
@@ -939,6 +953,7 @@ OperationResult writeProjectChatMetadataWithRevision(
     document["draft"] = chat.draft.c_str();
     document["tool_policy"] = policy.encoded.value.data();
     document["ssh_tools_enabled"] = legacySshToolsEnabled(chat.toolPolicy);
+    document["ssh_profile"] = chat.sshProfile;
     document["context_summary"] = chat.contextSummary.c_str();
     document["summarized_message_count"] = chat.summarizedMessageCount;
     document["model"] = chat.model;

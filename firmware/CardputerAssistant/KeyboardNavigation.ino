@@ -1411,8 +1411,8 @@ void handleKeyboard()
             } else if (aiMenuIndex == 1) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
-                cachedSshToolAvailable = sshStorageReady &&
-                    cardputer::sshToolIsAvailable();
+                cachedSshToolProfileId = sshStorageReady
+                    ? cardputer::sshToolAvailableProfileId() : 0;
                 cardputer::markOperation("idle");
                 menuStatus = "Configuration portal closed";
                 renderAiMenu();
@@ -1669,8 +1669,8 @@ void handleKeyboard()
             } else if (voiceMenuIndex == 2) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
-                cachedSshToolAvailable = sshStorageReady &&
-                    cardputer::sshToolIsAvailable();
+                cachedSshToolProfileId = sshStorageReady
+                    ? cardputer::sshToolAvailableProfileId() : 0;
                 cardputer::markOperation("idle");
             } else {
                 currentScreen = Screen::MainCarousel;
@@ -1717,6 +1717,8 @@ void handleKeyboard()
                 renderQrEntry();
             } else if (utilitiesMenuIndex == 5) {
                 const cardputer::OperationResult result = runSshTool();
+                cachedSshToolProfileId = sshStorageReady
+                    ? cardputer::sshToolAvailableProfileId() : 0;
                 menuStatus = result.error;
                 currentScreen = Screen::UtilitiesMenu;
                 renderUtilitiesMenu();
@@ -1799,8 +1801,8 @@ void handleKeyboard()
             } else if (webConsoleMenuIndex == 5) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
-                cachedSshToolAvailable = sshStorageReady &&
-                    cardputer::sshToolIsAvailable();
+                cachedSshToolProfileId = sshStorageReady
+                    ? cardputer::sshToolAvailableProfileId() : 0;
                 cardputer::markOperation("idle");
                 menuStatus = "Configuration portal closed";
                 renderWebConsoleMenu();
@@ -2003,8 +2005,8 @@ void handleKeyboard()
             } else if (deviceMenuIndex == 5) {
                 cardputer::markOperation("provisioning");
                 cardputer::runProvisioningPortal(settings);
-                cachedSshToolAvailable = sshStorageReady &&
-                    cardputer::sshToolIsAvailable();
+                cachedSshToolProfileId = sshStorageReady
+                    ? cardputer::sshToolAvailableProfileId() : 0;
                 cardputer::markOperation("idle");
                 const cardputer::OperationResult result = applyDisplayAndCpuSettings(settings);
                 menuStatus = result.success ? String("Settings portal closed") : result.error;

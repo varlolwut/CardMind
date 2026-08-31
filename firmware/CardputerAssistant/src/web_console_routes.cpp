@@ -51,8 +51,9 @@ void configureWebConsoleRoutes(WebServer& server,
         "X-CardMind-Auto-Compact",
         "X-CardMind-Tool-Intent",
         "X-CardMind-Tool-Policy",
+        "X-CardMind-Ssh-Profile-Encoded",
     };
-    server.collectHeaders(headers, 11);
+    server.collectHeaders(headers, 12);
     server.on("/", HTTP_GET, handler(handlers, WebConsoleRouteHandler::Root));
     server.on("/login", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Login));
     server.on("/logout", HTTP_POST, handler(handlers, WebConsoleRouteHandler::Logout));

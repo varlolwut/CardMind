@@ -84,14 +84,20 @@ bool isSshToolName(const std::string& name)
     return name == "ssh_command";
 }
 
-bool sshToolIsAvailable()
+std::uint64_t sshToolAvailableProfileId()
 {
     SshProfile profile;
-    const OperationResult loaded = loadSshProfile(profile);
+    std::uint64_t profileId = 0;
+    const OperationResult loaded = loadSshProfileWithId(profile, profileId);
     const bool available = loaded.success && sshProfileIsComplete(profile);
     profile.password = "";
     profile.privateKeyPassphrase = "";
-    return available;
+    return available ? profileId : 0;
+}
+
+bool sshToolIsAvailable()
+{
+    return sshToolAvailableProfileId() != 0;
 }
 
 SshCommandArgumentsResult parseSshCommandArguments(

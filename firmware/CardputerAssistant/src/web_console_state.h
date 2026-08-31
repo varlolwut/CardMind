@@ -29,6 +29,7 @@ OperationResult buildWebConsoleChatState(
     const ProjectDocument& activeProject,
     const ChatDocument& activeChat,
     const ToolPolicyResolutionResult& toolPermissions,
+    std::uint64_t availableSshProfileId,
     std::size_t maximumContextBytes,
     std::uint32_t revision,
     JsonDocument& document);

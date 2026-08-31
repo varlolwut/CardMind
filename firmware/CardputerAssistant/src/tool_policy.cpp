@@ -194,6 +194,80 @@ DecodedToolMessageIntent decodeToolMessageIntent(
     };
 }
 
+EncodedSshProfileId encodeSshProfileId(std::uint64_t profileId) noexcept
+{
+    EncodedSshProfileId result = {};
+    if (profileId == 0) {
+        result.error = SshProfileIdCodecError::InvalidValue;
+        return result;
+    }
+    constexpr char kHexDigits[] = "0123456789abcdef";
+    result.length = kEncodedSshProfileIdLength;
+    for (std::size_t index = 0; index < result.length; ++index) {
+        const std::size_t shift = (result.length - index - 1) * 4;
+        result.value[index] = kHexDigits[(profileId >> shift) & 0x0F];
+    }
+    result.value[result.length] = '\0';
+    result.error = SshProfileIdCodecError::None;
+    return result;
+}
+
+DecodedSshProfileId decodeSshProfileId(
+    const char* text,
+    std::size_t length) noexcept
+{
+    if (text == nullptr || length != kEncodedSshProfileIdLength) {
+        return {0, SshProfileIdCodecError::InvalidLength};
+    }
+    std::uint64_t profileId = 0;
+    for (std::size_t index = 0; index < length; ++index) {
+        const char value = text[index];
+        const std::uint8_t nibble = value >= '0' && value <= '9'
+            ? static_cast<std::uint8_t>(value - '0')
+            : value >= 'a' && value <= 'f'
+                ? static_cast<std::uint8_t>(value - 'a' + 10)
+                : UINT8_MAX;
+        if (nibble == UINT8_MAX) {
+            return {0, SshProfileIdCodecError::InvalidValue};
+        }
+        profileId = (profileId << 4) | nibble;
+    }
+    return profileId == 0
+        ? DecodedSshProfileId{0, SshProfileIdCodecError::InvalidValue}
+        : DecodedSshProfileId{profileId, SshProfileIdCodecError::None};
+}
+
+bool isValidSshProfileCeiling(
+    const char* text,
+    std::size_t length) noexcept
+{
+    return length == 0 ||
+        decodeSshProfileId(text, length).error == SshProfileIdCodecError::None;
+}
+
+bool sshProfileCeilingsAllowSelected(
+    std::uint64_t selectedProfileId,
+    const char* projectCeiling,
+    std::size_t projectCeilingLength,
+    const char* chatCeiling,
+    std::size_t chatCeilingLength) noexcept
+{
+    if (selectedProfileId == 0) {
+        return false;
+    }
+    const auto matches = [selectedProfileId](const char* text,
+                                              std::size_t length) {
+        if (length == 0) {
+            return true;
+        }
+        const DecodedSshProfileId decoded = decodeSshProfileId(text, length);
+        return decoded.error == SshProfileIdCodecError::None &&
+            decoded.profileId == selectedProfileId;
+    };
+    return matches(projectCeiling, projectCeilingLength) &&
+        matches(chatCeiling, chatCeilingLength);
+}
+
 ToolCapabilityGroupMaskResult toolCapabilityGroupMask(
     ToolCapability capability) noexcept
 {
