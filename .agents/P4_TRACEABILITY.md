@@ -67,7 +67,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and authenticated public state are observable without terminal tabs, SSH connection/trust mutation or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; the mismatch-only forget control is hidden in ordinary state and resolves host/port server-side | completed |
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
-| P4-20 | Changed-boundary-only recovery and security acceptance | Verify first real Cardputer private-key authentication together with the inseparable exact-owned host-key lifecycle: mismatch block, deletion of only the exact test-host known_hosts entry and byte-for-byte preservation of unrelated entries; broad re-certification of unchanged NVS/SD was removed by user | pending |
+| P4-20 | Changed-boundary-only recovery and security acceptance | Compose the observed real reachable-profile Cardputer private-key connection with completed P4-02/P4-11/P4-17 key, mismatch-before-auth, canonical exact-host rewrite and authenticated selected-host forget evidence; retain the exact-owned failed-endpoint lifecycle/cleanup evidence and explicit Phase 9 ownership of the unreachable rotatable-endpoint runtime; broad re-certification of unchanged NVS/SD was removed by user | completed |
 | P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; active SSH is compared with the existing active-SSH heap/largest-block/stack/latency baseline and must not regress or reset/freeze; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | pending |
 
 ## P4-01 design gate
@@ -3414,3 +3414,298 @@ No staging or commit is permitted before the later evidence-ready Architect clos
   SHA-256 `FD1103603FF9A98EE62787BF65B26916CE91528CE32BA68A9D4CE7C48C17B7E1`.
   No new numeric runtime resource claim is required for this UI integration row. P4-20 retains the
   mandatory real private-key mismatch/forget lifecycle; P4-07 retains backend transfer evidence.
+
+## P4-20 design gate
+
+**Status:** completed
+**Started:** 2026-09-01 02:43:58 +03:00.
+**Completed:** 2026-09-01 04:00:48 +03:00.
+
+### Initial scope lock
+
+- P4-20 owns changed-boundary recovery/security acceptance only: the first real Cardputer
+  private-key authentication and its inseparable exact-owned known_hosts lifecycle, an explicit
+  changed-key connection block, deletion of only the exact selected test-host entry through the
+  P4-17 authenticated CSRF forget control, and semantic entry-for-entry preservation of every
+  unrelated valid canonical record: the same host, port and fingerprint remain in the same relative
+  order without deletion, addition, replacement or rebinding.
+- Existing P4-02 key binding/JIT/zeroization, P4-11 unconditional mismatch block and bounded
+  known_hosts primitive, and P4-17 selected ID+host+port Web guard are the production owners. The
+  row begins as proof/integration work; no production edit is permitted unless concrete evidence
+  assigns a defect to this row and Architect approves the corresponding minimal design.
+- Explicitly excluded are broad NVS/SD recertification, known_hosts pagination/rotation or manager,
+  free host/port input, list/clear API, automatic trust/reconnect/retry, profile/key/storage schema,
+  recovery framework, background execution and any P5-P9 implementation.
+
+### Producer, consumer and environment inventory
+
+- P4-02 is the authoritative private-key owner: authenticated Device/Web installation creates an
+  opaque bound record; the selected profile loads only its exact record just in time and clears key
+  and passphrase buffers after the libssh2 in-memory authentication call. Its replacement,
+  capacity-failure preservation, reboot, bounded orphan cleanup and non-addressability evidence is
+  reused. The real Cardputer private-key authentication observation was intentionally assigned here.
+- P4-11 is the authoritative host-key owner: Device, Web, model SSH and model SFTP fail before
+  authentication on a stored mismatch; direct trust cannot replace a different stored fingerprint;
+  the bounded atomic rewrite preserves the authoritative target and owns checked temporary cleanup.
+  Pagination/rotation and a read/list API were explicitly removed. Its source/build evidence is
+  reused; this row owns the real changed-key lifecycle.
+- P4-17 owns the authenticated CSRF POST forget control. It accepts no host or port, requires a
+  retained mismatch, reloads the exact selected profile ID/host/port immediately before calling the
+  existing exact-host primitive, never reconnects and clears retained mismatch state only after a
+  confirmed successful forget. The ordinary-state control is hidden and disabled.
+- The existing selected user profile completed one read-only real Cardputer private-key connection
+  during inventory and reached `Connected`; it then ran one no-history capability marker proving
+  `sshd` and `ssh-keygen` are installed on Ubuntu 24.04 and disconnected normally. This is control
+  and environment evidence only, not the exact-owned acceptance fixture. No remote file/process,
+  profile/key, trust entry or selection was changed, the Browser tab closed and Web Console returned
+  exact stopped.
+- The local Windows host has no ready SSH service/listener and no existing inbound allow for the
+  available Python/Node route. Firewall/system configuration changes are forbidden, so the earlier
+  local-endpoint hypothesis is closed. The only eligible fixture host is the already trusted remote
+  host, using an unprivileged exact-owned directory and high ports without package installation,
+  daemon/service configuration or firewall changes.
+- Ubuntu Noble/OpenSSH documentation confirms explicit `Port`, private `HostKey`,
+  `AuthorizedKeysFile`, `PidFile`, public-key-only authentication and internal SFTP configuration.
+  OpenSSH rejects group/world-readable host private keys. The exact remote installation remains the
+  authority: its `sshd -t` validation must pass before any Device profile/trust mutation; otherwise
+  exact remote/local cleanup runs and the scenario stops.
+
+### Frozen minimal proof design
+
+1. Capture original CardMind profile/project/chat/workspace inventories and selections. Generate one
+   collision-checked local client key in an exact-owned temporary directory; keep its private bytes
+   and path out of argv/output, Browser text, model context, logs and retained files. Only its public
+   key enters the remote fixture. Choose one collision-checked remote directory and two currently
+   unbound high ports; any collision fails before mutation.
+2. Through the unchanged trusted control profile, create two unprivileged exact-owned OpenSSH
+   endpoints. Each has host key A, pre-generated replacement host key B, the same exact client public
+   key, public-key-only auth, an exact PID/log/config owner and a bounded supervisor. After the first
+   authenticated session disconnects, or at a bounded safety deadline, that endpoint stops A and
+   starts B on the same port. Validate both configurations and listeners before creating CardMind
+   trust state. No root/system path, package, service, firewall or unrelated remote state changes.
+3. Create one collision-checked temporary CardMind profile, install the one private key through the
+   existing write-only authenticated boundary, and retain its stable public ID only inside the local
+   automation state. Edit only that profile between the two ports while disconnected; P4-02 keeps the
+   exact key binding. The original selected profile remains unchanged and is restored at cleanup.
+4. Target port: require the first connection to be unknown, explicitly trust it and reach a real
+   private-key-authenticated terminal. Disconnect so endpoint A becomes B. Sentinel port: repeat the
+   same unknown/trust/private-auth observation and disconnect so sentinel A becomes B. A found or
+   mismatched initial entry is a collision and stops without accepting or replacing it.
+5. Reconnect the target port. It must publish mismatch blocked, never open/authenticate a terminal,
+   show the selected-host forget control and prevent profile mutation. Invoke forget once; require
+   success, idle state and no automatic reconnect. Reconnect the sentinel port: mismatch rather than
+   unknown proves its unrelated exact-owned entry survived the target rewrite. Invoke the same exact
+   forget once and require no reconnect.
+6. Reconnect each replacement endpoint once. Both must now present the unknown-host decision; do not
+   trust either, then disconnect. This proves both exact test entries are absent. Delete the exact
+   temporary profile/key owner, stop only verified fixture PIDs, remove only the collision-owned
+   remote/local directory and restore every original inventory/selection. Repeat absence/cleanup
+   checks as idempotent no-ops.
+
+`Idempotent no-op` here means that the exact owner/postcondition check observes an already absent
+fixture and performs no mutation. It never means replaying an index-based profile delete after the
+owned ID is absent, which could address a shifted unrelated profile, or invoking a remote cleanup
+script after that exact script and directory have intentionally removed themselves.
+
+### Failure ordering and cleanup ownership
+
+| Boundary | Fail-closed observation | Exact cleanup owner |
+|---|---|---|
+| Local key or remote preflight/config/listener | No CardMind profile or trust mutation | Local exact directory and verified remote fixture directory/PIDs |
+| Initial test host is found/mismatched rather than unknown | No trust/replace and no retry on that identity | Disconnect; remove profile/key and remote fixture; original trust remains untouched |
+| Key install/auth failure | No trust claim beyond an explicitly accepted exact endpoint; no key bytes/path output | P4-02 profile/key delete plus endpoint A-to-B supervisor if trust was accepted |
+| Disconnect or control-session failure after trust | Replacement B starts from the pre-created bounded supervisor without system changes | Retained exact mismatch enables only the selected-host Web forget |
+| Mismatch path | Connection closes before authentication; no trust prompt or mutation before explicit forget | P4-11 fail-closed owner; P4-17 exact selected ID/host/port forget owner |
+| Forget failure/unknown | No reconnect/retry and mismatch remains authoritative | Existing bounded atomic owner; report exact failure and preserve fixtures for the one safe cleanup attempt |
+| Browser/Device readiness loss | Test path ends immediately with no reset/probe/reupload/recovery chain | Run only already-reachable exact cleanup; any unremovable exact fixture fails the row and is reported |
+
+### Frozen proof matrix and forbidden effects
+
+- Reuse completed P4-02 host/device evidence for key-record binding/JIT/zeroization and completed
+  P4-11 static/build evidence for the bounded canonical exact-host rewrite. Runtime adds one
+  exact-owned sentinel record: after target forget, sentinel A-to-B must report mismatch, proving
+  that the same sentinel host/port remains bound to its original fingerprint rather than being
+  deleted, added, replaced or rebound; its relative order against the target is preserved by the
+  reviewed streaming rewrite. Sentinel forget and two final unknown-host observations prove exact
+  absence. No firmware diagnostic, authority digest or alternate parser/store is added.
+- Observe exact-owned private-key auth, target and sentinel unknown/trust, target and sentinel
+  mismatch-before-auth, forget visible only during retained mismatch, exact server-side selected
+  authority, no automatic reconnect and final unknown state. Do not execute a model tool or remote
+  workspace mutation through the test profile.
+- Record only boolean/stage/resource values. Never output a credential, key/passphrase byte or path,
+  host fingerprint, internal key/profile ID, trust-store content/hash/path, session token or remote
+  authority detail. Public fixture labels and port values remain only in local automation memory.
+- No production/test/asset/schema/route/policy/storage change is expected. Repository write set is
+  only `.agents/P4_TRACEABILITY.md`; all local/remote scripts, keys, configs, logs and markers are
+  exact-owned disposable fixtures and must be absent before closure. If a production defect appears,
+  stop, classify its owning row and obtain Architect authorization before any code edit.
+- No firewall/system/service/package mutation, no root command, no automatic trust, no free-host
+  forget, no broad known-host read/list/clear, no second live CardMind SSH session, no retry after
+  unknown outcome, no recovery escalation and no retained journey/endpoint framework.
+
+**Independent security/proof review:** initial `STOP`, followed by one blocker-only `GO` after the
+Architect decision and corrections recorded below. Persistent exact-owned proof may proceed only
+with the frozen canonical-semantic and transport-unknown contract.
+
+### Independent security/proof review STOP and ownership classification
+
+- The fresh read-only proof reviewer returned **STOP** before any exact-owned profile/key/trust or
+  remote fixture was created. The private-key authentication, mismatch-before-auth ordering, exact
+  selected-authority guard and no-reconnect mapping were accepted; two proof/ownership defects
+  remain.
+- First, the completed P4-11 rewrite primitives do not preserve unrelated input bytes as currently
+  claimed: they parse trimmed lines, discard blank lines and write canonical line terminators. A
+  sentinel mismatch proves semantic fingerprint preservation but cannot prove byte-for-byte
+  preservation of unrelated content. This is a concrete P4-11 production-boundary/acceptance defect,
+  not a P4-20 harness defect. P4-20 is paused from persistent mutation until Architect either
+  authorizes a minimal P4-11 reopen for untouched-byte preservation or records an explicit ROADMAP
+  reduction to canonical semantic preservation. P4-20 must not absorb that edit without ownership.
+- Second, a lost HTTP response after forget is an unknown outcome: the deletion may already have
+  committed and the handler may have cleared mismatch/capture before the caller observes a result.
+  The corrected proof marks the call attempted before sending. If transport becomes unknown while
+  the same Web session remains healthy, exactly one non-trusting connection to replacement B
+  classifies the authority: retained mismatch means deletion did not commit; unknown-host state
+  means it committed. The unknown-host branch is never trusted or retried. A readiness loss ends the
+  path with no classification probe or recovery chain. Confirmed failures retain their exact error
+  and are not repeated against an unchanged cause.
+- Reviewer lifecycle is closed. Production/device/remote state remains unchanged after the earlier
+  read-only capability inventory; only this trace records the STOP. The active matrix remains
+  P4-20 `in_progress` while Architect resolves the cross-row ownership decision.
+
+### Architect canonical-store scope decision
+
+- Architect explicitly decided not to reopen P4-11. ROADMAP requires mismatch blocking and the
+  bounded canonical store, not preservation of blank lines, surrounding whitespace or original
+  line-ending bytes. Those formatting bytes are not product data or P4 acceptance, and preserving
+  them would add parser/copy/resource complexity without security or user-visible value.
+- The superseding P4-20 contract is semantic and entry-for-entry: target forget must preserve every
+  unrelated valid canonical record with the same exact host, port and fingerprint, no deletion,
+  addition, replacement or rebinding, and the same relative order where observable. The target plus
+  sentinel A-to-B sequence above is the approved proportional runtime proof. The reviewer's
+  historical byte-for-byte STOP remains recorded as the reason for this explicit scope decision but
+  is no longer the active oracle.
+- The transport-unknown correction is approved: mark the call attempted before send and, only while
+  the same Web session is demonstrably healthy, make one non-trusting replacement-B connection to
+  classify mismatch as no commit versus unknown-host as committed. Never trust or retry that branch;
+  readiness/session loss terminates it without a recovery chain.
+- No production/test/code reopen, alternate parser/store, retained harness or framework is
+  authorized. Repository write ownership remains `ROADMAP.md` plus
+  `.agents/P4_TRACEABILITY.md`; all runtime fixtures remain disposable and exact-owned.
+- The same reviewer used its single blocker-only follow-up and returned **GO**: canonical semantic
+  preservation now matches the existing ordered rewrite, and the attempted-call plus one healthy-
+  session non-trusting B classification resolves the unknown-outcome oracle. Reviewer lifecycle is
+  closed and no production/parser/diagnostic/harness expansion was introduced.
+
+### Reboot-resumed exact-owned attempt and external transport blocker
+
+- On 2026-09-01 the resumed run first restored the complete visible 21-row plan with only P4-20
+  `in_progress`. One normal COM8 lifecycle reached exact `PONG` and
+  `WEB_CONSOLE result=ready`. Its disposable holder then received EOF because it had been launched
+  without a PTY; this was classified as a harness-stdin defect, not readiness loss. The already
+  active Console was retained by one passive PTY holder without repeating `PING` or `CONSOLE`, and
+  that holder later sent one `EXIT` and observed exact `WEB_CONSOLE result=stopped`.
+- The authenticated local HTTP path captured one original selected private-key profile and no open
+  terminal. The exact fixture name was collision-free. A direct create in key mode was rejected
+  before mutation because the existing lifecycle requires an installed key. The observed profile
+  count and selection remained unchanged. The corrected existing lifecycle created exactly one
+  temporary password-mode profile, installed one in-memory-generated RSA private key through the
+  write-only multipart boundary, switched the same stable opaque profile ID to key mode and cleared
+  the temporary password, passphrase and harness key buffers. No private key or private-key path was
+  written to local storage or emitted to output.
+- Through the unchanged trusted control profile, an exact-owned remote directory was created after
+  owner and path collision checks. Only the generated public key entered it. Four host keys and the
+  target/sentinel A/B configurations passed the installed OpenSSH `sshd -t`; both unprivileged high-
+  port A listeners had exact PID/config/log owners and were observed in `LISTEN`. No root, package,
+  service, firewall or system-path mutation occurred.
+- The first CardMind target connection failed before an unknown-host/trust/auth stage with exact
+  firmware classification `TCP connection to SSH host failed`; no test-host known_hosts entry was
+  created. A fresh control connection re-verified the exact owner and both listeners. Independent
+  default and IPv4 TCP connects from the local control machine to the same exact target port also
+  failed while the remote host still reported the listener. DNS exposed IPv4 only. This assigns the
+  failure to external inbound high-port reachability, not P4-02 key/JIT/authentication or P4-11
+  mismatch handling. Repeating the unchanged connection hypothesis is forbidden.
+- Cleanup succeeded after the failure: the verified remote cleanup stopped only the two exact PID
+  owners, removed the exact remote directory and then proved its absence; the temporary CardMind
+  profile and bound key were deleted, repeated state reads proved absence, and the original profile
+  count, order, selected opaque ID and closed-terminal state were restored. The in-memory credential,
+  cookie, CSRF, key and fixture references were cleared. No Browser tab, local key/script directory,
+  serial process, Web Console handler, remote listener, profile/key or test trust entry remains.
+- **External proof blocker opened 2026-09-01 03:45:25 +03:00:** the approved two-high-port fixture
+  cannot reach SSH protocol from CardMind on the current remote network. P4-20 remains
+  `in_progress`; production and trust state are clean. The next attempt requires an Architect-owned
+  proof decision or a different already-authorized reachable exact endpoint. It must not add a
+  firewall/system/service mutation, third-party tunnel, production proxy/port-forwarding feature,
+  system-host-key change, synthetic known_hosts mutation or acceptance waiver by implication.
+
+### Architect external-blocker and evidence-scope decision
+
+- Architect accepted the external ownership classification, the successful owner-checked cleanup
+  and its repeated-absence/no-mutation postconditions, permanently terminated the P4-20 endpoint
+  path and prohibited another server search or Device/HTTP lifecycle.
+  No firewall/system/service mutation, third-party tunnel, proxy/port forwarding, system-host-key
+  replacement, synthetic known_hosts edit, user action or implied waiver may be used to manufacture
+  a reachable oracle.
+- Mandatory product behavior is unchanged: a stored host-key mismatch blocks before
+  authentication, exact selected-host forget never reconnects automatically, and every unrelated
+  valid canonical record remains semantically preserved with the same host, port, fingerprint and
+  relative order and without deletion, addition, replacement or rebinding.
+- Phase 4 runtime evidence accepts the already observed real read-only Cardputer private-key
+  connection on the existing reachable selected profile together with completed P4-02 evidence for
+  exact profile-to-key binding, selected-record JIT load and zeroization; P4-11 actual code, pinned
+  build and independent review evidence for mismatch-before-auth and the bounded canonical
+  exact-host rewrite; and P4-17 actual authenticated UI plus exact selected ID, host and port forget
+  guard with no reconnect.
+- The exact-owned P4-20 attempt additionally proves collision/preflight discipline, installed
+  OpenSSH configuration validation, the new-profile/key lifecycle up to the external TCP boundary,
+  rejected direct key-mode create with no mutation, stable opaque identity, in-memory-only private
+  key handling, failure-path cleanup and exact restoration. It does not prove target/sentinel
+  unknown, trust, private-key authentication, mismatch or forget, and contributes no runtime heap,
+  stack or latency measurement.
+- Real rotatable-endpoint mismatch/forget runtime was not observed. Its dedicated real-endpoint
+  verification is now an explicit observation in the existing Phase 9 host-key-pinning/changed-key
+  security work, not a new feature, framework or Phase 4 retry. ROADMAP records this evidence-owner
+  change while preserving the Phase 4 security contract.
+- No production, retained test, asset, schema, route, build, Device or Web action remains in P4-20.
+  The closure package is documentation/trace evidence only. P4-20 remains `in_progress` until a
+  bounded independent final-evidence review and mandatory personal Architect closure verdict.
+
+### Independent final-evidence review STOP and cleanup-oracle correction
+
+- The fresh bounded proof reviewer returned one `STOP`: the phrase `idempotent cleanup` could be
+  read as requiring destructive cleanup entry points to be invoked after their exact identity no
+  longer exists, while the retained evidence described successful deletion followed by repeated
+  absence reads.
+- The corrected oracle is ownership-safe and matches the observed run. Remote cleanup first exited
+  successfully after stopping both verified PID owners and removing the exact directory; a separate
+  exact-path check then observed it absent and made no mutation. CardMind profile deletion first
+  returned success for the exact captured opaque ID/index; two subsequent canonical state reads
+  observed that ID/name absent, the original ordered ID inventory and selection restored, and made
+  no mutation. The bound key shares that exact profile owner.
+- Replaying `/api/ssh/delete` after the owned ID is absent would not be an idempotency proof: the
+  persisted index can shift and such a replay could target unrelated data. Re-running the deleted
+  remote script is likewise impossible by design. No endpoint, fixture, Device/Web lifecycle or
+  production action is authorized or needed for this wording correction. The same reviewer receives
+  one blocker-only follow-up against this exact no-op definition.
+- The same fresh reviewer returned final **GO** on that single blocker-only follow-up: the corrected
+  ownership-safe no-op definition and observed postcondition checks close the cleanup-idempotency
+  ambiguity. The reviewer lifecycle is closed.
+
+### Mandatory personal Architect closure review
+
+- Architect personally reviewed the actual trace-only diff, ignored canonical ROADMAP evidence-owner
+  decision, matrix, raw production boundary, cleanup semantics and accepted residual and returned
+  explicit **GO**. The index was empty and no production, retained test, asset or build file changed.
+- Accepted production evidence is limited exactly to the real reachable-profile private-key
+  connection; P4-02 binding/JIT/zeroization; P4-11 mismatch-before-auth and canonical exact-host
+  rewrite; P4-17 authenticated selected-ID/host/port forget guard; and the exact-owned P4-20
+  profile/key lifecycle through the independently confirmed external TCP boundary. No unavailable
+  target/sentinel runtime is claimed.
+- Forbidden effects and cleanup passed: no test trust entry, secret/path/fingerprint/internal-ID or
+  session exposure, root/system/network infrastructure mutation, production change or unchanged-
+  hypothesis retry; only exact verified PID/directory/profile/key owners were removed, repeated
+  absence checks made no mutation, original order/selection/terminal state returned and Web Console
+  stopped.
+- No P4-20 resource or latency result is claimed because production/build did not change and the
+  endpoint failed before SSH protocol. The accepted residual remains mandatory in Phase 9: one
+  reachable collision-owned rotatable endpoint must observe mismatch before authentication, exact
+  forget without reconnect and semantic preservation of unrelated canonical records.
