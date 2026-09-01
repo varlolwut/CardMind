@@ -587,7 +587,6 @@ WebStorageAccess webStorageAccessForRoute(WebConsoleRouteHandler route)
         case WebConsoleRouteHandler::SshTrust:
         case WebConsoleRouteHandler::SshForget:
         case WebConsoleRouteHandler::SftpDownload:
-        case WebConsoleRouteHandler::SshKeyComplete:
         case WebConsoleRouteHandler::FileSave:
         case WebConsoleRouteHandler::FileRename:
         case WebConsoleRouteHandler::FileDelete:
@@ -4547,10 +4546,19 @@ void handleSshKeyUploadData()
         }
         const OperationResult installed = installSshPrivateKey(
             kSshKeyUploadPath, sshKeyUploadProfileId);
-        if (requireSdWriteAccess(0, 0).success) {
-            SD.remove(kSshKeyUploadPath);
+        const OperationResult cleanupStorage = requireSdWriteAccess(0, 0);
+        String cleanupError;
+        if (!cleanupStorage.success) {
+            cleanupError = String("temporary upload cleanup failed: ") +
+                cleanupStorage.error;
+        } else if (!SD.remove(kSshKeyUploadPath)) {
+            cleanupError = "temporary upload cleanup failed";
         }
-        if (!installed.success) {
+        if (!cleanupError.isEmpty()) {
+            sshKeyUploadError = installed.success
+                ? String("SSH private key was installed, but ") + cleanupError
+                : installed.error + String("; ") + cleanupError;
+        } else if (!installed.success) {
             sshKeyUploadError = installed.error;
         }
         return;
@@ -4559,10 +4567,17 @@ void handleSshKeyUploadData()
         if (sshKeyUploadFile) {
             sshKeyUploadFile.close();
         }
-        if (requireSdWriteAccess(0, 0).success) {
-            SD.remove(kSshKeyUploadPath);
+        const OperationResult cleanupStorage = requireSdWriteAccess(0, 0);
+        String cleanupError;
+        if (!cleanupStorage.success) {
+            cleanupError = String("temporary upload cleanup failed: ") +
+                cleanupStorage.error;
+        } else if (!SD.remove(kSshKeyUploadPath)) {
+            cleanupError = "temporary upload cleanup failed";
         }
-        sshKeyUploadError = "SSH private-key upload was aborted";
+        sshKeyUploadError = cleanupError.isEmpty()
+            ? String("SSH private-key upload was aborted")
+            : String("SSH private-key upload was aborted; ") + cleanupError;
     }
 }
 

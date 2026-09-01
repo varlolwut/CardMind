@@ -9,8 +9,9 @@ after that row's own acceptance observations pass.
 - Architect authorized this isolated reopen after P4-17 review found that the existing
   indexed profile delete may leave the deleted `qN`/`iN` private-key binding orphaned
   until unrelated SSH initialization runs.
-- P4-02 is `completed` after personal Architect closure `GO`. P4-17 remains
-  `reopen_pending` and frozen until the exact P4-02 commit is published and remote-verified.
+- P4-02 is `completed` after personal Architect closure `GO`; commit
+  `0424155908f592e682492b38b357f944a4d2e7d3` is published and exact-remote-verified.
+  P4-17 is also `completed` after personal Architect closure `GO`.
 - Locked clause and observation: indexed profile deletion must move retained profile/key
   bindings together, remove inactive `qN`/`iN`, and remove only private-key records no
   remaining profile owns. Cleanup failure must be explicit; private-key bytes and IDs
@@ -98,8 +99,33 @@ after that row's own acceptance observations pass.
   absent. Production remains frozen.
 - The P4-02 post-verification cleanup and the corrected P4-17 invalid/valid upload completion route
   therefore have final-source review/build compatibility but no post-correction runtime observation.
-  This is an explicit evidence gap, not a performance or functional success claim; closure or
-  deferral requires Architect ownership and may not be inferred by this task.
+  This is an explicit evidence gap, not a performance or functional success claim. Architect
+  personally accepted it as a narrow residual for both isolated closures; any later contradictory
+  upload/delete observation must reopen its owning row.
+
+### P4-17 key-upload completion-route closure (2026-09-01)
+
+- Architect STOP before runtime evidence: `SshKeyComplete` was classified as a generic
+  storage-write route, so `allowWebStorageRoute()` could return a generic SD error before
+  `handleSshKeyUploadComplete()` consumed the saved install-plus-exact-cleanup outcome.
+- Minimal correction: the completion callback has no repeated generic storage gate. The
+  upload-data callback remains the sole mutation owner and keeps its explicit SD checks,
+  checked exact temporary-file removal, and combined install/cleanup result. No route,
+  schema, helper, retry, rollback, storage layer, or framework is added.
+- Fresh read-only code reviewer `01a05d96-58a5-7b51-8bb3-79b99ea299a6` returned `GO` on the
+  corrected stable diff: authentication/CSRF and upload-data SD gates remain intact,
+  completion consumes the saved partial/combined outcome, and no adjacent route or
+  responsibility changed. The reviewer is closed without follow-up.
+- P4-17 is `completed` after exact P4-02 remote verification and personal Architect review.
+- Architect personally reviewed the actual remaining two-path diff, multipart producer/state
+  machine/completion consumer, generic route ordering, pinned `FS::remove` bool semantics,
+  design/code reviews, parser/static checks, exact final build/upload and the external COM8-open
+  blocker, and returned closure `GO`. Accepted residual: post-fix invalid/valid upload and fixture
+  deletion were not runtime-observed because the sole red-teamed lifecycle stopped before opening
+  COM8. No runtime success/performance claim is made; any later contradictory upload/delete
+  observation must reopen its owning row.
+- The separate P4-02 indexed-delete orphan-cleanup correction is closed and published at
+  `0424155908f592e682492b38b357f944a4d2e7d3`; it is not owned or compensated for by P4-17.
 
 ## Scope lock
 
@@ -161,7 +187,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | completed |
 | P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | completed |
 | P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | completed |
-| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and authenticated public state are observable without terminal tabs, SSH connection/trust mutation or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; the mismatch-only forget control is hidden in ordinary state and resolves host/port server-side | reopen_pending |
+| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and authenticated public state are observable without terminal tabs, SSH connection/trust mutation or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; the mismatch-only forget control is hidden in ordinary state and resolves host/port server-side | completed |
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
 | P4-20 | Changed-boundary-only recovery and security acceptance | Compose the observed real reachable-profile Cardputer private-key connection with completed P4-02/P4-11/P4-17 key, mismatch-before-auth, canonical exact-host rewrite and authenticated selected-host forget evidence; retain the exact-owned failed-endpoint lifecycle/cleanup evidence and explicit Phase 9 ownership of the unreachable rotatable-endpoint runtime; broad re-certification of unchanged NVS/SD was removed by user | completed |
@@ -3577,7 +3603,9 @@ No staging or commit is permitted before the later evidence-ready Architect clos
 
 ### Terminal private-key upload cleanup reopen queue (2026-09-01)
 
-**Status:** `reopen_pending`; P4-05 remains the sole active row.
+**Status:** `completed` after exact P4-02 remote verification at
+`0424155908f592e682492b38b357f944a4d2e7d3`. P4-05 was remote-verified at
+`989a9877ba6a5b83ae7eb0fec524b02b13b5df02`.
 
 - Architect's terminal audit found that `web_console.cpp` installs an uploaded private key but
   ignores failure to remove the exact SD upload temporary file before reporting success. That can
@@ -3587,8 +3615,86 @@ No staging or commit is permitted before the later evidence-ready Architect clos
   without rolling back or changing the already-installed NVS key record. Success, install failure,
   deletion failure and aborted-upload cleanup require explicit ownership. No recovery manager,
   credential framework or adjacent SSH behavior belongs to the correction.
-- No P4-17 production, test, Device/Web, staging or commit action is permitted until P4-05 is
-  independently closed, published and remote-verified, then P4-17 becomes the sole active row.
+- After P4-05 was independently closed, published and remote-verified, P4-17 became the sole active
+  row and production remained frozen until its own inventory, minimal design, proof matrix,
+  expected write set and bounded independent pre-edit review were complete.
+
+#### Frozen cleanup correction gate
+
+**Started:** 2026-09-01 17:50:08 +03:00.
+**Status:** `pre_edit_review_GO`.
+
+- Exact owner and defect: `handleSshKeyUploadData()` writes the fixed Web-owned temporary file,
+  calls the completed P4-02 `installSshPrivateKey()` NVS boundary, then ignores the bool returned by
+  `SD.remove()`; `handleSshKeyUploadComplete()` consequently reports HTTP success even when
+  plaintext temporary key material may remain on removable SD. No NVS/key-record defect is proven.
+- Producers/consumers: the existing authenticated CSRF-protected multipart `/api/ssh/key` route is
+  the sole Web producer; its start/write/end/aborted statuses own one `File`, byte count, selected
+  opaque profile ID and error string. `installSshPrivateKey()` consumes the closed temporary file
+  and may durably replace the selected profile's opaque NVS binding before cleanup. The complete
+  handler is the sole HTTP result consumer. Session release retains only best-effort cleanup and is
+  not allowed to convert an earlier false success into recovery.
+- Pinned M5Stack ESP32 core `3.2.1` `FS::remove()` returns the underlying VFS bool. `VFSImpl::remove`
+  returns false for unmounted/invalid/missing/directory/allocation failures and returns
+  `unlink(...) == 0` for the exact path. Therefore the existing ignored return is a real observable
+  cleanup result, not a redundant check.
+- Minimal design: change only the existing upload end/abort error boundary in `web_console.cpp`.
+  After install, perform one write-access check and one checked exact-path removal. Delete success
+  preserves the install result; delete failure returns an explicit cleanup error, distinguishing an
+  already-installed key from an install failure, and never rolls back, rewrites or retries the NVS
+  record. Abort closes the file and performs one checked exact-path removal whenever storage is
+  writable. Because the pinned VFS returns the same false value for absence and removal failure,
+  every abort-side false is conservatively reported as cleanup failure rather than claiming absence.
+  This can add a fail-closed error to an already failed abort but cannot expose or retain bytes
+  silently. No path or key bytes enter the response.
+- State table: install success + delete success returns the existing success; install failure +
+  delete success returns the original install error; install success + storage/remove failure
+  returns explicit `installed but cleanup failed` and preserves the new binding; combined install
+  and cleanup failure reports both without retry; abort + successful checked delete reports aborted,
+  while storage/remove failure reports aborted plus cleanup failure. Session release remains best
+  effort and is not acceptance evidence.
+- Frozen proof: direct actual-diff and vendor-source review cover one install call, one checked
+  post-install delete, no rollback/retry and explicit combined errors. One existing authenticated
+  Web upload lifecycle with collision-checked exact-owned profile/key fixtures may execute valid
+  install+delete and invalid install+delete through the unchanged endpoint; a successful response or
+  uncombined install error is accepted only because the checked production branch completed. Unsafe
+  SD unmount/replacement or a test seam is forbidden, so deletion-failure and abort ordering remain
+  code-review evidence. Exact cleanup removes only the owned profile/key fixtures, verifies repeated
+  absence and restores selection/inventory. First readiness loss terminates the path.
+- Expected retained write set is exactly this canonical trace and
+  `firmware/CardputerAssistant/src/web_console.cpp`. No retained source-text assertion, helper,
+  module, route, schema, storage field, manager, framework, recovery path or UI asset is allowed.
+  Any build/upload/Web evidence is requested from Architect under the current external-action
+  workflow and begins only after bounded pre-edit review `GO`.
+
+- Independent pre-edit reviewer `01a05d74-35a6-7b93-9ca2-6060b56f5c92` returned one bounded
+  `STOP`: after a write failure closes the `File`, neither the handle nor pinned `VFSImpl::exists()`
+  distinguishes an absent temp from an inaccessible retained temp. The correction above chooses the
+  reviewer's smaller permitted fail-closed branch: no ownership field or helper is added, and abort
+  never interprets a false remove as successful cleanup. The same reviewer receives one final
+  blocker-only follow-up; production remains frozen until its verdict.
+- The reviewer's single blocker-only follow-up returned `GO`: always checking abort-side removal and
+  treating every false as explicit cleanup failure removes the ambiguity without an ownership bool.
+  Post-install ordering, combined errors, no rollback/retry, the two-path write set and proportional
+  proof remain coherent. The reviewer is closed and is not reused for code or closure review.
+
+#### Stable-diff review and cheap evidence
+
+- Workspace-safe checks passed: `git diff --check`; the diff is exactly this trace plus
+  `web_console.cpp`; the production patch has two checked exact-path removals ordered after install
+  or file close; no install call, route, schema, state field, helper, retry or rollback was added;
+  retained `tests/web_console_ui_test.mjs` is byte-identical to HEAD.
+- Running that unchanged Node suite inside the restricted phase-task sandbox failed before test
+  startup with `EPERM` while resolving the user-profile path. This is environment ownership and is
+  not acceptance evidence; the command is routed to Architect and is not retried or elevated here.
+- Fresh read-only code reviewer `01a05d7e-7dd5-7b62-9572-68e96654ecd1` returned `GO` on the exact
+  stable diff. It verified install-result preservation, one checked cleanup, explicit partial and
+  combined failures, abort fail-closed behavior, non-2xx error propagation, no automatic retry and
+  no key bytes or temporary path in messages. The reviewer is closed without follow-up.
+- The recorded UI-suite pass and pinned compile result preceded the completion-route correction;
+  they are compatibility evidence only and are not final build/runtime evidence for the corrected
+  P4-17 payload. Personal Architect closure accepted the later exact final build and explicit
+  runtime residual; no post-fix runtime behavior or performance is claimed.
 
 ## P4-20 design gate
 
