@@ -17,7 +17,12 @@ enum class ToolSchemaId : std::uint8_t {
     WriteFile = 4,
     AppendFile = 5,
     SshCommand = 6,
-    Count = 7,
+    SftpList = 7,
+    SftpRead = 8,
+    SftpWrite = 9,
+    SftpMove = 10,
+    SshSafeAction = 11,
+    Count = 12,
 };
 
 enum class ToolConfirmationReason : std::uint8_t {
@@ -28,7 +33,7 @@ enum class ToolConfirmationReason : std::uint8_t {
 
 constexpr std::size_t kToolCatalogSize =
     static_cast<std::size_t>(ToolSchemaId::Count);
-using ToolSchemaMask = std::uint8_t;
+using ToolSchemaMask = std::uint16_t;
 
 struct ToolCatalogEntry {
     ToolSchemaId schema;
@@ -36,6 +41,13 @@ struct ToolCatalogEntry {
     ToolCapabilityGroup group;
     ToolCapability capability;
 };
+
+struct SshSafeActionEntry {
+    const char* id;
+    const char* command;
+};
+
+constexpr std::size_t kSshSafeActionCount = 5;
 
 struct ToolRequestPlan {
     ToolMessageIntent intent;
@@ -47,6 +59,10 @@ struct ToolRequestPlan {
 };
 
 const std::array<ToolCatalogEntry, kToolCatalogSize>& toolCatalog() noexcept;
+const std::array<SshSafeActionEntry, kSshSafeActionCount>&
+sshSafeActionCatalog() noexcept;
+const SshSafeActionEntry* sshSafeActionEntryForId(
+    const std::string& id) noexcept;
 const ToolCatalogEntry* toolCatalogEntryForName(
     const std::string& name) noexcept;
 ToolRequestPlan buildToolRequestPlan(
@@ -62,7 +78,7 @@ ToolPermissionDecision toolRequestPlanDecision(
 ToolConfirmationReason toolConfirmationReason(
     ToolPermissionDecision decision,
     ToolSchemaId schema,
-    bool replacesExistingFile) noexcept;
+    bool mutatesExistingTarget) noexcept;
 std::uint8_t remainingRequiredGroupsAfterToolCall(
     const ToolRequestPlan& plan,
     std::uint8_t remainingGroups,

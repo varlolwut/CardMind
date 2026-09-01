@@ -1,6 +1,7 @@
 #include "tool_router.h"
 
 #include "file_workspace.h"
+#include "sftp_tool.h"
 #include "ssh_tool.h"
 #include "storage.h"
 #include "tool_activity.h"
@@ -155,6 +156,16 @@ ToolExecutionResult dispatchToolCall(
             return executeControlledWorkspaceTool(call, isCancelled);
         case ToolSchemaId::SshCommand:
             return executeSshTool(call, isCancelled);
+        case ToolSchemaId::SshSafeAction:
+            return executeSshSafeActionTool(call, isCancelled);
+        case ToolSchemaId::SftpList:
+            return executeSftpListTool(call, isCancelled);
+        case ToolSchemaId::SftpRead:
+            return executeSftpReadTool(call, isCancelled);
+        case ToolSchemaId::SftpWrite:
+            return executeSftpWriteTool(call, isCancelled);
+        case ToolSchemaId::SftpMove:
+            return executeSftpMoveTool(call, isCancelled);
         case ToolSchemaId::Count:
             break;
     }
@@ -230,7 +241,7 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
-    bool sshAvailable)
+    std::uint64_t selectedSshProfileId)
 {
     ToolAvailabilitySet availability = {};
     const bool webAvailable = webStorageWritable &&
@@ -243,10 +254,16 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
         filesReadable;
     availability[static_cast<std::size_t>(
         ToolCapability::FilesWriteDelete)] = filesWritable;
+    const bool sshAvailable = sshProfileCeilingsAllowSelected(
+        selectedSshProfileId,
+        project.sshProfile.c_str(), project.sshProfile.length(),
+        chat.sshProfile.c_str(), chat.sshProfile.length());
     availability[static_cast<std::size_t>(ToolCapability::SshRead)] =
-        false;
+        sshAvailable;
     availability[static_cast<std::size_t>(ToolCapability::SshMutate)] =
-        sshAvailable && project.sshProfile.isEmpty();
+        sshAvailable;
+    availability[static_cast<std::size_t>(ToolCapability::SftpReadWrite)] =
+        sshAvailable;
     return resolveToolPolicy(
         defaultGlobalToolPermissionPolicy(), settings.masterToolPolicy,
         project.toolPolicy, chat.toolPolicy, intent, availability);
@@ -260,11 +277,11 @@ ToolRequestPlan resolveChatToolRequestPlan(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
-    bool sshAvailable)
+    std::uint64_t selectedSshProfileId)
 {
     const ToolPolicyResolutionResult resolution = resolveChatToolPermissions(
         settings, project, chat, intent, filesReadable, filesWritable,
-        webStorageWritable, sshAvailable);
+        webStorageWritable, selectedSshProfileId);
     return buildToolRequestPlan(resolution, intent);
 }
 
@@ -295,6 +312,19 @@ ToolExecutionResult routeToolCall(const Settings& settings,
         if (toolConfirmationReason(
                 ToolPermissionDecision::Allow, entry->schema,
                 target.replacesExisting) != ToolConfirmationReason::None) {
+            return confirmationRequiredTool(call.name);
+        }
+    }
+    if (entry->schema == ToolSchemaId::SftpWrite ||
+        entry->schema == ToolSchemaId::SftpMove) {
+        const SftpOverwriteInspection overwrite = inspectSftpOverwrite(
+            entry->schema, call);
+        if (!overwrite.success) {
+            return invalidToolCall(overwrite.error);
+        }
+        if (toolConfirmationReason(
+                ToolPermissionDecision::Allow, entry->schema,
+                overwrite.requested) != ToolConfirmationReason::None) {
             return confirmationRequiredTool(call.name);
         }
     }

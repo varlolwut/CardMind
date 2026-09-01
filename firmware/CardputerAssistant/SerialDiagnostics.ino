@@ -183,7 +183,7 @@ void runWebSearchRoundTripTest()
         cardputer::resolveChatToolRequestPlan(
             requestSettings, project, chat,
             {cardputer::ToolMessageIntentMode::Required, webGroup},
-            false, false, webStorageWritable, false);
+            false, false, webStorageWritable, 0);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {
         Serial.printf(
@@ -5143,7 +5143,7 @@ void runToolApiTest()
         cardputer::resolveChatToolRequestPlan(
             requestSettings, project, chat,
             {cardputer::ToolMessageIntentMode::Required, filesGroup},
-            true, true, true, false);
+            true, true, true, 0);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {
         Serial.printf(
@@ -5308,6 +5308,8 @@ void runUiBenchmark()
                   static_cast<unsigned int>(largestHeapBefore),
                   static_cast<unsigned int>(largestHeapAfter));
 }
+
+cardputer::OperationResult runSftpTransferRemoteTest(bool& cleanupComplete);
 
 void handleSerialCommand(const String& command)
 {
@@ -5721,11 +5723,109 @@ void handleSerialCommand(const String& command)
                       result.success ? "none" : result.error.c_str());
         return;
     }
-    if (command == "SSHPROFILETEST") {
-        const cardputer::OperationResult result = runSshProfileStorageTest();
-        Serial.printf("SSHPROFILETEST result=%s error=%s\n",
-                      result.success ? "pass" : "failed",
-                      result.success ? "none" : result.error.c_str());
+    if (command == "SSHOPTIONSTEST") {
+        cardputer::markOperation("ssh_options_test");
+        const cardputer::OperationResult result = runSshCommandOptionsTest();
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SSHOPTIONSTEST result=%s heap=%u largest_heap=%u stack_free=%u error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "SSHOUTPUTTEST") {
+        cardputer::markOperation("ssh_output_test");
+        const cardputer::OperationResult result =
+            runSshCommandOutputStorageTest();
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SSHOUTPUTTEST result=%s heap=%u largest_heap=%u stack_free=%u error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "SSHOUTPUTE2E") {
+        ensureNetworkReady();
+        cardputer::markOperation("ssh_output_e2e");
+        String retainedName;
+        std::uint32_t outputBytes = 0;
+        const cardputer::OperationResult result =
+            runSshCommandOutputRemoteTest(retainedName, outputBytes);
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SSHOUTPUTE2E result=%s log=%s output_bytes=%u heap=%u largest_heap=%u stack_free=%u error=%s\n",
+            result.success ? "pass" : "failed",
+            retainedName.isEmpty() ? "none" : retainedName.c_str(),
+            static_cast<unsigned int>(outputBytes),
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "SSHOUTPUTCLEAN") {
+        bool alreadyAbsent = false;
+        bool removed = false;
+        const cardputer::OperationResult result =
+            cleanupSshCommandOutputRemoteTest(alreadyAbsent, removed);
+        Serial.printf(
+            "SSHOUTPUTCLEAN result=%s already_absent=%s removed=%s error=%s\n",
+            result.success ? "pass" : "failed",
+            alreadyAbsent ? "yes" : "no",
+            removed ? "yes" : "no",
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "MODELSFTPTEST") {
+        ensureNetworkReady();
+        cardputer::markOperation("model_sftp_test");
+        const std::uint32_t startedAt = millis();
+        bool cleanupComplete = false;
+        const cardputer::OperationResult result =
+            runModelSftpRemoteTest(cleanupComplete);
+        const std::uint32_t elapsedMs = millis() - startedAt;
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "MODELSFTPTEST result=%s elapsed_ms=%u heap=%u minimum_heap=%u largest_heap=%u stack_free=%u cleanup=%s error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(elapsedMs),
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(ESP.getMinFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            cleanupComplete ? "yes" : "no",
+            result.success ? "none" : result.error.c_str());
+        return;
+    }
+    if (command == "SFTPTRANSFERTEST") {
+        ensureNetworkReady();
+        cardputer::markOperation("sftp_transfer_test");
+        const std::uint32_t startedAt = millis();
+        bool cleanupComplete = false;
+        const cardputer::OperationResult result =
+            runSftpTransferRemoteTest(cleanupComplete);
+        const std::uint32_t elapsedMs = millis() - startedAt;
+        cardputer::markOperation("idle");
+        Serial.printf(
+            "SFTPTRANSFERTEST result=%s elapsed_ms=%u heap=%u minimum_heap=%u largest_heap=%u stack_free=%u cleanup=%s error=%s\n",
+            result.success ? "pass" : "failed",
+            static_cast<unsigned int>(elapsedMs),
+            static_cast<unsigned int>(ESP.getFreeHeap()),
+            static_cast<unsigned int>(ESP.getMinFreeHeap()),
+            static_cast<unsigned int>(
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+            static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)),
+            cleanupComplete ? "yes" : "no",
+            result.success ? "none" : result.error.c_str());
         return;
     }
     if (command == "SSHSESSIONTEST" || command == "SFTPTEST") {

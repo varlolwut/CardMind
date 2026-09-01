@@ -42,7 +42,7 @@ bool editSshProfile(cardputer::SshProfile current, cardputer::SshProfile& result
                             true, value)) return false;
         current.password = value.c_str();
     } else {
-        if (!cardputer::sshPrivateKeyIsInstalled()) {
+        if (!cardputer::sshPrivateKeyIsInstalled(current.privateKeyId)) {
             cardputer::showTextViewer("SSH KEY", {"No private key installed.",
                                                   "Use SSH > Install key first."},
                                      0, "ESC/ENTER close");
@@ -74,9 +74,14 @@ cardputer::OperationResult connectTrustedSsh(const cardputer::SshProfile& profil
         client.close();
         return {false, trust.error};
     }
-    if (!trust.found || !trust.matches) {
+    if (trust.found && !trust.matches) {
+        client.close();
+        return {false,
+                "SSH host key changed; connection blocked; forget the trusted host key before reconnecting"};
+    }
+    if (!trust.found) {
         if (!confirmSshFingerprint(profile, client.hostKeyType(), client.fingerprint(),
-                                   trust.found && !trust.matches)) {
+                                   false)) {
             client.close();
             return {false, "SSH connection cancelled before trusting the host key"};
         }
@@ -93,34 +98,48 @@ cardputer::OperationResult connectTrustedSsh(const cardputer::SshProfile& profil
     return result;
 }
 
-cardputer::OperationResult runSshProfileStorageTest()
+cardputer::OperationResult runSshCommandOptionsTest()
 {
-    std::vector<cardputer::SshProfile> original;
-    std::size_t originalSelected = 0;
-    cardputer::OperationResult result = cardputer::loadSshProfiles(original, originalSelected);
-    if (!result.success) return result;
-    if (original.size() >= cardputer::kMaximumSshProfiles) {
-        return {false, "All SSH profile slots are occupied"};
+    const cardputer::SshCommandArgumentsResult defaults =
+        cardputer::parseSshCommandArguments("{\"command\":\"printf ok\"}");
+    if (!defaults.success || defaults.command != "printf ok" ||
+        defaults.timeoutMs != cardputer::kDefaultSshCommandTimeoutMs ||
+        defaults.maximumInlineOutputBytes !=
+            cardputer::kDefaultSshCommandInlineOutputBytes) {
+        return {false, "SSH command option defaults are incorrect"};
     }
-    const cardputer::SshProfile temporary = {
-        "Storage test", "127.0.0.1", 22, "test", "temporary",
-        cardputer::SshAuthMode::Password, ""};
-    result = cardputer::saveSshProfileAt(temporary, original.size());
-    if (!result.success) return result;
-    std::vector<cardputer::SshProfile> verified;
-    std::size_t verifiedSelected = 0;
-    result = cardputer::loadSshProfiles(verified, verifiedSelected);
-    const bool matches = result.success && verified.size() == original.size() + 1 &&
-        verified.back().name == temporary.name && verified.back().host == temporary.host &&
-        verified.back().username == temporary.username;
-    const cardputer::OperationResult removed = cardputer::deleteSshProfile(original.size());
-    const cardputer::OperationResult selected = !original.empty() && removed.success
-        ? cardputer::selectSshProfile(originalSelected)
-        : cardputer::OperationResult{true, ""};
-    if (!removed.success) return removed;
-    if (!selected.success) return selected;
-    return matches ? cardputer::OperationResult{true, ""}
-                   : cardputer::OperationResult{false, "SSH profile NVS round trip did not match"};
+    const cardputer::SshCommandArgumentsResult boundaries =
+        cardputer::parseSshCommandArguments(
+            "{\"command\":\"true\",\"timeout_ms\":1000,"
+            "\"max_inline_output_bytes\":1}");
+    if (!boundaries.success || boundaries.timeoutMs != 1000 ||
+        boundaries.maximumInlineOutputBytes != 1) {
+        return {false, "SSH command option boundary values were not preserved"};
+    }
+    static constexpr const char* kInvalidArguments[] = {
+        "{\"command\":\"true\",\"timeout_ms\":999}",
+        "{\"command\":\"true\",\"timeout_ms\":60001}",
+        "{\"command\":\"true\",\"max_inline_output_bytes\":0}",
+        "{\"command\":\"true\",\"max_inline_output_bytes\":16385}",
+        "{\"command\":\"true\",\"timeout_ms\":\"1000\"}",
+        "{\"command\":\"echo\\u0000mutate\"}",
+        "{\"command\":\"true\",\"unexpected\":1}",
+    };
+    for (const char* invalidArguments : kInvalidArguments) {
+        const cardputer::SshCommandArgumentsResult rejected =
+            cardputer::parseSshCommandArguments(invalidArguments);
+        if (rejected.success || rejected.error.isEmpty()) {
+            return {false, "SSH command option validation accepted an invalid object"};
+        }
+    }
+    std::string output = "abc";
+    if (!cardputer::appendSshCommandOutput(output, "de", 2, 5) ||
+        output != "abcde" ||
+        cardputer::appendSshCommandOutput(output, "f", 1, 5) ||
+        !output.empty()) {
+        return {false, "SSH command overflow did not clear partial output"};
+    }
+    return {true, ""};
 }
 
 cardputer::OperationResult runSshSessionTest(bool testSftp)
@@ -153,6 +172,1131 @@ cardputer::OperationResult runSshSessionTest(bool testSftp)
     }
     client.close();
     return result;
+}
+
+String sshCommandOutputRemoteFixture;
+
+cardputer::OperationResult removeSshCommandOutputFixture(const String& name)
+{
+    if (name.isEmpty()) {
+        return {true, ""};
+    }
+    const cardputer::OperationResult readable = cardputer::requireSdReadAccess();
+    if (!readable.success) {
+        return readable;
+    }
+    const String path = cardputer::workspaceFilePath(name);
+    if (SD.exists(path) && !SD.remove(path)) {
+        return {false, "Failed to remove the exact SSH command output fixture"};
+    }
+    return SD.exists(path)
+        ? cardputer::OperationResult{
+              false, "SSH command output fixture still exists after cleanup"}
+        : cardputer::OperationResult{true, ""};
+}
+
+cardputer::OperationResult runSshCommandOutputStorageTest()
+{
+    const std::array<std::uint8_t, 5> raw = {'A', 0, 0xFF, 'B', 'C'};
+    std::vector<String> fixtures;
+    cardputer::OperationResult outcome = {true, ""};
+    const auto remember = [&fixtures](
+        const cardputer::SshCommandOutputCapture& capture) {
+        if (capture.hasLog()) {
+            fixtures.push_back(capture.logName());
+        }
+    };
+    const auto reject = [&outcome](const String& error) {
+        if (outcome.success) {
+            outcome = {false, error};
+        }
+    };
+
+    do {
+        cardputer::SshCommandOutputCapture exact(4);
+        cardputer::OperationResult result = exact.append(raw.data(), 4);
+        if (result.success) result = exact.finalize();
+        if (!result.success || exact.hasLog() ||
+            exact.inlineOutput().size() != 4) {
+            reject(result.success
+                ? String("Exact-cap SSH output did not remain inline")
+                : result.error);
+            break;
+        }
+
+        cardputer::SshCommandOutputCapture spilled(4);
+        result = spilled.append(raw.data(), raw.size());
+        remember(spilled);
+        if (result.success) result = spilled.finalize();
+        if (!result.success || !spilled.isComplete() ||
+            spilled.verifiedOutputBytes() != raw.size()) {
+            reject(result.success
+                ? String("Cap-plus-one SSH output was not verified")
+                : result.error);
+            break;
+        }
+        File stored = SD.open(
+            cardputer::workspaceFilePath(spilled.logName()), FILE_READ);
+        std::array<std::uint8_t, 5> loaded = {};
+        const std::size_t loadedBytes = stored
+            ? stored.read(loaded.data(), loaded.size()) : 0;
+        if (stored) stored.close();
+        if (loadedBytes != raw.size() ||
+            !std::equal(raw.begin(), raw.end(), loaded.begin())) {
+            reject("Spilled SSH output bytes did not match the source bytes");
+            break;
+        }
+
+        cardputer::SshCommandOutputCapture promoted(16);
+        result = promoted.append(raw.data(), 3);
+        if (result.success) result = promoted.promoteToLog();
+        remember(promoted);
+        if (result.success) result = promoted.finalize();
+        if (!result.success || !promoted.isComplete() ||
+            promoted.verifiedOutputBytes() != 3) {
+            reject(result.success
+                ? String("Below-cap SSH output promotion was not verified")
+                : result.error);
+            break;
+        }
+
+        const std::array<cardputer::SdStorageState, 4> faultStates = {
+            cardputer::SdStorageState::Missing,
+            cardputer::SdStorageState::Full,
+            cardputer::SdStorageState::Removed,
+            cardputer::SdStorageState::Replaced,
+        };
+        for (const cardputer::SdStorageState state : faultStates) {
+            cardputer::setSdStorageFaultOverrideForDiagnostics(state);
+            cardputer::SshCommandOutputCapture beforeCreation(1);
+            result = beforeCreation.append(raw.data(), 2);
+            cardputer::clearSdStorageFaultOverrideForDiagnostics();
+            if (result.success || beforeCreation.hasLog()) {
+                reject("SSH output log was created while microSD was unavailable");
+                break;
+            }
+        }
+        if (!outcome.success) break;
+
+        for (const cardputer::SdStorageState state : faultStates) {
+            cardputer::SshCommandOutputCapture afterCreation(1);
+            result = afterCreation.append(raw.data(), 2);
+            remember(afterCreation);
+            if (!result.success) {
+                reject(result.error);
+                break;
+            }
+            cardputer::setSdStorageFaultOverrideForDiagnostics(state);
+            const cardputer::OperationResult faulted =
+                afterCreation.append(raw.data() + 2, 1);
+            cardputer::clearSdStorageFaultOverrideForDiagnostics();
+            const cardputer::OperationResult finalized =
+                afterCreation.finalize();
+            if (faulted.success || finalized.success ||
+                afterCreation.isComplete() ||
+                afterCreation.verifiedOutputBytes() != 0) {
+                reject("SSH output storage fault after creation was not fail-closed");
+                break;
+            }
+        }
+    } while (false);
+
+    cardputer::clearSdStorageFaultOverrideForDiagnostics();
+    for (const String& fixture : fixtures) {
+        const cardputer::OperationResult first =
+            removeSshCommandOutputFixture(fixture);
+        const cardputer::OperationResult second =
+            removeSshCommandOutputFixture(fixture);
+        if (!first.success || !second.success) {
+            outcome = {
+                false,
+                first.success ? second.error : first.error,
+            };
+        }
+    }
+    return outcome;
+}
+
+cardputer::OperationResult runSshCommandOutputRemoteTest(
+    String& retainedName,
+    std::uint32_t& outputBytes)
+{
+    retainedName = "";
+    outputBytes = 0;
+    if (!sshCommandOutputRemoteFixture.isEmpty()) {
+        return {
+            false,
+            "The previous exact SSH output fixture must be cleaned before another run",
+        };
+    }
+    const cardputer::SshProfile profile = {
+        "Rebex output test", "test.rebex.net", 22, "demo", "password",
+        cardputer::SshAuthMode::Password, ""};
+    cardputer::SshClient client;
+    cardputer::OperationResult result = client.connect(profile, 60000);
+    if (!result.success) return result;
+
+    const cardputer::SshTrustResult existing = cardputer::checkTrustedSshHost(
+        profile.host, profile.port, client.fingerprint());
+    if (!existing.success || (existing.found && !existing.matches)) {
+        client.close();
+        return {
+            false,
+            existing.success ? String("Rebex test host key changed") : existing.error,
+        };
+    }
+    const bool temporaryTrust = !existing.found;
+    if (temporaryTrust) {
+        result = cardputer::trustSshHost(
+            profile.host, profile.port, client.fingerprint());
+    }
+    if (result.success) {
+        result = client.authenticate(profile, 60000);
+    }
+
+    cardputer::SshCommandOutputCapture capture(1);
+    bool cancelAfterOutput = false;
+    int exitStatus = -1;
+    if (result.success) {
+        const std::function<bool()> cancel = [&cancelAfterOutput]() {
+            return cancelAfterOutput;
+        };
+        const cardputer::SshCommandOutputCallback output =
+            [&capture, &cancelAfterOutput](
+                const std::uint8_t* data,
+                std::size_t bytes) {
+            const cardputer::OperationResult appended =
+                capture.append(data, bytes);
+            if (appended.success && capture.hasLog()) {
+                cancelAfterOutput = true;
+            }
+            return appended;
+        };
+        result = client.executeCommandStreamingControlled(
+            "ls -lR /pub", exitStatus, 60000, cancel, output);
+    }
+    client.close();
+
+    cardputer::OperationResult stored = {true, ""};
+    if (capture.hasOutput()) {
+        stored = capture.promoteToLog();
+    }
+    const cardputer::OperationResult finalized = capture.finalize();
+    if (stored.success && !finalized.success) {
+        stored = finalized;
+    }
+    if (capture.hasLog()) {
+        retainedName = capture.logName();
+        sshCommandOutputRemoteFixture = retainedName;
+    }
+    if (capture.isComplete()) {
+        outputBytes = capture.verifiedOutputBytes();
+    }
+
+    if (result.success || !cancelAfterOutput ||
+        result.error != "SSH command canceled by user") {
+        const String observed = result.success
+            ? String("remote command completed before cancellation")
+            : result.error;
+        result = {
+            false,
+            String("Read-only SSH output command did not end with the exact cancellation outcome: ") +
+                observed,
+        };
+    } else if (!capture.hasLog() || !stored.success ||
+               !capture.isComplete() || outputBytes == 0) {
+        result = {
+            false,
+            stored.success
+                ? String("Canceled SSH output was not retained completely")
+                : stored.error,
+        };
+    } else {
+        result = {true, ""};
+    }
+
+    if (temporaryTrust) {
+        const cardputer::OperationResult forgotten =
+            cardputer::forgetTrustedSshHost(profile.host, profile.port);
+        if (!forgotten.success) {
+            result = {
+                false,
+                result.success
+                    ? forgotten.error
+                    : result.error + "; temporary host-key cleanup failed: " +
+                          forgotten.error,
+            };
+        }
+    }
+    return result;
+}
+
+cardputer::OperationResult cleanupSshCommandOutputRemoteTest(
+    bool& alreadyAbsent,
+    bool& removed)
+{
+    alreadyAbsent = sshCommandOutputRemoteFixture.isEmpty();
+    removed = false;
+    if (alreadyAbsent) {
+        return {true, ""};
+    }
+    const cardputer::OperationResult readable = cardputer::requireSdReadAccess();
+    if (!readable.success) {
+        return readable;
+    }
+    const String name = sshCommandOutputRemoteFixture;
+    const String path = cardputer::workspaceFilePath(name);
+    alreadyAbsent = !SD.exists(path);
+    const cardputer::OperationResult first =
+        removeSshCommandOutputFixture(name);
+    const cardputer::OperationResult second =
+        removeSshCommandOutputFixture(name);
+    if (!first.success || !second.success) {
+        return first.success ? second : first;
+    }
+    removed = !alreadyAbsent;
+    sshCommandOutputRemoteFixture = "";
+    return {true, ""};
+}
+
+cardputer::OperationResult runModelSftpRemoteTest(bool& cleanupComplete)
+{
+    cleanupComplete = false;
+    const std::function<bool()> neverCancel = []() { return false; };
+    char nonce[17] = {};
+    std::snprintf(
+        nonce, sizeof(nonce), "%08lx%08lx",
+        static_cast<unsigned long>(esp_random()),
+        static_cast<unsigned long>(esp_random()));
+    const String sourcePath = String("/tmp/cardmind-p4-06-") + nonce + "-source";
+    const String destinationPath =
+        String("/tmp/cardmind-p4-06-") + nonce + "-destination";
+    const std::string sourceContent = std::string("ABC") + "\xD1\x8F" + "Z";
+    const std::string existingContent = "existing";
+    const std::string finalContent = "final";
+    bool sourceCleanupCandidate = false;
+    bool destinationCleanupCandidate = false;
+    std::array<String, 3> temporaryCleanupCandidates = {};
+    std::size_t temporaryCleanupCandidateCount = 0;
+    bool cleanupCandidateTrackingFailed = false;
+
+    const auto makeCall = [](const char* id, const char* name,
+                             const JsonDocument& arguments) {
+        cardputer::ToolCall call = {id, name, ""};
+        serializeJson(arguments, call.arguments);
+        return call;
+    };
+    const auto write = [&](const String& path, const std::string& content,
+                           bool overwrite) {
+        JsonDocument arguments;
+        arguments["path"] = path;
+        arguments["content"] = content;
+        arguments["overwrite"] = overwrite;
+        return cardputer::executeSftpWriteTool(
+            makeCall("p4-06-write", "sftp_write", arguments), neverCancel);
+    };
+    const auto move = [&](bool overwrite) {
+        JsonDocument arguments;
+        arguments["source_path"] = sourcePath;
+        arguments["destination_path"] = destinationPath;
+        arguments["overwrite"] = overwrite;
+        return cardputer::executeSftpMoveTool(
+            makeCall("p4-06-move", "sftp_move", arguments), neverCancel);
+    };
+    const auto read = [&](const String& path, std::uint64_t offset,
+                          std::size_t maximumBytes) {
+        JsonDocument arguments;
+        arguments["path"] = path;
+        arguments["offset"] = offset;
+        arguments["max_bytes"] = maximumBytes;
+        return cardputer::executeSftpReadTool(
+            makeCall("p4-06-read", "sftp_read", arguments), neverCancel);
+    };
+    const auto expectRead = [&](const String& path, std::uint64_t offset,
+                                std::size_t maximumBytes,
+                                const std::string& expected,
+                                std::uint64_t nextOffset, bool eof) {
+        const cardputer::ToolExecutionResult result =
+            read(path, offset, maximumBytes);
+        if (!result.success) return cardputer::OperationResult{false, result.error};
+        JsonDocument output;
+        const DeserializationError parsed = deserializeJson(output, result.output);
+        if (parsed || !output["ok"].is<bool>() ||
+            !output["ok"].as<bool>() || !output["content"].is<const char*>() ||
+            output["content"].as<std::string>() != expected ||
+            output["next_offset"].as<std::uint64_t>() != nextOffset ||
+            output["eof"].as<bool>() != eof) {
+            return cardputer::OperationResult{
+                false, "Model SFTP read returned an unexpected bounded chunk"};
+        }
+        return cardputer::OperationResult{true, ""};
+    };
+
+    const auto findOwnedName = [&](cardputer::SshClient& client,
+                                   const String& path, bool& found) {
+        found = false;
+        const String name = path.substring(path.lastIndexOf('/') + 1);
+        std::uint32_t offset = 0;
+        for (std::size_t pageIndex = 0; pageIndex < 64; ++pageIndex) {
+            const cardputer::SftpPageResult page =
+                client.listSftpDirectoryPageControlled(
+                    "/tmp", offset, cardputer::kMaximumModelSftpPageEntries,
+                    30000, neverCancel);
+            if (!page.success) {
+                return cardputer::OperationResult{false, page.error};
+            }
+            for (const cardputer::SftpEntry& entry : page.entries) {
+                if (entry.name == name) {
+                    found = true;
+                    return cardputer::OperationResult{true, ""};
+                }
+            }
+            if (page.eof) return cardputer::OperationResult{true, ""};
+            if (page.nextOffset <= offset) {
+                return cardputer::OperationResult{
+                    false, "Model SFTP cleanup page did not advance"};
+            }
+            offset = page.nextOffset;
+        }
+        return cardputer::OperationResult{
+            false, "Model SFTP cleanup directory exceeded the bounded scan"};
+    };
+    const auto rememberTemporaryPath = [&](const String& error) {
+        const String prefix = "/tmp/.cardmind-";
+        const int start = error.indexOf(prefix);
+        if (start < 0) return cardputer::OperationResult{true, ""};
+        const int pathLength = prefix.length() + 16 + 4;
+        if (start + pathLength > static_cast<int>(error.length())) {
+            cleanupCandidateTrackingFailed = true;
+            return cardputer::OperationResult{
+                false, "Model SFTP write reported a malformed temporary path"};
+        }
+        const String path = error.substring(start, start + pathLength);
+        if (!path.endsWith(".tmp")) {
+            cleanupCandidateTrackingFailed = true;
+            return cardputer::OperationResult{
+                false, "Model SFTP write reported a malformed temporary path"};
+        }
+        for (int index = prefix.length(); index < prefix.length() + 16; ++index) {
+            const char value = path[index];
+            if (!((value >= '0' && value <= '9') ||
+                  (value >= 'a' && value <= 'f'))) {
+                cleanupCandidateTrackingFailed = true;
+                return cardputer::OperationResult{
+                    false, "Model SFTP write reported a malformed temporary path"};
+            }
+        }
+        for (std::size_t index = 0;
+             index < temporaryCleanupCandidateCount; ++index) {
+            if (temporaryCleanupCandidates[index] == path) {
+                return cardputer::OperationResult{true, ""};
+            }
+        }
+        if (temporaryCleanupCandidateCount >= temporaryCleanupCandidates.size()) {
+            cleanupCandidateTrackingFailed = true;
+            return cardputer::OperationResult{
+                false, "Model SFTP write reported too many temporary paths"};
+        }
+        temporaryCleanupCandidates[temporaryCleanupCandidateCount++] = path;
+        return cardputer::OperationResult{true, ""};
+    };
+
+    cardputer::SshProfile profile;
+    cardputer::OperationResult preflight = cardputer::loadSshProfile(profile);
+    cardputer::SshClient preflightClient;
+    if (preflight.success) {
+        preflight = connectTrustedSsh(profile, preflightClient);
+    }
+    if (preflight.success) {
+        preflight = preflightClient.openSftpControlled(30000, neverCancel);
+    }
+    bool sourceCollision = false;
+    bool destinationCollision = false;
+    if (preflight.success) {
+        preflight = findOwnedName(preflightClient, sourcePath, sourceCollision);
+    }
+    if (preflight.success) {
+        preflight = findOwnedName(
+            preflightClient, destinationPath, destinationCollision);
+    }
+    preflightClient.close();
+    if (!preflight.success) {
+        cleanupComplete = true;
+        return preflight;
+    }
+    if (sourceCollision || destinationCollision) {
+        cleanupComplete = true;
+        return {
+            false, "Model SFTP exact-owned fixture path already exists"};
+    }
+
+    const auto inspectExactPath = [&](const String& path, bool& found) {
+        cardputer::SshClient client;
+        cardputer::OperationResult inspected = connectTrustedSsh(profile, client);
+        if (inspected.success) {
+            inspected = client.openSftpControlled(30000, neverCancel);
+        }
+        if (inspected.success) inspected = findOwnedName(client, path, found);
+        client.close();
+        return inspected;
+    };
+    const auto cleanup = [&](cardputer::OperationResult outcome) {
+        const bool hasCleanupCandidate = sourceCleanupCandidate ||
+            destinationCleanupCandidate || temporaryCleanupCandidateCount > 0;
+        if (!hasCleanupCandidate) {
+            cleanupComplete = !cleanupCandidateTrackingFailed;
+            return outcome;
+        }
+        cardputer::OperationResult cleaned = {true, ""};
+        cardputer::SshClient client;
+        if (cleaned.success) cleaned = connectTrustedSsh(profile, client);
+        if (cleaned.success) cleaned = client.openSftpControlled(30000, neverCancel);
+        const std::array<String, 5> paths = {
+            sourcePath,
+            destinationPath,
+            temporaryCleanupCandidates[0],
+            temporaryCleanupCandidates[1],
+            temporaryCleanupCandidates[2],
+        };
+        const std::array<bool, 5> owned = {
+            sourceCleanupCandidate,
+            destinationCleanupCandidate,
+            temporaryCleanupCandidateCount > 0,
+            temporaryCleanupCandidateCount > 1,
+            temporaryCleanupCandidateCount > 2,
+        };
+        for (std::size_t index = 0; cleaned.success && index < paths.size(); ++index) {
+            if (!owned[index]) continue;
+            bool found = false;
+            cleaned = findOwnedName(client, paths[index], found);
+            if (cleaned.success && found) {
+                cleaned = client.removeSftpPath(paths[index], false, 30000);
+            }
+        }
+        for (std::size_t pass = 0; cleaned.success && pass < 2; ++pass) {
+            for (std::size_t index = 0; cleaned.success && index < paths.size(); ++index) {
+                if (!owned[index]) continue;
+                bool found = false;
+                cleaned = findOwnedName(client, paths[index], found);
+                if (cleaned.success && found) {
+                    cleaned = {false, "Exact model SFTP fixture remains after cleanup"};
+                }
+            }
+        }
+        client.close();
+        cleanupComplete = cleaned.success && !cleanupCandidateTrackingFailed;
+        if (!cleanupComplete) {
+            const String cleanupError = cleaned.success
+                ? String("Exact model SFTP cleanup candidate tracking failed")
+                : cleaned.error;
+            return cardputer::OperationResult{
+                false, outcome.success
+                    ? cleanupError
+                    : outcome.error + "; exact remote cleanup failed: " + cleanupError};
+        }
+        return outcome;
+    };
+
+    cardputer::OperationResult outcome = {true, ""};
+    sourceCleanupCandidate = true;
+    cardputer::ToolExecutionResult result =
+        write(sourcePath, sourceContent, false);
+    if (!result.success) {
+        const cardputer::OperationResult remembered =
+            rememberTemporaryPath(result.error);
+        outcome = remembered.success
+            ? cardputer::OperationResult{false, result.error}
+            : remembered;
+    }
+    if (outcome.success) {
+        destinationCleanupCandidate = true;
+        result = write(destinationPath, existingContent, false);
+        if (!result.success) {
+            const cardputer::OperationResult remembered =
+                rememberTemporaryPath(result.error);
+            outcome = remembered.success
+                ? cardputer::OperationResult{false, result.error}
+                : remembered;
+        }
+    }
+    if (outcome.success) {
+        JsonDocument firstArguments;
+        firstArguments["path"] = "/tmp";
+        firstArguments["offset"] = 0;
+        firstArguments["max_entries"] = 1;
+        const cardputer::ToolExecutionResult first =
+            cardputer::executeSftpListTool(
+                makeCall("p4-06-list-1", "sftp_list", firstArguments),
+                neverCancel);
+        JsonDocument firstOutput;
+        if (!first.success || deserializeJson(firstOutput, first.output) ||
+            !firstOutput["entries"].is<JsonArray>() ||
+            firstOutput["entries"].as<JsonArray>().size() != 1 ||
+            firstOutput["eof"].as<bool>()) {
+            outcome = {false, first.success
+                ? String("First model SFTP list page was not bounded") : first.error};
+        } else {
+            const std::uint32_t next =
+                firstOutput["next_offset"].as<std::uint32_t>();
+            JsonDocument secondArguments;
+            secondArguments["path"] = "/tmp";
+            secondArguments["offset"] = next;
+            secondArguments["max_entries"] = 1;
+            const cardputer::ToolExecutionResult second =
+                cardputer::executeSftpListTool(
+                    makeCall("p4-06-list-2", "sftp_list", secondArguments),
+                    neverCancel);
+            JsonDocument secondOutput;
+            if (next == 0 || !second.success ||
+                deserializeJson(secondOutput, second.output) ||
+                !secondOutput["entries"].is<JsonArray>() ||
+                secondOutput["entries"].as<JsonArray>().size() != 1 ||
+                secondOutput["next_offset"].as<std::uint32_t>() <= next) {
+                outcome = {false, second.success
+                    ? String("Second model SFTP list page did not advance")
+                    : second.error};
+            }
+        }
+    }
+    if (outcome.success) {
+        outcome = expectRead(sourcePath, 0, 4, "ABC", 3, false);
+    }
+    if (outcome.success) {
+        outcome = expectRead(
+            sourcePath, 3, 4, std::string("\xD1\x8F") + "Z", 6, true);
+    }
+    if (outcome.success && read(sourcePath, 4, 4).success) {
+        outcome = {false, "Model SFTP read accepted a UTF-8 continuation offset"};
+    }
+    if (outcome.success && move(false).success) {
+        outcome = {false, "Model SFTP no-overwrite move replaced an existing target"};
+    }
+    if (outcome.success) {
+        outcome = expectRead(sourcePath, 0, 8, sourceContent, 6, true);
+    }
+    if (outcome.success) {
+        outcome = expectRead(destinationPath, 0, 16, existingContent, 8, true);
+    }
+    if (outcome.success) {
+        result = move(true);
+        if (!result.success) outcome = {false, result.error};
+    }
+    if (outcome.success) {
+        bool sourceStillExists = false;
+        outcome = inspectExactPath(sourcePath, sourceStillExists);
+        if (outcome.success && sourceStillExists) {
+            outcome = {
+                false, "Model SFTP overwrite move left the source path present"};
+        }
+    }
+    if (outcome.success) {
+        outcome = expectRead(destinationPath, 0, 8, sourceContent, 6, true);
+    }
+    if (outcome.success) {
+        result = write(destinationPath, finalContent, true);
+        if (!result.success) {
+            const cardputer::OperationResult remembered =
+                rememberTemporaryPath(result.error);
+            outcome = remembered.success
+                ? cardputer::OperationResult{false, result.error}
+                : remembered;
+        }
+    }
+    if (outcome.success) {
+        outcome = expectRead(destinationPath, 0, 8, finalContent, 5, true);
+    }
+    return cleanup(outcome);
+}
+
+cardputer::OperationResult runSftpTransferRemoteTest(bool& cleanupComplete)
+{
+    cleanupComplete = false;
+    const std::function<bool()> neverCancel = []() { return false; };
+    char nonce[17] = {};
+    std::snprintf(
+        nonce, sizeof(nonce), "%08lx%08lx",
+        static_cast<unsigned long>(esp_random()),
+        static_cast<unsigned long>(esp_random()));
+    const String prefix = String("p4-07-") + nonce;
+    const String remoteDirectory = String("/tmp/cardmind-") + prefix;
+    const String remoteSource = remoteDirectory + "/source.bin";
+    const String remoteTarget = remoteDirectory + "/target.bin";
+    const std::array<String, 4> workspaceNames = {
+        prefix + "-source.bin",
+        prefix + "-download.bin",
+        prefix + "-verify.bin",
+        prefix + "-target.bin",
+    };
+    constexpr std::size_t kPayloadBytes = 65536;
+    const std::string existingContent = "existing";
+    bool remoteDirectoryOwned = false;
+
+    const auto workspaceSidecarsAbsent = [&]() {
+        for (const String& name : workspaceNames) {
+            const String path = cardputer::workspaceFilePath(name);
+            if (SD.exists(path) || SD.exists(path + ".tmp") ||
+                SD.exists(path + ".bak")) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto cleanupWorkspace = [&]() {
+        for (std::size_t pass = 0; pass < 2; ++pass) {
+            const cardputer::OperationResult access =
+                cardputer::requireSdCleanupAccess();
+            if (!access.success) return access;
+            for (const String& name : workspaceNames) {
+                const String path = cardputer::workspaceFilePath(name);
+                if (SD.exists(path) && !SD.remove(path)) {
+                    return cardputer::OperationResult{
+                        false, "Exact transfer workspace fixture could not be removed"};
+                }
+                if (SD.exists(path + ".tmp") && !SD.remove(path + ".tmp")) {
+                    return cardputer::OperationResult{
+                        false, "Exact transfer workspace temporary could not be removed"};
+                }
+                if (SD.exists(path + ".bak") && !SD.remove(path + ".bak")) {
+                    return cardputer::OperationResult{
+                        false, "Exact transfer workspace backup could not be removed"};
+                }
+            }
+            const cardputer::OperationResult verifiedAccess =
+                cardputer::requireSdCleanupAccess();
+            if (!verifiedAccess.success) return verifiedAccess;
+            if (!workspaceSidecarsAbsent()) {
+                return cardputer::OperationResult{
+                    false, "Exact transfer workspace fixture remains after cleanup"};
+            }
+        }
+        return cardputer::OperationResult{true, ""};
+    };
+    const auto writePatternFile = [&](const String& name) {
+        const cardputer::OperationResult access = cardputer::requireSdWriteAccess(
+            kPayloadBytes, cardputer::kStorageOperationalFloorBytes);
+        if (!access.success) return access;
+        const String path = cardputer::workspaceFilePath(name);
+        File file = SD.open(path, FILE_WRITE);
+        if (!file) {
+            return cardputer::OperationResult{
+                false, "Transfer source fixture could not be created"};
+        }
+        std::uint8_t block[1024] = {};
+        std::size_t offset = 0;
+        while (offset < kPayloadBytes) {
+            const std::size_t count = std::min<std::size_t>(
+                sizeof(block), kPayloadBytes - offset);
+            for (std::size_t index = 0; index < count; ++index) {
+                block[index] = static_cast<std::uint8_t>(
+                    (offset + index) * 37U + 11U);
+            }
+            if (file.write(block, count) != count) {
+                file.close();
+                return cardputer::OperationResult{
+                    false, "Transfer source fixture write was incomplete"};
+            }
+            offset += count;
+        }
+        file.flush();
+        const bool sized = file.size() == kPayloadBytes;
+        file.close();
+        return sized
+            ? cardputer::OperationResult{true, ""}
+            : cardputer::OperationResult{
+                  false, "Transfer source fixture size is incorrect"};
+    };
+    const auto writeTextFile = [&](const String& name,
+                                   const std::string& content) {
+        const cardputer::OperationResult access = cardputer::requireSdWriteAccess(
+            content.size(), cardputer::kStorageOperationalFloorBytes);
+        if (!access.success) return access;
+        File file = SD.open(cardputer::workspaceFilePath(name), FILE_WRITE);
+        if (!file) {
+            return cardputer::OperationResult{
+                false, "Transfer text fixture could not be created"};
+        }
+        const bool written = file.write(
+            reinterpret_cast<const std::uint8_t*>(content.data()),
+            content.size()) == content.size();
+        file.flush();
+        file.close();
+        return written
+            ? cardputer::OperationResult{true, ""}
+            : cardputer::OperationResult{
+                  false, "Transfer text fixture write was incomplete"};
+    };
+    const auto expectPatternFile = [&](const String& name) {
+        const cardputer::OperationResult access = cardputer::requireSdReadAccess();
+        if (!access.success) return access;
+        File file = SD.open(cardputer::workspaceFilePath(name), FILE_READ);
+        if (!file || file.isDirectory() || file.size() != kPayloadBytes) {
+            if (file) file.close();
+            return cardputer::OperationResult{
+                false, "Transferred workspace file has the wrong size"};
+        }
+        std::uint8_t block[1024] = {};
+        std::size_t offset = 0;
+        while (offset < kPayloadBytes) {
+            const std::size_t count = file.read(block, sizeof(block));
+            if (count == 0) {
+                file.close();
+                return cardputer::OperationResult{
+                    false, "Transferred workspace file ended early"};
+            }
+            for (std::size_t index = 0; index < count; ++index) {
+                const std::uint8_t expected = static_cast<std::uint8_t>(
+                    (offset + index) * 37U + 11U);
+                if (block[index] != expected) {
+                    file.close();
+                    return cardputer::OperationResult{
+                        false, "Transferred workspace bytes differ"};
+                }
+            }
+            offset += count;
+        }
+        file.close();
+        return cardputer::OperationResult{true, ""};
+    };
+    const auto expectTextFile = [&](const String& name,
+                                    const std::string& expected) {
+        const cardputer::OperationResult access = cardputer::requireSdReadAccess();
+        if (!access.success) return access;
+        File file = SD.open(cardputer::workspaceFilePath(name), FILE_READ);
+        if (!file || file.isDirectory() || file.size() != expected.size()) {
+            if (file) file.close();
+            return cardputer::OperationResult{
+                false, "Transfer no-overwrite fixture has the wrong size"};
+        }
+        std::string actual(expected.size(), '\0');
+        const bool read = file.read(
+            reinterpret_cast<std::uint8_t*>(actual.data()),
+            actual.size()) == actual.size();
+        file.close();
+        return read && actual == expected
+            ? cardputer::OperationResult{true, ""}
+            : cardputer::OperationResult{
+                  false, "Transfer no-overwrite fixture changed"};
+    };
+
+    cardputer::SshProfile profile;
+    cardputer::OperationResult outcome = cardputer::loadSshProfile(profile);
+    if (!outcome.success) {
+        cleanupComplete = true;
+        return outcome;
+    }
+    const cardputer::OperationResult readable = cardputer::requireSdReadAccess();
+    if (!readable.success) {
+        cleanupComplete = true;
+        return readable;
+    }
+    if (!workspaceSidecarsAbsent()) {
+        cleanupComplete = true;
+        return {false, "Transfer workspace fixture path already exists"};
+    }
+
+    const auto connect = [&](cardputer::SshClient& client) {
+        cardputer::OperationResult connected = connectTrustedSsh(profile, client);
+        if (connected.success) {
+            connected = client.openSftpControlled(30000, neverCancel);
+        }
+        return connected;
+    };
+    const auto findRemoteDirectory = [&](cardputer::SshClient& client,
+                                         bool& found) {
+        found = false;
+        const String name = remoteDirectory.substring(
+            remoteDirectory.lastIndexOf('/') + 1);
+        std::uint32_t offset = 0;
+        for (std::size_t pageIndex = 0; pageIndex < 64; ++pageIndex) {
+            const cardputer::SftpPageResult page =
+                client.listSftpDirectoryPageControlled(
+                    "/tmp", offset, cardputer::kMaximumModelSftpPageEntries,
+                    30000, neverCancel);
+            if (!page.success) return cardputer::OperationResult{false, page.error};
+            for (const cardputer::SftpEntry& entry : page.entries) {
+                if (entry.name == name) {
+                    found = true;
+                    return cardputer::OperationResult{true, ""};
+                }
+            }
+            if (page.eof) return cardputer::OperationResult{true, ""};
+            if (page.nextOffset <= offset) {
+                return cardputer::OperationResult{
+                    false, "Transfer cleanup pagination did not advance"};
+            }
+            offset = page.nextOffset;
+        }
+        return cardputer::OperationResult{
+            false, "Transfer cleanup parent directory exceeded bounded scan"};
+    };
+    const auto cleanupRemote = [&]() {
+        if (!remoteDirectoryOwned) {
+            return cardputer::OperationResult{true, ""};
+        }
+        cardputer::SshClient client;
+        cardputer::OperationResult cleaned = connect(client);
+        bool found = false;
+        if (cleaned.success) cleaned = findRemoteDirectory(client, found);
+        for (std::size_t pass = 0; cleaned.success && found && pass < 64;
+             ++pass) {
+            const cardputer::SftpPageResult page =
+                client.listSftpDirectoryPageControlled(
+                    remoteDirectory, 0,
+                    cardputer::kMaximumModelSftpPageEntries,
+                    30000, neverCancel);
+            if (!page.success) {
+                cleaned = {false, page.error};
+                break;
+            }
+            if (page.entries.empty()) break;
+            for (const cardputer::SftpEntry& entry : page.entries) {
+                cleaned = client.removeSftpPath(
+                    remoteDirectory + "/" + entry.name,
+                    entry.directory, 30000);
+                if (!cleaned.success) break;
+            }
+        }
+        if (cleaned.success && found) {
+            const cardputer::SftpPageResult remaining =
+                client.listSftpDirectoryPageControlled(
+                    remoteDirectory, 0, 1, 30000, neverCancel);
+            if (!remaining.success) cleaned = {false, remaining.error};
+            else if (!remaining.entries.empty()) {
+                cleaned = {false, "Exact transfer remote directory is not empty"};
+            } else {
+                cleaned = client.removeSftpPath(remoteDirectory, true, 30000);
+            }
+        }
+        if (cleaned.success) {
+            cleaned = findRemoteDirectory(client, found);
+            if (cleaned.success && found) {
+                cleaned = {false, "Exact transfer remote directory remains"};
+            }
+        }
+        client.close();
+        return cleaned;
+    };
+    const auto reconnect = [&](cardputer::SshClient& client) {
+        client.close();
+        return connect(client);
+    };
+    const auto clearWorkspaceName = [&](const String& name) {
+        const cardputer::OperationResult access =
+            cardputer::requireSdCleanupAccess();
+        if (!access.success) return access;
+        const String path = cardputer::workspaceFilePath(name);
+        if (SD.exists(path) && !SD.remove(path)) {
+            return cardputer::OperationResult{
+                false, "Exact transfer verification file could not be removed"};
+        }
+        return cardputer::OperationResult{true, ""};
+    };
+
+    cardputer::SshClient client;
+    outcome = connect(client);
+    bool remoteCollision = false;
+    if (outcome.success) outcome = findRemoteDirectory(client, remoteCollision);
+    if (outcome.success && remoteCollision) {
+        outcome = {false, "Transfer remote fixture directory already exists"};
+    }
+    if (outcome.success) {
+        outcome = client.createSftpDirectory(remoteDirectory, 30000);
+        if (outcome.success) remoteDirectoryOwned = true;
+    }
+    if (outcome.success) outcome = writePatternFile(workspaceNames[0]);
+    if (outcome.success) {
+        const cardputer::SftpMutationResult uploaded =
+            client.uploadSftpFileControlled(
+                workspaceNames[0], remoteSource, false, 60000, neverCancel);
+        if (!uploaded.success) outcome = {false, uploaded.error};
+    }
+    if (outcome.success) {
+        const cardputer::SftpMutationResult downloaded =
+            client.downloadSftpFileControlled(
+                remoteSource, workspaceNames[1], false, 60000, neverCancel);
+        if (!downloaded.success) outcome = {false, downloaded.error};
+    }
+    if (outcome.success) outcome = expectPatternFile(workspaceNames[1]);
+    if (outcome.success) {
+        const cardputer::SftpMutationResult setup =
+            client.writeSftpTextFileControlled(
+                remoteTarget, existingContent, false, 30000, neverCancel);
+        if (!setup.success) outcome = {false, setup.error};
+    }
+    if (outcome.success) {
+        const cardputer::SftpMutationResult denied =
+            client.uploadSftpFileControlled(
+                workspaceNames[0], remoteTarget, false, 60000, neverCancel);
+        if (denied.success || denied.outcomeUnknown ||
+            denied.error.indexOf("cleanup=removed") < 0) {
+            outcome = {false, "Transfer upload did not safely deny overwrite"};
+        }
+    }
+    if (outcome.success) {
+        const cardputer::SftpMutationResult verified =
+            client.downloadSftpFileControlled(
+                remoteTarget, workspaceNames[2], false, 30000, neverCancel);
+        if (!verified.success) outcome = {false, verified.error};
+    }
+    if (outcome.success) {
+        outcome = expectTextFile(workspaceNames[2], existingContent);
+    }
+    if (outcome.success) outcome = clearWorkspaceName(workspaceNames[2]);
+    if (outcome.success) {
+        const cardputer::SftpMutationResult replaced =
+            client.uploadSftpFileControlled(
+                workspaceNames[0], remoteTarget, true, 60000, neverCancel);
+        if (!replaced.success) outcome = {false, replaced.error};
+    }
+    if (outcome.success) {
+        const cardputer::SftpMutationResult verified =
+            client.downloadSftpFileControlled(
+                remoteTarget, workspaceNames[2], false, 60000, neverCancel);
+        if (!verified.success) outcome = {false, verified.error};
+    }
+    if (outcome.success) outcome = expectPatternFile(workspaceNames[2]);
+    if (outcome.success) outcome = writeTextFile(workspaceNames[3], existingContent);
+    if (outcome.success) {
+        const cardputer::SftpMutationResult denied =
+            client.downloadSftpFileControlled(
+                remoteSource, workspaceNames[3], false, 60000, neverCancel);
+        if (denied.success || denied.outcomeUnknown) {
+            outcome = {false, "Transfer download did not safely deny overwrite"};
+        }
+    }
+    if (outcome.success) {
+        outcome = expectTextFile(workspaceNames[3], existingContent);
+    }
+    if (outcome.success) {
+        const cardputer::SftpMutationResult replaced =
+            client.downloadSftpFileControlled(
+                remoteSource, workspaceNames[3], true, 60000, neverCancel);
+        if (!replaced.success) outcome = {false, replaced.error};
+    }
+    if (outcome.success) outcome = expectPatternFile(workspaceNames[3]);
+
+    if (outcome.success) outcome = clearWorkspaceName(workspaceNames[2]);
+    std::size_t downloadCancelChecks = 0;
+    const std::function<bool()> cancelDownload = [&]() {
+        ++downloadCancelChecks;
+        return downloadCancelChecks >= 4;
+    };
+    if (outcome.success) {
+        const cardputer::SftpMutationResult canceled =
+            client.downloadSftpFileControlled(
+                remoteSource, workspaceNames[2], false, 60000,
+                cancelDownload);
+        const String canceledPath =
+            cardputer::workspaceFilePath(workspaceNames[2]);
+        const cardputer::OperationResult access = cardputer::requireSdReadAccess();
+        if (!access.success) {
+            outcome = access;
+        } else if (canceled.success ||
+            canceled.error.indexOf("canceled") < 0 ||
+            SD.exists(canceledPath) || SD.exists(canceledPath + ".tmp") ||
+            SD.exists(canceledPath + ".bak")) {
+            outcome = {false, "Transfer download cancellation was not exact"};
+        }
+    }
+    if (outcome.success && (!client.isOpen() || !client.isSftpOpen())) {
+        outcome = reconnect(client);
+    }
+    if (outcome.success) {
+        const cardputer::SftpMutationResult reused =
+            client.downloadSftpFileControlled(
+                remoteSource, workspaceNames[2], false, 60000, neverCancel);
+        if (!reused.success) outcome = {false, reused.error};
+    }
+    if (outcome.success) outcome = expectPatternFile(workspaceNames[2]);
+    if (outcome.success) outcome = clearWorkspaceName(workspaceNames[2]);
+
+    if (outcome.success) {
+        const cardputer::SftpMutationResult reset =
+            client.writeSftpTextFileControlled(
+                remoteTarget, existingContent, true, 30000, neverCancel);
+        if (!reset.success) outcome = {false, reset.error};
+    }
+    std::size_t cancelChecks = 0;
+    const std::function<bool()> cancelDuringTransfer = [&]() {
+        ++cancelChecks;
+        return cancelChecks >= 4;
+    };
+    if (outcome.success) {
+        const cardputer::SftpMutationResult canceled =
+            client.uploadSftpFileControlled(
+                workspaceNames[0], remoteTarget, true, 60000,
+                cancelDuringTransfer);
+        const bool cleanupRemoved =
+            canceled.error.indexOf("cleanup=removed") >= 0;
+        const bool cleanupNotAttemptedWithClosedSession =
+            canceled.error.indexOf("cleanup=not_attempted") >= 0 &&
+            !client.isOpen();
+        if (canceled.success || canceled.error.indexOf("canceled") < 0 ||
+            (!cleanupRemoved && !cleanupNotAttemptedWithClosedSession)) {
+            outcome = {false, "Transfer cancel did not report a safe cleanup outcome"};
+        }
+    }
+    if (outcome.success && (!client.isOpen() || !client.isSftpOpen())) {
+        outcome = reconnect(client);
+    }
+    if (outcome.success) outcome = clearWorkspaceName(workspaceNames[2]);
+    if (outcome.success) {
+        const cardputer::SftpMutationResult verified =
+            client.downloadSftpFileControlled(
+                remoteTarget, workspaceNames[2], false, 30000, neverCancel);
+        if (!verified.success) outcome = {false, verified.error};
+    }
+    if (outcome.success) {
+        outcome = expectTextFile(workspaceNames[2], existingContent);
+    }
+
+    if (outcome.success) {
+        const std::uint32_t startedAt = millis();
+        const cardputer::SftpMutationResult timedOut =
+            client.uploadSftpFileControlled(
+                workspaceNames[0], remoteTarget, true, 25, neverCancel);
+        const std::uint32_t elapsedMs = millis() - startedAt;
+        const bool cleanupRemoved =
+            timedOut.error.indexOf("cleanup=removed") >= 0;
+        const bool cleanupNotAttemptedWithClosedSession =
+            timedOut.error.indexOf("cleanup=not_attempted") >= 0 &&
+            !client.isOpen();
+        if (timedOut.success || timedOut.error.indexOf("timed out") < 0 ||
+            elapsedMs > 1000 ||
+            (!cleanupRemoved && !cleanupNotAttemptedWithClosedSession)) {
+            outcome = {false, "Transfer deadline was not bounded with explicit cleanup"};
+        }
+    }
+    if (outcome.success && (!client.isOpen() || !client.isSftpOpen())) {
+        outcome = reconnect(client);
+    }
+    if (outcome.success) outcome = clearWorkspaceName(workspaceNames[2]);
+    if (outcome.success) {
+        const cardputer::SftpMutationResult verified =
+            client.downloadSftpFileControlled(
+                remoteTarget, workspaceNames[2], false, 30000, neverCancel);
+        if (!verified.success) outcome = {false, verified.error};
+    }
+    if (outcome.success) {
+        outcome = expectTextFile(workspaceNames[2], existingContent);
+    }
+    client.close();
+
+    const cardputer::OperationResult remoteFirst = cleanupRemote();
+    const cardputer::OperationResult remoteSecond = remoteFirst.success
+        ? cleanupRemote() : remoteFirst;
+    const cardputer::OperationResult localCleanup = cleanupWorkspace();
+    cleanupComplete = remoteFirst.success && remoteSecond.success &&
+        localCleanup.success;
+    if (!cleanupComplete) {
+        const String cleanupError = !remoteFirst.success
+            ? remoteFirst.error
+            : (!remoteSecond.success ? remoteSecond.error : localCleanup.error);
+        return {false, outcome.success
+            ? cleanupError
+            : outcome.error + "; exact transfer cleanup failed: " + cleanupError};
+    }
+    return outcome;
 }
 
 cardputer::OperationResult runSshDemoTest()
@@ -456,6 +1600,38 @@ String parentSftpPath(const String& path)
     return separator <= 0 ? String("/") : path.substring(0, separator);
 }
 
+bool deviceSftpTransferCancelled()
+{
+    M5Cardputer.update();
+    if (!M5Cardputer.Keyboard.isChange() ||
+        !M5Cardputer.Keyboard.isPressed()) {
+        return false;
+    }
+    const Keyboard_Class::KeysState keys = M5Cardputer.Keyboard.keysState();
+    return keys.esc || keyboardWordContains(keys, '`');
+}
+
+bool confirmDeviceSftpDestination(
+    const String& title,
+    const String& destination,
+    bool overwrite)
+{
+    return modalSelection(
+        title,
+        {"Cancel", overwrite ? "Overwrite existing target" : "Transfer to new target"},
+        0, "Destination: " + destination) == 1;
+}
+
+cardputer::OperationResult deviceSftpMutationResult(
+    const cardputer::SftpMutationResult& mutation)
+{
+    if (mutation.success) return {true, ""};
+    if (!mutation.error.isEmpty()) return {false, mutation.error};
+    return {false, mutation.outcomeUnknown
+        ? String("SFTP transfer outcome is unknown and was not retried")
+        : String("SFTP transfer failed")};
+}
+
 struct WorkspaceFileSelectionResult {
     bool success;
     bool selected;
@@ -605,10 +1781,29 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
             std::string remoteName = selection.file.name.c_str();
             if (!modalTextInput("REMOTE NAME", "Destination filename", remoteName, 255,
                                 false, remoteName)) continue;
-            cardputer::showBusyScreen("SFTP UPLOAD", "Writing remote file...");
+            const String destination = joinSftpPath(path, remoteName.c_str());
+            bool overwrite = false;
+            bool destinationIsDirectory = false;
+            for (const cardputer::SftpEntry& entry : listed.entries) {
+                if (entry.name == remoteName.c_str()) {
+                    overwrite = true;
+                    destinationIsDirectory = entry.directory;
+                    break;
+                }
+            }
+            if (destinationIsDirectory) {
+                result = {false, "SFTP upload destination is an existing directory"};
+                break;
+            }
+            if (!confirmDeviceSftpDestination(
+                    "CONFIRM SFTP UPLOAD", destination, overwrite)) {
+                continue;
+            }
+            cardputer::showBusyScreen("SFTP UPLOAD", "Writing remote file... ESC cancels");
             cardputer::markOperation("sftp_upload");
-            result = client.uploadSftpFile(selection.file.name,
-                                           joinSftpPath(path, remoteName.c_str()), 60000);
+            result = deviceSftpMutationResult(client.uploadSftpFileControlled(
+                selection.file.name, destination, overwrite, 60000,
+                deviceSftpTransferCancelled));
             if (!result.success) break;
             continue;
         }
@@ -651,9 +1846,23 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
             std::string localName = entry.name.c_str();
             if (!modalTextInput("DOWNLOAD TO SD", "Workspace filename", localName, 502,
                                 false, localName)) continue;
-            cardputer::showBusyScreen("SFTP DOWNLOAD", "Saving to microSD workspace...");
+            const cardputer::OperationResult readable = cardputer::requireSdReadAccess();
+            if (!readable.success) {
+                result = readable;
+                break;
+            }
+            const String localPath = cardputer::workspaceFilePath(localName.c_str());
+            const bool overwrite = SD.exists(localPath);
+            if (!confirmDeviceSftpDestination(
+                    "CONFIRM SFTP DOWNLOAD", localPath, overwrite)) {
+                continue;
+            }
+            cardputer::showBusyScreen(
+                "SFTP DOWNLOAD", "Saving to microSD workspace... ESC cancels");
             cardputer::markOperation("sftp_download");
-            result = client.downloadSftpFile(remotePath, localName.c_str(), 60000);
+            result = deviceSftpMutationResult(client.downloadSftpFileControlled(
+                remotePath, localName.c_str(), overwrite, 60000,
+                deviceSftpTransferCancelled));
             if (!result.success) break;
         } else if (action == 1) {
             std::string name = entry.name.c_str();
@@ -673,7 +1882,7 @@ cardputer::OperationResult runSftpBrowser(const cardputer::SshProfile& profile)
     return result.success ? cardputer::OperationResult{true, "SFTP session closed"} : result;
 }
 
-cardputer::OperationResult installSshKeyFromWorkspace()
+cardputer::OperationResult installSshKeyFromWorkspace(std::uint64_t profileId)
 {
     const WorkspaceFileSelectionResult selection = selectWorkspaceFilePage(
         "INSTALL SSH KEY", includeWorkspacePrivateKey, workspacePrivateKeyLabel);
@@ -681,7 +1890,8 @@ cardputer::OperationResult installSshKeyFromWorkspace()
     if (selection.empty) return {false, "Put a .pem or .key file in the SD workspace first"};
     if (!selection.selected) return {true, "Key installation cancelled"};
     const String sourcePath = cardputer::workspaceFilePath(selection.file.name);
-    cardputer::OperationResult result = cardputer::installSshPrivateKey(sourcePath);
+    cardputer::OperationResult result = cardputer::installSshPrivateKey(
+        sourcePath, profileId);
     if (result.success && !SD.remove(sourcePath)) {
         result = {false, "Private key installed, but its workspace source could not be removed"};
     }
@@ -692,9 +1902,10 @@ cardputer::OperationResult runSshTool()
 {
     String status;
     while (true) {
-        std::vector<cardputer::SshProfile> profiles;
+        std::vector<cardputer::SshProfileSummary> profiles;
         std::size_t selectedIndex = 0;
-        cardputer::OperationResult result = cardputer::loadSshProfiles(profiles, selectedIndex);
+        cardputer::OperationResult result =
+            cardputer::loadSshProfileSummaries(profiles, selectedIndex);
         if (!result.success) return result;
         const String selectedName = profiles.empty() ? String("not configured")
                                                       : profiles[selectedIndex].name;
@@ -702,12 +1913,12 @@ cardputer::OperationResult runSshTool()
             "Connect: " + selectedName,
             "SFTP: " + selectedName,
             "Manage profiles (" + String(profiles.size()) + ")",
-            String("Install private key: ") + (cardputer::sshPrivateKeyIsInstalled() ? "yes" : "no"),
+            "Install/replace selected private key",
             "Terminal shortcuts",
             "Back to Tools"}, 0, status.isEmpty() ? "UP/DOWN  ENTER  ESC back" : status);
         status = "";
         if (action < 0 || action == 5) return {true, ""};
-        if ((action == 0 || action == 1) && profiles.empty()) {
+        if ((action == 0 || action == 1 || action == 3) && profiles.empty()) {
             status = "Create an SSH profile first";
             continue;
         }
@@ -715,10 +1926,15 @@ cardputer::OperationResult runSshTool()
             result = runSshTerminal();
             status = result.error;
         } else if (action == 1) {
-            result = runSftpBrowser(profiles[selectedIndex]);
+            cardputer::SshProfile profile;
+            result = cardputer::loadSshProfile(profile);
+            if (result.success && !cardputer::sshProfileIsComplete(profile)) {
+                result = {false, "Selected SSH profile is incomplete"};
+            }
+            if (result.success) result = runSftpBrowser(profile);
             status = result.success ? String("SFTP session closed") : result.error;
         } else if (action == 3) {
-            result = installSshKeyFromWorkspace();
+            result = installSshKeyFromWorkspace(profiles[selectedIndex].id);
             status = result.success ? String("Private key installed") : result.error;
         } else if (action == 4) {
             cardputer::showTextViewer("SSH SHORTCUTS", {
@@ -739,7 +1955,7 @@ cardputer::OperationResult runSshTool()
         } else {
             bool profilesDone = false;
             while (!profilesDone) {
-                result = cardputer::loadSshProfiles(profiles, selectedIndex);
+                result = cardputer::loadSshProfileSummaries(profiles, selectedIndex);
                 if (!result.success) return result;
                 std::vector<String> items;
                 for (std::size_t index = 0; index < profiles.size(); ++index) {
@@ -771,20 +1987,42 @@ cardputer::OperationResult runSshTool()
                      "Forget trusted host key", "Delete profile", "Back"}, 0,
                     "UP/DOWN  ENTER  ESC back");
                 if (profileAction == 0) {
-                    result = cardputer::selectSshProfile(index);
-                    if (result.success) result = runSshTerminal();
+                    result = index == selectedIndex
+                        ? runSshTerminal()
+                        : cardputer::OperationResult{
+                              false, "Make this profile default before connecting"};
                     status = result.error;
                 } else if (profileAction == 1) {
-                    result = runSftpBrowser(profiles[index]);
+                    if (index != selectedIndex) {
+                        result = {false, "Make this profile default before opening SFTP"};
+                    } else {
+                        cardputer::SshProfile profile;
+                        result = cardputer::loadSshProfile(profile);
+                        if (result.success && !cardputer::sshProfileIsComplete(profile)) {
+                            result = {false, "Selected SSH profile is incomplete"};
+                        }
+                        if (result.success) result = runSftpBrowser(profile);
+                    }
                     status = result.error;
                 } else if (profileAction == 2) {
                     result = cardputer::selectSshProfile(index);
                     status = result.success ? String("Default profile selected") : result.error;
                 } else if (profileAction == 3) {
-                    cardputer::SshProfile edited;
-                    if (editSshProfile(profiles[index], edited)) {
-                        result = cardputer::saveSshProfileAt(edited, index);
-                        status = result.success ? String("Profile saved") : result.error;
+                    if (index != selectedIndex) {
+                        status = "Make this profile default before editing";
+                    } else {
+                        cardputer::SshProfile current;
+                        result = cardputer::loadSshProfile(current);
+                        if (!result.success) {
+                            status = result.error;
+                        } else {
+                            cardputer::SshProfile edited;
+                            if (editSshProfile(current, edited)) {
+                                result = cardputer::saveSshProfileAt(edited, index);
+                                status = result.success
+                                    ? String("Profile saved") : result.error;
+                            }
+                        }
                     }
                 } else if (profileAction == 4) {
                     result = cardputer::forgetTrustedSshHost(profiles[index].host,

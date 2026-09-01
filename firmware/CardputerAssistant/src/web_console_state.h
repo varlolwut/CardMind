@@ -29,6 +29,7 @@ OperationResult buildWebConsoleChatState(
     const ProjectDocument& activeProject,
     const ChatDocument& activeChat,
     const ToolPolicyResolutionResult& toolPermissions,
+    std::uint64_t availableSshProfileId,
     std::size_t maximumContextBytes,
     std::uint32_t revision,
     JsonDocument& document);
@@ -37,12 +38,14 @@ void buildWebConsoleFilesState(const std::vector<WorkspaceFile>& files,
                                std::uint64_t usedBytes,
                                std::uint32_t revision,
                                JsonDocument& document);
-void buildWebConsoleSshState(const std::vector<SshProfile>& profiles,
-                             std::size_t selected,
-                             bool privateKeyInstalled,
-                             const WebConsoleRuntimeState& runtime,
-                             std::uint32_t revision,
-                             JsonDocument& document);
+OperationResult buildWebConsoleSshState(
+    const std::vector<SshProfileSummary>& profiles,
+    std::size_t selected,
+    bool selectedConfigured,
+    bool privateKeyInstalled,
+    const WebConsoleRuntimeState& runtime,
+    std::uint32_t revision,
+    JsonDocument& document);
 OperationResult buildWebConsoleSettingsState(
     const Settings& settings,
     const WebConsoleRuntimeState& runtime,

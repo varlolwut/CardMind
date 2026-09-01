@@ -1,5 +1,8 @@
 #include "api_client.h"
 
+#include "sftp_tool.h"
+#include "ssh_command_options.h"
+
 #include "instruction_policy.h"
 #include "text_utils.h"
 
@@ -257,8 +260,113 @@ void addToolSchema(JsonArray tools, ToolSchemaId schema)
             parameters["properties"]["command"]["type"] = "string";
             parameters["properties"]["command"]["description"] =
                 "A single UTF-8 shell command, up to 1024 bytes.";
+            parameters["properties"]["timeout_ms"]["type"] = "integer";
+            parameters["properties"]["timeout_ms"]["minimum"] =
+                kMinimumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["maximum"] =
+                kMaximumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["default"] =
+                kDefaultSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["description"] =
+                "One total deadline in milliseconds from connection start through command completion.";
+            parameters["properties"]["max_inline_output_bytes"]["type"] = "integer";
+            parameters["properties"]["max_inline_output_bytes"]["minimum"] =
+                kMinimumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["maximum"] =
+                kMaximumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["default"] =
+                kDefaultSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["description"] =
+                "Maximum combined stdout and stderr bytes returned inline; overflow streams once to a downloadable SD-backed command log and returns only a bounded summary/reference.";
             JsonArray required = parameters["required"].to<JsonArray>();
             required.add("command");
+            break;
+        }
+        case ToolSchemaId::SftpList: {
+            function["description"] =
+                "List one bounded page from an absolute directory on the selected trusted SSH host.";
+            parameters["properties"]["path"]["type"] = "string";
+            parameters["properties"]["offset"]["type"] = "integer";
+            parameters["properties"]["offset"]["minimum"] = 0;
+            parameters["properties"]["max_entries"]["type"] = "integer";
+            parameters["properties"]["max_entries"]["minimum"] = 1;
+            parameters["properties"]["max_entries"]["maximum"] =
+                kMaximumModelSftpPageEntries;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("path");
+            required.add("offset");
+            required.add("max_entries");
+            break;
+        }
+        case ToolSchemaId::SftpRead: {
+            function["description"] =
+                "Read one bounded UTF-8 chunk from an absolute path on the selected trusted SSH host.";
+            parameters["properties"]["path"]["type"] = "string";
+            parameters["properties"]["offset"]["type"] = "integer";
+            parameters["properties"]["offset"]["minimum"] = 0;
+            parameters["properties"]["max_bytes"]["type"] = "integer";
+            parameters["properties"]["max_bytes"]["minimum"] =
+                kMinimumModelSftpReadBytes;
+            parameters["properties"]["max_bytes"]["maximum"] =
+                kMaximumModelSftpChunkBytes;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("path");
+            required.add("offset");
+            required.add("max_bytes");
+            break;
+        }
+        case ToolSchemaId::SftpWrite: {
+            function["description"] =
+                "Safely write bounded UTF-8 content to an absolute remote path. Overwrite defaults to false and requires confirmation when true.";
+            parameters["properties"]["path"]["type"] = "string";
+            parameters["properties"]["content"]["type"] = "string";
+            parameters["properties"]["overwrite"]["type"] = "boolean";
+            parameters["properties"]["overwrite"]["default"] = false;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("path");
+            required.add("content");
+            break;
+        }
+        case ToolSchemaId::SftpMove: {
+            function["description"] =
+                "Move one absolute remote path to another. Overwrite defaults to false and requires confirmation when true.";
+            parameters["properties"]["source_path"]["type"] = "string";
+            parameters["properties"]["destination_path"]["type"] = "string";
+            parameters["properties"]["overwrite"]["type"] = "boolean";
+            parameters["properties"]["overwrite"]["default"] = false;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("source_path");
+            required.add("destination_path");
+            break;
+        }
+        case ToolSchemaId::SshSafeAction: {
+            function["description"] =
+                "Run one fixed reviewed read-only SSH action through the selected trusted profile.";
+            parameters["properties"]["action"]["type"] = "string";
+            parameters["properties"]["action"]["description"] =
+                "Exact fixed action: logs, service_state, containers, disk, or processes.";
+            JsonArray actions =
+                parameters["properties"]["action"]["enum"].to<JsonArray>();
+            for (const SshSafeActionEntry& action : sshSafeActionCatalog()) {
+                actions.add(action.id);
+            }
+            parameters["properties"]["timeout_ms"]["type"] = "integer";
+            parameters["properties"]["timeout_ms"]["minimum"] =
+                kMinimumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["maximum"] =
+                kMaximumSshCommandTimeoutMs;
+            parameters["properties"]["timeout_ms"]["default"] =
+                kDefaultSshCommandTimeoutMs;
+            parameters["properties"]["max_inline_output_bytes"]["type"] =
+                "integer";
+            parameters["properties"]["max_inline_output_bytes"]["minimum"] =
+                kMinimumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["maximum"] =
+                kMaximumSshCommandInlineOutputBytes;
+            parameters["properties"]["max_inline_output_bytes"]["default"] =
+                kDefaultSshCommandInlineOutputBytes;
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("action");
             break;
         }
         case ToolSchemaId::Count:
@@ -331,9 +439,10 @@ String buildToolChatRequest(const Settings& settings,
     }
     if (sshToolAvailable) {
         systemPrompt +=
-            " The selected SSH profile is available through ssh_command. "
-            "Use ssh_command only for remote-machine work requested by the user. Report the command's "
-            "non-zero exit status and never claim success when its output says otherwise.";
+            " The selected SSH profile is available through fixed read-only ssh_safe_action, "
+            "mutating ssh_command, and bounded SFTP list/read/write/move tools. "
+            "Use them only for remote-machine work requested by the user. "
+            "Report non-zero command exit status and never claim success when tool output says otherwise.";
         if (requiresGroup(ToolCapabilityGroup::Ssh)) {
             systemPrompt +=
                 " The current request requires an SSH tool call before the final answer.";

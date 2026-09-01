@@ -613,6 +613,8 @@ void openWebConsole(Screen returnScreen)
     const String previousWifiPassword = settings.wifiPassword;
     const cardputer::WebConsoleResult result = cardputer::runWebConsole(
         settings, activeChatId, kFirmwareVersion);
+    cachedSshToolProfileId = sshStorageReady
+        ? cardputer::sshToolAvailableProfileId() : 0;
     cardputer::markOperation("idle");
     if (!result.success) {
         menuStatus = result.error;

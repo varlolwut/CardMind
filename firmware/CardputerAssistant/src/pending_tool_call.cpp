@@ -1,11 +1,14 @@
 #include "pending_tool_call.h"
 
+#include "ssh_command_options.h"
+
 #include "file_workspace.h"
 #include "json_string_reader.h"
 #include "pending_tool_preview.h"
 #include "project_chat_storage.h"
 #include "project_storage.h"
 #include "sd_storage.h"
+#include "sftp_tool.h"
 #include "ssh_client.h"
 #include "text_utils.h"
 
@@ -36,57 +39,9 @@ struct CanonicalToolArgumentsResult {
     ToolSchemaId schema;
     std::string canonical;
     String fileName;
+    bool overwrite;
     String error;
 };
-
-class CanonicalArgumentsReader {
-public:
-    explicit CanonicalArgumentsReader(const std::string& value)
-        : value_(value), position_(0) {}
-
-    int available() const
-    {
-        return position_ < value_.size() ? 1 : 0;
-    }
-
-    int read()
-    {
-        return available()
-            ? static_cast<unsigned char>(value_[position_++]) : -1;
-    }
-
-    int peek() const
-    {
-        return available()
-            ? static_cast<unsigned char>(value_[position_]) : -1;
-    }
-
-    std::size_t position() const
-    {
-        return position_;
-    }
-
-    bool seek(std::size_t position)
-    {
-        if (position > value_.size()) return false;
-        position_ = position;
-        return true;
-    }
-
-private:
-    const std::string& value_;
-    std::size_t position_;
-};
-
-json_reader::JsonStringValueResult readCanonicalStringArgument(
-    const std::string& arguments,
-    const char* field,
-    std::size_t maximumBytes)
-{
-    CanonicalArgumentsReader reader(arguments);
-    return json_reader::readObjectStringField(
-        reader, field, 16, maximumBytes);
-}
 
 bool hasExactFields(const JsonObjectConst& object,
                     const char* const* fields,
@@ -189,41 +144,28 @@ bool updateLengthPrefixed(mbedtls_sha256_context& context,
 
 OperationResult selectedSshAuthorityIdentity(PendingToolTargetIdentity& target)
 {
-    std::vector<SshProfile> profiles;
-    std::size_t selectedIndex = 0;
-    const OperationResult loaded = loadSshProfiles(profiles, selectedIndex);
+    SshAuthoritySummary authority = {};
+    const OperationResult loaded = loadSelectedSshAuthority(authority);
     if (!loaded.success) {
         return loaded;
     }
-    if (profiles.empty() || selectedIndex >= profiles.size() ||
-        !sshProfileIsComplete(profiles[selectedIndex])) {
-        for (SshProfile& profile : profiles) {
-            profile.password = "";
-            profile.privateKeyPassphrase = "";
-        }
-        return {false, "Selected SSH profile is incomplete"};
-    }
-    const SshProfile& profile = profiles[selectedIndex];
     String trustedFingerprint;
     bool trusted = false;
     const OperationResult trustLoaded = loadTrustedSshFingerprint(
-        profile.host, profile.port, trustedFingerprint, trusted);
+        authority.host, authority.port, trustedFingerprint, trusted);
     if (!trustLoaded.success || !trusted) {
-        for (SshProfile& stored : profiles) {
-            stored.password = "";
-            stored.privateKeyPassphrase = "";
-        }
         return {false, trustLoaded.success
             ? String("Selected SSH host key is not trusted")
             : trustLoaded.error};
     }
-    const std::array<std::string, 7> fields = {{
-        std::to_string(selectedIndex),
-        profile.name.c_str(),
-        profile.host.c_str(),
-        std::to_string(profile.port),
-        profile.username.c_str(),
-        profile.authMode == SshAuthMode::Password ? "password" : "private_key",
+    const std::array<std::string, 8> fields = {{
+        std::to_string(authority.profileId),
+        authority.name.c_str(),
+        authority.host.c_str(),
+        std::to_string(authority.port),
+        authority.username.c_str(),
+        authority.authMode == SshAuthMode::Password ? "password" : "private_key",
+        std::to_string(authority.privateKeyId),
         trustedFingerprint.c_str(),
     }};
     mbedtls_sha256_context context;
@@ -235,10 +177,6 @@ OperationResult selectedSshAuthorityIdentity(PendingToolTargetIdentity& target)
     std::uint8_t digest[32] = {};
     valid = valid && mbedtls_sha256_finish(&context, digest) == 0;
     mbedtls_sha256_free(&context);
-    for (SshProfile& stored : profiles) {
-        stored.password = "";
-        stored.privateKeyPassphrase = "";
-    }
     if (!valid) {
         return {false, "Failed to hash selected SSH authority"};
     }
@@ -249,7 +187,7 @@ OperationResult selectedSshAuthorityIdentity(PendingToolTargetIdentity& target)
 
 CanonicalToolArgumentsResult failArguments(const String& error)
 {
-    return {false, ToolSchemaId::Count, "", "", error};
+    return {false, ToolSchemaId::Count, "", "", false, error};
 }
 
 CanonicalToolArgumentsResult canonicalizeParsedToolArguments(
@@ -268,6 +206,7 @@ CanonicalToolArgumentsResult canonicalizeParsedToolArguments(
     JsonDocument normalized;
     (void)normalized.to<JsonObject>();
     String fileName;
+    bool overwrite = false;
     switch (entry->schema) {
         case ToolSchemaId::WebSearch: {
             static constexpr const char* kFields[] = {"query"};
@@ -355,17 +294,216 @@ CanonicalToolArgumentsResult canonicalizeParsedToolArguments(
             break;
         }
         case ToolSchemaId::SshCommand: {
-            static constexpr const char* kFields[] = {"command"};
-            if (!hasExactFields(input, kFields, 1) ||
+            if (input.size() < 1 || input.size() > 3 ||
                 !input["command"].is<const char*>()) {
-                return failArguments("ssh_command requires exactly one string field: command");
+                return failArguments(
+                    "ssh_command requires command and only its optional timeout/output fields");
+            }
+            for (JsonPairConst field : input) {
+                const char* name = field.key().c_str();
+                if (std::strcmp(name, "command") != 0 &&
+                    std::strcmp(name, "timeout_ms") != 0 &&
+                    std::strcmp(name, "max_inline_output_bytes") != 0) {
+                    return failArguments("ssh_command contains an unknown field");
+                }
             }
             const std::string command = input["command"].as<const char*>();
             if (command.empty() || command.size() > 1024 || !isValidUtf8(command)) {
                 return failArguments(
                     "SSH command must be valid UTF-8 between 1 and 1024 bytes");
             }
+            const bool hasTimeout = input.containsKey("timeout_ms");
+            const bool hasOutputLimit = input.containsKey("max_inline_output_bytes");
+            if ((hasTimeout && !input["timeout_ms"].is<std::uint32_t>()) ||
+                (hasOutputLimit &&
+                 !input["max_inline_output_bytes"].is<std::size_t>())) {
+                return failArguments("SSH command timeout/output options must be integers");
+            }
+            const std::uint32_t timeoutMs = hasTimeout
+                ? input["timeout_ms"].as<std::uint32_t>()
+                : kDefaultSshCommandTimeoutMs;
+            const std::size_t maximumOutputBytes = hasOutputLimit
+                ? input["max_inline_output_bytes"].as<std::size_t>()
+                : kDefaultSshCommandInlineOutputBytes;
+            if (!isValidSshCommandTimeout(timeoutMs) ||
+                !isValidSshCommandInlineOutputLimit(maximumOutputBytes)) {
+                return failArguments("SSH command timeout/output options are outside current limits");
+            }
             normalized["command"] = command;
+            normalized["timeout_ms"] = timeoutMs;
+            normalized["max_inline_output_bytes"] = maximumOutputBytes;
+            break;
+        }
+        case ToolSchemaId::SshSafeAction: {
+            if (input.size() < 1 || input.size() > 3 ||
+                !input["action"].is<const char*>()) {
+                return failArguments(
+                    "ssh_safe_action requires action and only its optional timeout/output fields");
+            }
+            for (JsonPairConst field : input) {
+                const char* name = field.key().c_str();
+                if (std::strcmp(name, "action") != 0 &&
+                    std::strcmp(name, "timeout_ms") != 0 &&
+                    std::strcmp(name, "max_inline_output_bytes") != 0) {
+                    return failArguments(
+                        "ssh_safe_action contains an unknown field");
+                }
+            }
+            const JsonString actionValue = input["action"].as<JsonString>();
+            if (actionValue.isNull() ||
+                std::strlen(actionValue.c_str()) != actionValue.size()) {
+                return failArguments("SSH Safe Action id is invalid");
+            }
+            const std::string actionId(
+                actionValue.c_str(), actionValue.size());
+            if (sshSafeActionEntryForId(actionId) == nullptr) {
+                return failArguments(
+                    "SSH Safe Action id is not in the fixed reviewed set");
+            }
+            const bool hasTimeout = input.containsKey("timeout_ms");
+            const bool hasOutputLimit =
+                input.containsKey("max_inline_output_bytes");
+            if ((hasTimeout &&
+                 !input["timeout_ms"].is<std::uint32_t>()) ||
+                (hasOutputLimit &&
+                 !input["max_inline_output_bytes"].is<std::size_t>())) {
+                return failArguments(
+                    "SSH Safe Action timeout/output options must be integers");
+            }
+            const std::uint32_t timeoutMs = hasTimeout
+                ? input["timeout_ms"].as<std::uint32_t>()
+                : kDefaultSshCommandTimeoutMs;
+            const std::size_t maximumOutputBytes = hasOutputLimit
+                ? input["max_inline_output_bytes"].as<std::size_t>()
+                : kDefaultSshCommandInlineOutputBytes;
+            if (!isValidSshCommandTimeout(timeoutMs) ||
+                !isValidSshCommandInlineOutputLimit(maximumOutputBytes)) {
+                return failArguments(
+                    "SSH Safe Action timeout/output options are outside current limits");
+            }
+            normalized["action"] = actionId;
+            normalized["timeout_ms"] = timeoutMs;
+            normalized["max_inline_output_bytes"] = maximumOutputBytes;
+            break;
+        }
+        case ToolSchemaId::SftpList: {
+            static constexpr const char* kFields[] = {
+                "path", "offset", "max_entries",
+            };
+            if (!hasExactFields(input, kFields, 3) ||
+                !input["path"].is<const char*>() ||
+                !input["offset"].is<std::uint32_t>() ||
+                !input["max_entries"].is<std::size_t>()) {
+                return failArguments(
+                    "sftp_list requires exact path, offset and max_entries fields");
+            }
+            const JsonString path = input["path"].as<JsonString>();
+            const std::size_t maximumEntries =
+                input["max_entries"].as<std::size_t>();
+            if (path.isNull() ||
+                !isValidModelSftpPath(path.c_str(), path.size()) ||
+                maximumEntries == 0 ||
+                maximumEntries > kMaximumModelSftpPageEntries) {
+                return failArguments("sftp_list arguments are outside current limits");
+            }
+            fileName = path.c_str();
+            normalized["path"] = fileName;
+            normalized["offset"] = input["offset"].as<std::uint32_t>();
+            normalized["max_entries"] = maximumEntries;
+            break;
+        }
+        case ToolSchemaId::SftpRead: {
+            static constexpr const char* kFields[] = {
+                "path", "offset", "max_bytes",
+            };
+            if (!hasExactFields(input, kFields, 3) ||
+                !input["path"].is<const char*>() ||
+                !input["offset"].is<std::uint64_t>() ||
+                !input["max_bytes"].is<std::size_t>()) {
+                return failArguments(
+                    "sftp_read requires exact path, offset and max_bytes fields");
+            }
+            const JsonString path = input["path"].as<JsonString>();
+            const std::size_t maximumBytes =
+                input["max_bytes"].as<std::size_t>();
+            if (path.isNull() ||
+                !isValidModelSftpPath(path.c_str(), path.size()) ||
+                maximumBytes < kMinimumModelSftpReadBytes ||
+                maximumBytes > kMaximumModelSftpChunkBytes) {
+                return failArguments("sftp_read arguments are outside current limits");
+            }
+            fileName = path.c_str();
+            normalized["path"] = fileName;
+            normalized["offset"] = input["offset"].as<std::uint64_t>();
+            normalized["max_bytes"] = maximumBytes;
+            break;
+        }
+        case ToolSchemaId::SftpWrite: {
+            const bool hasOverwrite = input.containsKey("overwrite");
+            static constexpr const char* kRequired[] = {"path", "content"};
+            static constexpr const char* kWithOverwrite[] = {
+                "path", "content", "overwrite",
+            };
+            if (!(hasOverwrite
+                      ? hasExactFields(input, kWithOverwrite, 3)
+                      : hasExactFields(input, kRequired, 2)) ||
+                !input["path"].is<const char*>() ||
+                !input["content"].is<const char*>() ||
+                (hasOverwrite && !input["overwrite"].is<bool>())) {
+                return failArguments(
+                    "sftp_write requires path, content and optional boolean overwrite");
+            }
+            const JsonString path = input["path"].as<JsonString>();
+            const JsonString content = input["content"].as<JsonString>();
+            if (path.isNull() || content.isNull() ||
+                !isValidModelSftpPath(path.c_str(), path.size()) ||
+                content.size() > kMaximumModelSftpChunkBytes ||
+                !isValidModelSftpText(content.c_str(), content.size())) {
+                return failArguments("sftp_write arguments are outside current limits");
+            }
+            fileName = path.c_str();
+            overwrite = hasOverwrite && input["overwrite"].as<bool>();
+            normalized["path"] = fileName;
+            normalized["content"] = JsonString(
+                content.c_str(), content.size(), JsonString::Linked);
+            normalized["overwrite"] = overwrite;
+            break;
+        }
+        case ToolSchemaId::SftpMove: {
+            const bool hasOverwrite = input.containsKey("overwrite");
+            static constexpr const char* kRequired[] = {
+                "source_path", "destination_path",
+            };
+            static constexpr const char* kWithOverwrite[] = {
+                "source_path", "destination_path", "overwrite",
+            };
+            if (!(hasOverwrite
+                      ? hasExactFields(input, kWithOverwrite, 3)
+                      : hasExactFields(input, kRequired, 2)) ||
+                !input["source_path"].is<const char*>() ||
+                !input["destination_path"].is<const char*>() ||
+                (hasOverwrite && !input["overwrite"].is<bool>())) {
+                return failArguments(
+                    "sftp_move requires source/destination and optional boolean overwrite");
+            }
+            const JsonString source = input["source_path"].as<JsonString>();
+            const JsonString destination =
+                input["destination_path"].as<JsonString>();
+            if (source.isNull() || destination.isNull() ||
+                !isValidModelSftpPath(source.c_str(), source.size()) ||
+                !isValidModelSftpPath(
+                    destination.c_str(), destination.size()) ||
+                source.size() == destination.size() &&
+                    std::memcmp(source.c_str(), destination.c_str(),
+                                source.size()) == 0) {
+                return failArguments("sftp_move paths are invalid or identical");
+            }
+            fileName = destination.c_str();
+            overwrite = hasOverwrite && input["overwrite"].as<bool>();
+            normalized["source_path"] = JsonString(
+                source.c_str(), source.size(), JsonString::Linked);
+            normalized["destination_path"] = fileName;
+            normalized["overwrite"] = overwrite;
             break;
         }
         case ToolSchemaId::Count:
@@ -380,7 +518,9 @@ CanonicalToolArgumentsResult canonicalizeParsedToolArguments(
     if (canonical.empty() || canonical.size() > kMaximumPendingToolArgumentsBytes) {
         return failArguments("Canonical pending tool arguments exceed 32768 bytes");
     }
-    return {true, entry->schema, std::move(canonical), fileName, ""};
+    return {
+        true, entry->schema, std::move(canonical), fileName, overwrite, "",
+    };
 }
 
 CanonicalToolArgumentsResult canonicalizeToolArguments(const ToolCall& call)
@@ -523,6 +663,9 @@ void serializePendingToolCall(const PendingToolCall& pending, JsonDocument& docu
         }
     } else if (pending.target.kind == PendingToolTargetKind::Ssh) {
         target["authority_sha256"] = pending.target.sha256;
+        if (!pending.target.name.isEmpty()) {
+            target["name"] = pending.target.name;
+        }
     }
 }
 
@@ -608,8 +751,14 @@ CurrentPendingIdentityResult validateCurrentPendingIdentity(
     PendingToolTargetIdentity currentTarget;
     identity = validateProjectTarget(
         pending.projectId, schema, fileName, currentTarget);
-    if (identity.success && schema == ToolSchemaId::SshCommand) {
+    if (identity.success &&
+        (schema == ToolSchemaId::SshCommand ||
+         schema == ToolSchemaId::SshSafeAction ||
+         isModelSftpSchema(schema))) {
         identity = selectedSshAuthorityIdentity(currentTarget);
+        if (identity.success && isModelSftpSchema(schema)) {
+            currentTarget.name = fileName;
+        }
     }
     if (!identity.success) {
         return {false, {}, identity.error};
@@ -663,15 +812,22 @@ PendingToolCallBuildResult buildPendingToolCall(
     if (!result.success) {
         return {false, {}, result.error};
     }
-    if (arguments.schema == ToolSchemaId::SshCommand) {
+    if (arguments.schema == ToolSchemaId::SshCommand ||
+        arguments.schema == ToolSchemaId::SshSafeAction ||
+        isModelSftpSchema(arguments.schema)) {
         result = selectedSshAuthorityIdentity(target);
         if (!result.success) {
             return {false, {}, result.error};
         }
+        if (isModelSftpSchema(arguments.schema)) {
+            target.name = arguments.fileName;
+        }
     }
     const ToolPermissionDecision decision = toolRequestPlanDecision(plan, arguments.schema);
     const bool mandatory = arguments.schema == ToolSchemaId::SshCommand ||
-        (arguments.schema == ToolSchemaId::WriteFile && target.exists);
+        (arguments.schema == ToolSchemaId::WriteFile && target.exists) ||
+        ((arguments.schema == ToolSchemaId::SftpWrite ||
+          arguments.schema == ToolSchemaId::SftpMove) && arguments.overwrite);
     if (decision != ToolPermissionDecision::Ask &&
         !(decision == ToolPermissionDecision::Allow && mandatory)) {
         return {false, {},
@@ -954,13 +1110,27 @@ PendingToolCallResult loadPendingToolCall()
             return corrupted("absent file target fields are invalid");
         }
     } else if (std::strcmp(kind, "ssh") == 0) {
-        static constexpr const char* kFields[] = {"kind", "authority_sha256"};
-        if (!hasExactFields(target, kFields, 2) ||
+        static constexpr const char* kSshFields[] = {
+            "kind", "authority_sha256",
+        };
+        static constexpr const char* kSftpFields[] = {
+            "kind", "authority_sha256", "name",
+        };
+        const bool sftpTarget = isModelSftpSchema(arguments.schema);
+        if (!(sftpTarget
+                  ? hasExactFields(target, kSftpFields, 3)
+                  : hasExactFields(target, kSshFields, 2)) ||
             !target["authority_sha256"].is<const char*>()) {
             return corrupted("SSH target fields are invalid");
         }
         pending.target.kind = PendingToolTargetKind::Ssh;
         pending.target.sha256 = target["authority_sha256"].as<const char*>();
+        if (sftpTarget) {
+            if (!target["name"].is<const char*>()) {
+                return corrupted("SFTP target name is invalid");
+            }
+            pending.target.name = target["name"].as<const char*>();
+        }
         if (!isLowerHex(pending.target.sha256, 64)) {
             return corrupted("SSH authority SHA-256 is invalid");
         }
@@ -970,15 +1140,24 @@ PendingToolCallResult loadPendingToolCall()
     const bool fileMutation = arguments.schema == ToolSchemaId::WriteFile ||
         arguments.schema == ToolSchemaId::AppendFile;
     const bool mandatory = arguments.schema == ToolSchemaId::SshCommand ||
-        (arguments.schema == ToolSchemaId::WriteFile && pending.target.exists);
+        (arguments.schema == ToolSchemaId::WriteFile && pending.target.exists) ||
+        ((arguments.schema == ToolSchemaId::SftpWrite ||
+          arguments.schema == ToolSchemaId::SftpMove) && arguments.overwrite);
+    const bool sftpTarget = isModelSftpSchema(arguments.schema);
     if ((fileMutation &&
          (pending.target.kind != PendingToolTargetKind::File ||
           pending.target.name != arguments.fileName)) ||
         (!fileMutation && arguments.schema != ToolSchemaId::SshCommand &&
+         arguments.schema != ToolSchemaId::SshSafeAction &&
+         !sftpTarget &&
          pending.target.kind != PendingToolTargetKind::None) ||
         (arguments.schema == ToolSchemaId::AppendFile && !pending.target.exists) ||
-        (arguments.schema == ToolSchemaId::SshCommand &&
+        ((arguments.schema == ToolSchemaId::SshCommand ||
+          arguments.schema == ToolSchemaId::SshSafeAction) &&
          pending.target.kind != PendingToolTargetKind::Ssh) ||
+        (sftpTarget &&
+         (pending.target.kind != PendingToolTargetKind::Ssh ||
+          pending.target.name != arguments.fileName)) ||
         ((pending.reason == PendingToolConfirmationReason::Mandatory) != mandatory)) {
         return corrupted("target identity does not match the exact call and reason");
     }
@@ -1009,6 +1188,8 @@ PendingToolPreviewResult loadPendingToolPreview(const String& pendingId)
     String fileName;
     if (pending.target.kind == PendingToolTargetKind::File) {
         fileName = pending.target.name;
+    } else if (isModelSftpSchema(entry->schema)) {
+        fileName = pending.target.name;
     } else if (entry->schema == ToolSchemaId::ReadFile) {
         const json_reader::JsonStringValueResult decodedName =
             readCanonicalStringArgument(
@@ -1033,7 +1214,8 @@ PendingToolPreviewResult loadPendingToolPreview(const String& pendingId)
         pending.reason,
         PendingToolPreviewKind::Generic,
         String(pending.continuation.call.name.c_str()),
-        pending.target.kind == PendingToolTargetKind::File
+        (pending.target.kind == PendingToolTargetKind::File ||
+         isModelSftpSchema(entry->schema))
             ? pending.target.name : String(),
         0,
         0,
@@ -1089,6 +1271,41 @@ PendingToolPreviewResult loadPendingToolPreview(const String& pendingId)
         preview.kind = PendingToolPreviewKind::SshCommand;
         preview.proposedBytes = static_cast<std::uint32_t>(body.body.size());
         preview.body = std::move(body.body);
+    } else if (entry->schema == ToolSchemaId::SshSafeAction) {
+        const json_reader::JsonStringValueResult actionId =
+            readCanonicalStringArgument(
+                pending.continuation.call.arguments, "action", 32);
+        if (!actionId.success) {
+            return {false, {}, actionId.error};
+        }
+        const SshSafeActionEntry* action =
+            sshSafeActionEntryForId(actionId.value);
+        if (action == nullptr) {
+            return {false, {}, "Pending SSH Safe Action id is invalid"};
+        }
+        preview.kind = PendingToolPreviewKind::SshCommand;
+        preview.body = std::string("Fixed read-only action: ") +
+            action->id + "\nCommand: " + action->command;
+    } else if (entry->schema == ToolSchemaId::SftpWrite ||
+               entry->schema == ToolSchemaId::SftpMove) {
+        JsonDocument argumentsDocument;
+        const DeserializationError parsed = deserializeJson(
+            argumentsDocument, pending.continuation.call.arguments);
+        if (parsed || !argumentsDocument.is<JsonObject>()) {
+            return {false, {}, "Pending SFTP preview arguments are invalid"};
+        }
+        const JsonObjectConst arguments =
+            argumentsDocument.as<JsonObjectConst>();
+        preview.body = arguments["overwrite"].as<bool>()
+            ? "Overwrite existing destination: yes"
+            : "Overwrite existing destination: no";
+        if (entry->schema == ToolSchemaId::SftpMove) {
+            preview.body = std::string("Source: ") +
+                arguments["source_path"].as<const char*>() + "\n" + preview.body;
+        } else {
+            const JsonString content = arguments["content"].as<JsonString>();
+            preview.proposedBytes = static_cast<std::uint32_t>(content.size());
+        }
     }
     return {true, std::move(preview), ""};
 }
@@ -1142,8 +1359,12 @@ PendingToolCallResult claimPendingToolCallApproval(
     if (!identity.success) {
         return {false, true, {}, identity.error};
     }
+    const bool mutatesExistingTarget =
+        (arguments.schema == ToolSchemaId::SftpWrite ||
+         arguments.schema == ToolSchemaId::SftpMove)
+        ? arguments.overwrite : identity.target.exists;
     const ToolConfirmationReason reason = toolConfirmationReason(
-        decision, arguments.schema, identity.target.exists);
+        decision, arguments.schema, mutatesExistingTarget);
     if ((pending.reason == PendingToolConfirmationReason::Mandatory &&
          reason != ToolConfirmationReason::Mandatory) ||
         (pending.reason == PendingToolConfirmationReason::PolicyAsk &&

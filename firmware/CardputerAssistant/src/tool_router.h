@@ -23,7 +23,7 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
-    bool sshAvailable);
+    std::uint64_t selectedSshProfileId);
 ToolRequestPlan resolveChatToolRequestPlan(
     const Settings& settings,
     const ProjectDocument& project,
@@ -32,7 +32,7 @@ ToolRequestPlan resolveChatToolRequestPlan(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
-    bool sshAvailable);
+    std::uint64_t selectedSshProfileId);
 ToolExecutionResult routeToolCall(const Settings& settings,
                                   const ToolRequestPlan& plan,
                                   const ToolCall& call,

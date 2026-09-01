@@ -5158,6 +5158,37 @@ async function verifyHistoryHeapAndUtf8Identity(baseUrl, auth, nonce) {
   return {...evidence, cleanup: 'pass'};
 }
 
+async function verifyP4SshOutputDownload(baseUrl, auth, name, expectedBytesValue) {
+  if (!/^ssh-command-[0-9a-f]{16}\.log$/.test(name)) {
+    throw new Error('P4-05 output filename is not an exact collision-owned log name');
+  }
+  if (!/^[1-9][0-9]*$/.test(expectedBytesValue)) {
+    throw new Error('P4-05 expected output byte count must be a positive integer');
+  }
+  const expectedBytes = Number(expectedBytesValue);
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes > 0xFFFF_FFFF) {
+    throw new Error('P4-05 expected output byte count exceeds the download contract');
+  }
+  const response = await request(
+    baseUrl,
+    auth,
+    '/api/file/download?name=' + encodeURIComponent(name),
+    {method: 'GET'},
+  );
+  const downloaded = new Uint8Array(await response.arrayBuffer());
+  if (downloaded.byteLength !== expectedBytes) {
+    throw new Error(
+      'P4-05 downloaded ' + downloaded.byteLength +
+      ' bytes; expected ' + expectedBytes,
+    );
+  }
+  return {
+    download: 'pass',
+    output_bytes: expectedBytes,
+    filename_pattern: 'pass',
+  };
+}
+
 async function main() {
   const raw = JSON.parse(await readFile(credentialPath, 'utf8'));
   const baseUrl = new URL(requireString(raw.web_ui?.url, 'web_ui.url'));
@@ -5172,7 +5203,7 @@ async function main() {
     'full', 'projects', 'retry', 'compaction', 'limits', 'chat-scale',
     'workspace-scale', 'file-scale', 'unicode-path', 'unicode-path-recover',
     'shared-isolation', 'shared-isolation-recover', 'diagnostics', 'ssh',
-    'workspace-tool',
+    'p4-ssh-output', 'workspace-tool',
     'large-stream', 'atomic-failure', 'sd-degraded', 'instructions',
     'version-history',
     'request-settings', 'summary-regeneration', 'context-history',
@@ -5190,6 +5221,16 @@ async function main() {
       (line) => /reset_reason|previous_operation|panic|abort|heap/i.test(line),
     );
     console.log(JSON.stringify({result: 'pass', suite, relevant}));
+    return;
+  }
+  if (suite === 'p4-ssh-output') {
+    const output = await verifyP4SshOutputDownload(
+      baseUrl,
+      auth,
+      requiredCommandArgument('--p4-ssh-output-name'),
+      requiredCommandArgument('--p4-ssh-output-bytes'),
+    );
+    console.log(JSON.stringify({result: 'pass', suite, ssh_output: output}));
     return;
   }
   if (suite === 'ssh') {

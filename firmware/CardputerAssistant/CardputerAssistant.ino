@@ -29,6 +29,8 @@
 #include "src/storage.h"
 #include "src/storage_migration.h"
 #include "src/ssh_client.h"
+#include "src/sftp_tool.h"
+#include "src/ssh_command_output.h"
 #include "src/ssh_terminal.h"
 #include "src/ssh_tool.h"
 #include "src/text_utils.h"
@@ -52,6 +54,18 @@
 SET_LOOP_TASK_STACK_SIZE(16384);
 
 namespace {
+
+int modalSelection(const String& title, const std::vector<String>& items,
+                   std::size_t initialIndex, const String& footer);
+
+cardputer::OperationResult runSshCommandOutputStorageTest();
+cardputer::OperationResult runSshCommandOutputRemoteTest(
+    String& retainedName,
+    std::uint32_t& outputBytes);
+cardputer::OperationResult cleanupSshCommandOutputRemoteTest(
+    bool& alreadyAbsent,
+    bool& removed);
+cardputer::OperationResult runModelSftpRemoteTest(bool& cleanupComplete);
 
 constexpr const char* kFirmwareVersion = "1.12.1";
 constexpr std::size_t kMaximumInputBytes = 16384;
@@ -170,6 +184,7 @@ bool activeChatArchived = false;
 std::uint32_t activeChatArchivedMessageCount = 0;
 cardputer::ScopedToolPermissionPolicy activeChatToolPolicy =
     cardputer::defaultNewChatToolPermissionPolicy();
+String activeChatSshProfile;
 cardputer::ProjectDocument activeProjectDocument;
 bool chatStorageReady = false;
 String chatStorageError;
@@ -330,7 +345,7 @@ String crashJournalError;
 bool crashJournalInitialized = false;
 String crashJournalInitializationError;
 bool sshStorageReady = false;
-bool cachedSshToolAvailable = false;
+std::uint64_t cachedSshToolProfileId = 0;
 String sshStorageError;
 bool sshStorageInitialized = false;
 String sshStorageInitializationError;
@@ -415,7 +430,7 @@ cardputer::OperationResult captureDevicePendingContext(
 void openWebConsole(Screen returnScreen);
 cardputer::OperationResult runSshTerminal();
 cardputer::OperationResult runSshTool();
-cardputer::OperationResult runSshProfileStorageTest();
+cardputer::OperationResult runSshCommandOptionsTest();
 cardputer::OperationResult runSshSessionTest(bool testSftp);
 cardputer::OperationResult runSshDemoTest();
 cardputer::OperationResult saveAndApplyDeviceSettings(const cardputer::Settings& candidate);
@@ -710,6 +725,124 @@ std::vector<String> capabilityPolicyItems(
     return items;
 }
 
+constexpr std::size_t kSshProfileCeilingItemIndex =
+    cardputer::kToolCapabilityCount;
+constexpr std::size_t kScopedCapabilityBackItemIndex =
+    cardputer::kToolCapabilityCount + 1;
+
+String deviceSshProfileCeilingLabel(
+    const String& ownCeiling,
+    const String& parentProjectCeiling)
+{
+    const bool available = cardputer::sshProfileCeilingsAllowSelected(
+        cachedSshToolProfileId,
+        parentProjectCeiling.c_str(), parentProjectCeiling.length(),
+        ownCeiling.c_str(), ownCeiling.length());
+    String label = "SSH host: ";
+    if (!ownCeiling.isEmpty()) {
+        label += "Bound";
+    } else if (!parentProjectCeiling.isEmpty()) {
+        label += "Inherit project";
+    } else {
+        label += "Inherit selected";
+    }
+    label += available ? " (available)" : " (unavailable)";
+    return label;
+}
+
+std::vector<String> deviceScopedCapabilityPolicyItems(
+    const cardputer::ScopedToolPermissionPolicy& policy,
+    const String& ownCeiling,
+    const String& parentProjectCeiling)
+{
+    std::vector<String> items = capabilityPolicyItems(policy);
+    items.back() = deviceSshProfileCeilingLabel(
+        ownCeiling, parentProjectCeiling);
+    items.push_back("Back");
+    return items;
+}
+
+struct DeviceSshProfileCeilingChoice {
+    bool success;
+    bool changed;
+    String value;
+    String error;
+};
+
+DeviceSshProfileCeilingChoice chooseDeviceSshProfileCeiling(
+    const String& current)
+{
+    std::vector<cardputer::SshProfileSummary> profiles;
+    std::size_t selectedIndex = 0;
+    const cardputer::OperationResult loaded =
+        cardputer::loadSshProfileSummaries(profiles, selectedIndex);
+    if (!loaded.success) {
+        return {false, false, "", loaded.error};
+    }
+
+    std::vector<String> items;
+    std::vector<String> values;
+    items.reserve(profiles.size() + 2);
+    values.reserve(profiles.size() + 1);
+    items.push_back(String(current.isEmpty() ? "* " : "  ") +
+                    "Inherit selected profile");
+    values.push_back("");
+    std::size_t initialIndex = 0;
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        const cardputer::EncodedSshProfileId encoded =
+            cardputer::encodeSshProfileId(profiles[index].id);
+        if (encoded.error != cardputer::SshProfileIdCodecError::None) {
+            return {false, false, "", "Stored SSH profile ID is invalid"};
+        }
+        const String value(encoded.value.data());
+        const bool currentProfile = current == value;
+        if (currentProfile) initialIndex = index + 1;
+        String label = currentProfile ? "* " : "  ";
+        if (index == selectedIndex) label += "[default] ";
+        label += profiles[index].name + "  " + profiles[index].username +
+            "@" + profiles[index].host;
+        items.push_back(label);
+        values.push_back(value);
+    }
+    items.push_back("Cancel");
+    const int chosen = modalSelection(
+        "SSH HOST CEILING", items, initialIndex,
+        current.isEmpty() ? "Current: inherit  ENTER choose"
+                          : "Current: bound  ENTER choose");
+    if (chosen < 0 || static_cast<std::size_t>(chosen) == items.size() - 1) {
+        return {true, false, current, ""};
+    }
+    if (static_cast<std::size_t>(chosen) >= values.size()) {
+        return {false, false, "", "SSH host selection is outside the available profiles"};
+    }
+    const String selected = values[static_cast<std::size_t>(chosen)];
+    return {true, selected != current, selected, ""};
+}
+
+String deviceSshProfileCeilingSaveStatus(
+    const String& scope,
+    const String& previous,
+    const String& requested,
+    const cardputer::OperationResult& saved,
+    bool reloadSuccess,
+    const String& stored,
+    const String& reloadError)
+{
+    if (!reloadSuccess) {
+        return scope + " SSH host state unknown after save; reload failed: " +
+            reloadError;
+    }
+    if (stored == requested) {
+        return saved.success
+            ? scope + " SSH host saved"
+            : scope + " SSH host committed despite reported save failure";
+    }
+    if (stored == previous && !saved.success) {
+        return scope + " SSH host not changed: " + saved.error;
+    }
+    return scope + " SSH host save outcome unknown; stored state differs";
+}
+
 void clearChatScopedEphemeralState()
 {
     requestOutputOverrideChatId.clear();
@@ -786,6 +919,7 @@ cardputer::OperationResult activateChat(const String& id)
     activeChatArchived = loaded.chat.summary.archived;
     activeChatArchivedMessageCount = 0;
     activeChatToolPolicy = loaded.chat.toolPolicy;
+    activeChatSshProfile = loaded.chat.sshProfile;
     activeProjectDocument = project.project;
     activeResponse.clear();
     inputBuffer = loaded.chat.draft;
@@ -816,6 +950,7 @@ cardputer::OperationResult createAndActivateChat()
     activeChatArchived = false;
     activeChatArchivedMessageCount = 0;
     activeChatToolPolicy = created.chat.toolPolicy;
+    activeChatSshProfile = created.chat.sshProfile;
     history.clear();
     activeResponse.clear();
     inputBuffer.clear();
@@ -905,6 +1040,7 @@ cardputer::OperationResult activateProject(const String& projectId)
     activeProjectTitle = project.project.summary.title;
     activeProjectDocument = project.project;
     activeChatId.clear();
+    activeChatSshProfile.clear();
     result = refreshChatList();
     if (!result.success) {
         return result;
@@ -1971,7 +2107,7 @@ void submitPrompt()
             fileWorkspaceReady &&
                 currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
-            cardputer::sshToolIsAvailable());
+            cachedSshToolProfileId);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {
         statusMessage = planError;
@@ -2052,7 +2188,9 @@ void renderChatToolPolicy()
     const cardputer::ChatDocumentResult chat =
         cardputer::loadProjectChatMetadata(activeProjectId, selectedChatId);
     const std::vector<String> items = chat.success
-        ? capabilityPolicyItems(chat.chat.toolPolicy)
+        ? deviceScopedCapabilityPolicyItems(
+              chat.chat.toolPolicy, chat.chat.sshProfile,
+              activeProjectDocument.sshProfile)
         : std::vector<String>{"Back"};
     cardputer::showSelectionList(
         "CHAT CAPABILITIES", items, capabilityPolicyIndex,
@@ -2117,13 +2255,14 @@ cardputer::ToolPolicyResolutionResult activeChatToolPermissionResolution()
 {
     cardputer::ChatDocument chat;
     chat.toolPolicy = activeChatToolPolicy;
+    chat.sshProfile = activeChatSshProfile;
     return cardputer::resolveChatToolPermissions(
         settings, activeProjectDocument, chat, composerToolIntent,
         fileWorkspaceReady,
         fileWorkspaceReady &&
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
         currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
-        cachedSshToolAvailable);
+        cachedSshToolProfileId);
 }
 
 cardputer::ChatCapabilityState chatCapabilityGroupState(
@@ -2205,7 +2344,7 @@ void renderChatCapabilityStatus()
                 fileWorkspaceReady &&
                     currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
                 currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
-                cachedSshToolAvailable);
+                cachedSshToolProfileId);
         if (resolution.error != cardputer::ToolPolicyContractError::None) {
             lines.push_back("Invalid capability policy");
         } else {
@@ -2499,7 +2638,7 @@ PendingContinuationInputs loadPendingContinuationInputs()
         fileWorkspaceReady &&
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
         currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
-        cardputer::sshToolIsAvailable());
+        cachedSshToolProfileId);
     result.error = toolRequestPlanError(result.plan);
     const cardputer::ToolCatalogEntry* entry = cardputer::toolCatalogEntryForName(
         pending.pending.continuation.call.name);
@@ -2795,7 +2934,7 @@ void allowPendingToolForChat()
                                 cardputer::SdStorageState::Ready,
                         currentSdStorageStatus.state ==
                             cardputer::SdStorageState::Ready,
-                        cardputer::sshToolIsAvailable());
+                        cachedSshToolProfileId);
                 if (toolRequestPlanError(updatedPlan).isEmpty()) {
                     continuationPlan = updatedPlan;
                 } else {
@@ -2875,7 +3014,8 @@ void renderProjectToolPolicy()
     const cardputer::ProjectDocumentResult project =
         cardputer::loadProject(selectedProjectId);
     const std::vector<String> items = project.success
-        ? capabilityPolicyItems(project.project.toolPolicy)
+        ? deviceScopedCapabilityPolicyItems(
+              project.project.toolPolicy, project.project.sshProfile, "")
         : std::vector<String>{"Back"};
     cardputer::showSelectionList(
         "PROJECT CAPABILITIES", items, capabilityPolicyIndex,
@@ -2902,6 +3042,8 @@ void runUiSearchEndToEndTest()
 
     activeChatId = created.chat.summary.id;
     activeChatTitle = created.chat.summary.title;
+    activeChatToolPolicy = created.chat.toolPolicy;
+    activeChatSshProfile = created.chat.sshProfile;
     history.clear();
     activeResponse.clear();
     inputBuffer = "/search cardputer zero";
@@ -2930,6 +3072,8 @@ void runUiSearchEndToEndTest()
     activeProjectId = originalProjectId;
     activeChatId = restored.chat.summary.id;
     activeChatTitle = restored.chat.summary.title;
+    activeChatToolPolicy = restored.chat.toolPolicy;
+    activeChatSshProfile = restored.chat.sshProfile;
     history = restored.chat.messages;
     activeResponse.clear();
     inputBuffer.clear();
@@ -3120,7 +3264,8 @@ void setup()
         ? cardputer::initializeSshStorage()
         : cardputer::OperationResult{false, fileWorkspaceError};
     sshStorageReady = sshStorageResult.success;
-    cachedSshToolAvailable = sshStorageReady && cardputer::sshToolIsAvailable();
+    cachedSshToolProfileId = sshStorageReady
+        ? cardputer::sshToolAvailableProfileId() : 0;
     sshStorageError = sshStorageResult.success ? String() : sshStorageResult.error;
     sshStorageInitialized = sshStorageResult.success;
     sshStorageInitializationError = sshStorageError;

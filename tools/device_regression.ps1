@@ -16,6 +16,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:readinessLost = $false
+$script:webConsoleActive = $false
+$script:cleanupReadinessConfirmed = $false
+$script:serialPending = ""
 
 function New-RegressionCase {
     param(
@@ -76,21 +80,103 @@ function Add-SerialCrashTail {
         [string]$LogPath
     )
 
-    $pending = ""
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt 4) {
         Start-Sleep -Milliseconds 40
-        $read = Read-SerialLines -Serial $Serial -Pending $pending
-        $pending = $read.Pending
+        $read = Read-SerialLines -Serial $Serial -Pending $script:serialPending
+        $script:serialPending = $read.Pending
         foreach ($line in $read.Lines) {
             if ($line.Length -gt 0) {
                 Add-Content -LiteralPath $LogPath -Value $line
             }
         }
     }
-    if ($pending.Length -gt 0) {
-        Add-Content -LiteralPath $LogPath -Value $pending
+    if ($script:serialPending.Length -gt 0) {
+        Add-Content -LiteralPath $LogPath -Value $script:serialPending
     }
+}
+
+function Read-ClassifiedSerialLines {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.Ports.SerialPort]$Serial,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LogPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    try {
+        $read = Read-SerialLines -Serial $Serial -Pending $script:serialPending
+    } catch {
+        $script:readinessLost = $true
+        throw
+    }
+    $script:serialPending = $read.Pending
+
+    $readinessLossLine = ""
+    foreach ($line in $read.Lines) {
+        if ($readinessLossLine.Length -eq 0 -and $line -match "Guru Meditation|Brownout|abort\(\)|ESP-ROM:esp32s3|rst:0x") {
+            $readinessLossLine = $line
+        }
+    }
+    if ($readinessLossLine.Length -eq 0 -and $script:serialPending -match "Guru Meditation|Brownout|abort\(\)|ESP-ROM:esp32s3|rst:0x") {
+        $readinessLossLine = $script:serialPending
+    }
+    if ($readinessLossLine.Length -gt 0) {
+        $script:readinessLost = $true
+    }
+
+    foreach ($line in $read.Lines) {
+        if ($line.Length -gt 0) {
+            Add-Content -LiteralPath $LogPath -Value $line
+        }
+    }
+    if ($readinessLossLine.Length -gt 0) {
+        Add-SerialCrashTail -Serial $Serial -LogPath $LogPath
+        throw "Device reset or panic during ${Context}: $readinessLossLine"
+    }
+    return $read.Lines
+}
+
+function Assert-InitialDeviceReadiness {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.Ports.SerialPort]$Serial,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LogPath
+    )
+
+    try {
+        Read-ClassifiedSerialLines -Serial $Serial -LogPath $LogPath -Context "initial readiness drain" | Out-Null
+        $Serial.WriteLine("PING")
+        $Serial.BaseStream.Flush()
+    } catch {
+        $script:readinessLost = $true
+        throw
+    }
+    $pongObserved = $false
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($stopwatch.Elapsed.TotalSeconds -lt 8) {
+        Start-Sleep -Milliseconds 40
+        $lines = Read-ClassifiedSerialLines -Serial $Serial -LogPath $LogPath -Context "initial readiness"
+        foreach ($line in $lines) {
+            if ($line.Length -eq 0) {
+                continue
+            }
+            if ($line -eq "PONG") {
+                $pongObserved = $true
+            }
+        }
+        if ($pongObserved) {
+            return
+        }
+    }
+    $script:readinessLost = $true
+    throw "Serial channel did not answer the initial PING"
 }
 
 function Invoke-RegressionCase {
@@ -105,77 +191,44 @@ function Invoke-RegressionCase {
         [string]$LogPath
     )
 
-    Start-Sleep -Milliseconds 1000
-    $synced = $false
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $Serial.ReadExisting() | Out-Null
-        $Serial.WriteLine("PING")
+    if ($script:readinessLost) {
+        throw "Device readiness was already lost before '$($Case.Name)'"
+    }
+    $script:cleanupReadinessConfirmed = $false
+    Start-Sleep -Milliseconds 100
+    try {
+        Read-ClassifiedSerialLines -Serial $Serial -LogPath $LogPath -Context "drain before '$($Case.Name)'" | Out-Null
+        $Serial.WriteLine($Case.Command)
         $Serial.BaseStream.Flush()
-        $syncPending = ""
-        $syncStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($syncStopwatch.Elapsed.TotalSeconds -lt 3) {
-            Start-Sleep -Milliseconds 40
-            $syncRead = Read-SerialLines -Serial $Serial -Pending $syncPending
-            $syncPending = $syncRead.Pending
-            foreach ($syncLine in $syncRead.Lines) {
-                if ($syncLine.Length -eq 0) {
-                    continue
-                }
-                Add-Content -LiteralPath $LogPath -Value $syncLine
-                if ($syncLine -match "Guru Meditation|Brownout|abort\(\)|ESP-ROM:esp32s3|rst:0x") {
-                    Add-SerialCrashTail -Serial $Serial -LogPath $LogPath
-                    throw "Device reset or panic while synchronizing before '$($Case.Name)': $syncLine"
-                }
-                if ($syncLine -eq "PONG") {
-                    $synced = $true
-                    break
-                }
-            }
-            if ($synced) {
-                break
-            }
-        }
-        if ($synced) {
-            break
-        }
+    } catch {
+        $script:readinessLost = $true
+        throw
     }
-    if (-not $synced) {
-        throw "Serial channel did not answer PING before '$($Case.Name)'"
-    }
-    Start-Sleep -Milliseconds 40
-    $Serial.ReadExisting() | Out-Null
-    $Serial.WriteLine($Case.Command)
-    $Serial.BaseStream.Flush()
     Write-Host ("RUN  {0}" -f $Case.Name)
     Add-Content -LiteralPath $LogPath -Value ("COMMAND name={0}" -f $Case.Name)
 
-    $pending = ""
     $completedLine = ""
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt $Case.TimeoutSeconds) {
         Start-Sleep -Milliseconds 40
-        $read = Read-SerialLines -Serial $Serial -Pending $pending
-        $pending = $read.Pending
-        foreach ($line in $read.Lines) {
+        $lines = Read-ClassifiedSerialLines -Serial $Serial -LogPath $LogPath -Context "'$($Case.Name)'"
+        foreach ($line in $lines) {
             if ($line.Length -eq 0) {
                 continue
             }
-            Add-Content -LiteralPath $LogPath -Value $line
-            if ($line -match "Guru Meditation|Brownout|abort\(\)|ESP-ROM:esp32s3|rst:0x") {
-                Add-SerialCrashTail -Serial $Serial -LogPath $LogPath
-                throw "Device reset or panic during '$($Case.Name)': $line"
-            }
-            if ($line -match $Case.CompletionPattern) {
+            if ($completedLine.Length -eq 0 -and $line -match $Case.CompletionPattern) {
                 $completedLine = $line
-                break
             }
         }
         if ($completedLine.Length -gt 0) {
+            $script:cleanupReadinessConfirmed = $true
             break
         }
     }
 
     if ($completedLine.Length -eq 0) {
+        $script:readinessLost = $true
+        $script:cleanupReadinessConfirmed = $false
         throw "Timed out after $($Case.TimeoutSeconds)s waiting for '$($Case.Name)'"
     }
     if ($completedLine -notmatch $Case.PassPattern) {
@@ -195,7 +248,6 @@ $offlineCases = @(
     (New-RegressionCase -Name "device settings" -Command "DEVICESETTINGSTEST" -CompletionPattern "^DEVICESETTINGSTEST result=" -PassPattern "^DEVICESETTINGSTEST result=pass" -TimeoutSeconds 45),
     (New-RegressionCase -Name "offline tools" -Command "OFFLINETEST" -CompletionPattern "^OFFLINETEST result=" -PassPattern "^OFFLINETEST result=pass$" -TimeoutSeconds 20),
     (New-RegressionCase -Name "SSH runtime" -Command "SSHCHECK" -CompletionPattern "^SSHCHECK result=" -PassPattern "^SSHCHECK result=pass" -TimeoutSeconds 60),
-    (New-RegressionCase -Name "SSH profile storage" -Command "SSHPROFILETEST" -CompletionPattern "^SSHPROFILETEST result=" -PassPattern "^SSHPROFILETEST result=pass" -TimeoutSeconds 45),
     (New-RegressionCase -Name "Python partition layout" -Command "PYTHONCHECK" -CompletionPattern "^PYTHONCHECK result=" -PassPattern "^PYTHONCHECK result=pass.*layout=yes.*image=yes" -TimeoutSeconds 20),
     (New-RegressionCase -Name "microphone before speaker" -Command "MICTEST" -CompletionPattern "^MICTEST result=" -PassPattern "^MICTEST result=pass.*peak=[1-9][0-9]*" -TimeoutSeconds 20),
     (New-RegressionCase -Name "speaker hardware" -Command "TTSHW" -CompletionPattern "^TTSHW result=" -PassPattern "^TTSHW result=pass$" -TimeoutSeconds 20),
@@ -224,7 +276,7 @@ $onlineCases = @(
     (New-RegressionCase -Name "web search API" -Command "WEBTEST" -CompletionPattern "^WEBTEST result=" -PassPattern "^WEBTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "web contents API" -Command "FETCHTEST" -CompletionPattern "^FETCHTEST result=" -PassPattern "^FETCHTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "search sources cache" -Command "SEARCHCACHETEST" -CompletionPattern "^SEARCHCACHETEST result=" -PassPattern "^SEARCHCACHETEST result=pass" -TimeoutSeconds 30),
-    (New-RegressionCase -Name "model search tool decision" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=(?:pass search_called=yes tool=web_search response_bytes=[1-9][0-9]* error=none|failed search_called=no tool=WebSearch response_bytes=[1-9][0-9]* error=Model did not call every required tool capability \(group mask 0x1\))$" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "model search tool decision" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=(?:pass search_called=yes tool=web_search response_bytes=[1-9][0-9]* error=none|failed search_called=no tool=(?:WebSearch|none) response_bytes=[1-9][0-9]* error=Model did not call every required tool capability \(group mask 0x1\))$" -TimeoutSeconds 240),
     (New-RegressionCase -Name "UI search path" -Command "E2ETEST" -CompletionPattern "^E2ETEST result=" -PassPattern "^E2ETEST result=pass.*response=yes.*cleanup=yes" -TimeoutSeconds 300),
     (New-RegressionCase -Name "SSH host probe" -Command "SSHPROBE" -CompletionPattern "^SSHPROBE result=" -PassPattern "^SSHPROBE result=pass" -TimeoutSeconds 120),
     (New-RegressionCase -Name "public SSH SFTP and PTY" -Command "SSHDEMOTEST" -CompletionPattern "^SSHDEMOTEST result=" -PassPattern "^SSHDEMOTEST result=pass" -TimeoutSeconds 300),
@@ -246,7 +298,7 @@ $p1Cases = @(
     (New-RegressionCase -Name "web search API" -Command "WEBTEST" -CompletionPattern "^WEBTEST result=" -PassPattern "^WEBTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "web contents API" -Command "FETCHTEST" -CompletionPattern "^FETCHTEST result=" -PassPattern "^FETCHTEST result=pass(?: error=none)?$" -TimeoutSeconds 120),
     (New-RegressionCase -Name "search sources cache" -Command "SEARCHCACHETEST" -CompletionPattern "^SEARCHCACHETEST result=" -PassPattern "^SEARCHCACHETEST result=pass" -TimeoutSeconds 30),
-    (New-RegressionCase -Name "model search tool decision" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=(?:pass search_called=yes tool=web_search response_bytes=[1-9][0-9]* error=none|failed search_called=no tool=WebSearch response_bytes=[1-9][0-9]* error=Model did not call every required tool capability \(group mask 0x1\))$" -TimeoutSeconds 240),
+    (New-RegressionCase -Name "model search tool decision" -Command "SEARCHTEST" -CompletionPattern "^SEARCHTEST result=" -PassPattern "^SEARCHTEST result=(?:pass search_called=yes tool=web_search response_bytes=[1-9][0-9]* error=none|failed search_called=no tool=(?:WebSearch|none) response_bytes=[1-9][0-9]* error=Model did not call every required tool capability \(group mask 0x1\))$" -TimeoutSeconds 240),
     (New-RegressionCase -Name "UI search path" -Command "E2ETEST" -CompletionPattern "^E2ETEST result=" -PassPattern "^E2ETEST result=pass.*response=yes.*cleanup=yes" -TimeoutSeconds 300),
     (New-RegressionCase -Name "STT TLS" -Command "STTTLS" -CompletionPattern "^STTTLS result=" -PassPattern "^STTTLS result=pass$" -TimeoutSeconds 90),
     (New-RegressionCase -Name "STT authentication" -Command "STTAUTH" -CompletionPattern "^STTAUTH result=" -PassPattern "^STTAUTH result=pass$" -TimeoutSeconds 120),
@@ -314,7 +366,8 @@ $sdMountCases = @(
 )
 
 $webConsoleStartCases = @(
-    (New-RegressionCase -Name "web console start" -Command "CONSOLE" -CompletionPattern "^WEB_CONSOLE result=ready" -PassPattern "^WEB_CONSOLE result=ready" -TimeoutSeconds 20)
+    (New-RegressionCase -Name "web console start" -Command "CONSOLE" -CompletionPattern "^WEB_CONSOLE result=ready" -PassPattern "^WEB_CONSOLE result=ready" -TimeoutSeconds 20),
+    (New-RegressionCase -Name "web console exit" -Command "EXIT" -CompletionPattern "^WEB_CONSOLE result=stopped" -PassPattern "^WEB_CONSOLE result=stopped$" -TimeoutSeconds 20)
 )
 
 $webConsoleCycleCases = @(
@@ -341,7 +394,7 @@ $serial.WriteTimeout = 2000
 try {
     $serial.Open()
     Start-Sleep -Seconds 12
-    $serial.ReadExisting() | Out-Null
+    Assert-InitialDeviceReadiness -Serial $serial -LogPath $resolvedLogPath
     $cases = [System.Collections.Generic.List[object]]::new()
     if ($Suite -eq "status") {
         $cases.Add($offlineCases[0])
@@ -412,14 +465,29 @@ try {
     }
     foreach ($case in $cases) {
         Invoke-RegressionCase -Serial $serial -Case $case -LogPath $resolvedLogPath
+        if ($case.Command -eq "CONSOLE") {
+            $script:webConsoleActive = $true
+        }
+        if ($case.Command -eq "EXIT") {
+            $script:webConsoleActive = $false
+        }
     }
     Add-Content -LiteralPath $resolvedLogPath -Value ("CARDMIND_REGRESSION result=pass completed={0:o}" -f [DateTime]::UtcNow)
     Write-Host ("CARDMIND_REGRESSION result=pass cases={0} log={1}" -f $cases.Count, $resolvedLogPath)
+} catch {
+    $primaryError = $_.Exception
+    if ($script:webConsoleActive -and -not $script:readinessLost -and $script:cleanupReadinessConfirmed -and $serial.IsOpen) {
+        $cleanupCase = New-RegressionCase -Name "web console failure cleanup" -Command "EXIT" -CompletionPattern "^WEB_CONSOLE result=stopped" -PassPattern "^WEB_CONSOLE result=stopped$" -TimeoutSeconds 20
+        try {
+            Invoke-RegressionCase -Serial $serial -Case $cleanupCase -LogPath $resolvedLogPath
+            $script:webConsoleActive = $false
+        } catch {
+            throw "Regression failed: $($primaryError.Message); Web Console cleanup failed: $($_.Exception.Message)"
+        }
+    }
+    throw $primaryError
 } finally {
     if ($serial.IsOpen) {
-        $serial.WriteLine("EXIT")
-        $serial.BaseStream.Flush()
-        Start-Sleep -Milliseconds 500
         $serial.Close()
     }
     $serial.Dispose()

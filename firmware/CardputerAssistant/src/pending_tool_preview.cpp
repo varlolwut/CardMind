@@ -12,6 +12,45 @@ namespace {
 
 constexpr std::size_t kChangedLineLeadingContextBytes = 48;
 
+class CanonicalArgumentsReader {
+public:
+    explicit CanonicalArgumentsReader(const std::string& value)
+        : value_(value), position_(0) {}
+
+    int available() const
+    {
+        return position_ < value_.size() ? 1 : 0;
+    }
+
+    int read()
+    {
+        return available()
+            ? static_cast<unsigned char>(value_[position_++]) : -1;
+    }
+
+    int peek() const
+    {
+        return available()
+            ? static_cast<unsigned char>(value_[position_]) : -1;
+    }
+
+    std::size_t position() const
+    {
+        return position_;
+    }
+
+    bool seek(std::size_t position)
+    {
+        if (position > value_.size()) return false;
+        position_ = position;
+        return true;
+    }
+
+private:
+    const std::string& value_;
+    std::size_t position_;
+};
+
 bool isContinuationByte(char value)
 {
     return (static_cast<std::uint8_t>(value) & 0xC0U) == 0x80U;
@@ -177,6 +216,19 @@ std::string omittedLine(const char* label, std::size_t bytes)
 }
 
 }  // namespace
+
+json_reader::JsonStringValueResult readCanonicalStringArgument(
+    const std::string& arguments,
+    const char* field,
+    std::size_t maximumBytes)
+{
+    constexpr std::size_t kMaximumCanonicalToolArgumentFieldNameBytes =
+        sizeof("max_inline_output_bytes") - 1;
+    CanonicalArgumentsReader reader(arguments);
+    return json_reader::readObjectStringField(
+        reader, field, kMaximumCanonicalToolArgumentFieldNameBytes,
+        maximumBytes);
+}
 
 PendingToolPreviewBodyResult buildPendingFileReplacementPreview(
     const std::string& currentPrefix,

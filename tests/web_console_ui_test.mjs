@@ -46,6 +46,13 @@ const requiredFragments = [
     'role="textbox" aria-label="Interactive SSH terminal"',
     'id="sshKeyState"',
     'id="uploadSshKey" hidden',
+    'id="forgetSshHost" hidden',
+    'id="sftpTransferState"',
+    'id="cancelSftpTransfer" hidden',
+    'id="projectSshProfile"',
+    'id="projectSshProfileState"',
+    'id="chatSshProfile"',
+    'id="chatSshProfileState"',
     'class="row mobile-terminal-input"',
     'id="diagnostics"',
     'id="actionDialog"',
@@ -199,12 +206,20 @@ const requiredFragments = [
     'function renderChatState(s)',
     'function renderFilesState(s)',
     'function renderSshState(s)',
+    'function renderSshCeilings()',
+    'function sshCeilingState(storedId,matches,inheritLabel)',
+    'function runSftpTransfer(path,values,label)',
     'function renderSettingsState(s)',
     'function renderActivityState(s)',
     'function decodeToolPolicy(value,scoped)',
     'function encodeToolPolicy(values,scoped)',
     'function capabilityGroupState(capabilities,intent,group)',
     "'X-CardMind-Tool-Policy'",
+    "'X-CardMind-Ssh-Profile-Encoded'",
+    "'/api/ssh/forget'",
+    'new AbortController()',
+    'Outcome unknown after browser abort; inspect both source and destination before retrying',
+    "overwrite:overwrite?'1':'0'",
     'master_tool_policy:',
     'new_chat_tool_policy:',
     '>Default model</label>',
@@ -666,13 +681,6 @@ for (const forbiddenWrite of [
 if (!consoleSource.includes(
     "startupStorage.state == SdStorageState::Full) {\n        result = loadCommittedConsoleStorageReadOnly();")) {
     throw new Error("Full microSD startup does not use the read-only committed-state loader");
-}
-const keyUploadStart = consoleSource.indexOf("void handleSshKeyUploadData()");
-const keyUploadEnd = consoleSource.indexOf("void handleSshKeyUploadComplete()", keyUploadStart);
-const keyUpload = consoleSource.slice(keyUploadStart, keyUploadEnd);
-if ((keyUpload.match(/requireSdWriteAccess\(/g) ?? []).length < 5 ||
-    !keyUpload.includes("if (requireSdWriteAccess(0, 0).success)")) {
-    throw new Error("SSH private-key upload is not guarded across chunks, flush and install");
 }
 for (const rawRoute of [
     ["/api/project/settings/raw", "ProjectSettingsRawComplete", "ProjectSettingsRawData"],

@@ -82,6 +82,7 @@ constexpr std::size_t kToolCapabilityGroupCount =
     static_cast<std::size_t>(ToolCapabilityGroup::Count);
 constexpr std::uint8_t kAllToolCapabilityGroups = 0x0F;
 constexpr std::size_t kMaximumEncodedToolMessageIntentLength = 10;
+constexpr std::size_t kEncodedSshProfileIdLength = 16;
 
 using ToolPermissionPolicy = std::array<ToolPermission, kToolCapabilityCount>;
 using ScopedToolPermissionPolicy =
@@ -112,6 +113,23 @@ struct DecodedToolMessageIntent {
     ToolMessageIntentCodecError error;
 };
 
+enum class SshProfileIdCodecError : std::uint8_t {
+    None = 0,
+    InvalidLength = 1,
+    InvalidValue = 2,
+};
+
+struct EncodedSshProfileId {
+    std::array<char, kEncodedSshProfileIdLength + 1> value;
+    std::size_t length;
+    SshProfileIdCodecError error;
+};
+
+struct DecodedSshProfileId {
+    std::uint64_t profileId;
+    SshProfileIdCodecError error;
+};
+
 struct ResolvedToolPermission {
     ToolPermissionDecision decision;
     ToolPermissionSource source;
@@ -135,6 +153,19 @@ EncodedToolMessageIntent encodeToolMessageIntent(
 DecodedToolMessageIntent decodeToolMessageIntent(
     const char* text,
     std::size_t length) noexcept;
+EncodedSshProfileId encodeSshProfileId(std::uint64_t profileId) noexcept;
+DecodedSshProfileId decodeSshProfileId(
+    const char* text,
+    std::size_t length) noexcept;
+bool isValidSshProfileCeiling(
+    const char* text,
+    std::size_t length) noexcept;
+bool sshProfileCeilingsAllowSelected(
+    std::uint64_t selectedProfileId,
+    const char* projectCeiling,
+    std::size_t projectCeilingLength,
+    const char* chatCeiling,
+    std::size_t chatCeilingLength) noexcept;
 ToolPolicyResolutionResult resolveToolPolicy(
     const ToolPermissionPolicy& builtIn,
     const ToolPermissionPolicy& global,

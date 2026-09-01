@@ -6,6 +6,7 @@
 #include "../firmware/CardputerAssistant/src/offline_tools.h"
 #include "../firmware/CardputerAssistant/src/pending_tool_preview.h"
 #include "../firmware/CardputerAssistant/src/ssh_terminal.h"
+#include "../firmware/CardputerAssistant/src/ssh_command_options.h"
 #include "../firmware/CardputerAssistant/src/tool_catalog.h"
 #include "../firmware/CardputerAssistant/src/tool_policy.h"
 #include "../firmware/CardputerAssistant/src/tool_policy_codec.h"
@@ -122,7 +123,7 @@ void testToolPolicyContracts()
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Files),
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Ssh),
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Ssh),
-            0,
+            toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Ssh),
             toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Python),
         };
     for (std::size_t index = 0; index < expectedMasks.size(); ++index) {
@@ -291,11 +292,13 @@ cardputer::ToolPolicyResolutionResult uniformToolResolution(
 void testToolCatalogAndRequestPlan()
 {
     const auto& catalog = cardputer::toolCatalog();
-    const std::array<std::string, 7> expectedNames = {
+    const std::array<std::string, 12> expectedNames = {
         "web_search", "web_fetch", "list_files", "read_file",
         "write_file", "append_file", "ssh_command",
+        "sftp_list", "sftp_read", "sftp_write", "sftp_move",
+        "ssh_safe_action",
     };
-    const std::array<cardputer::ToolCapabilityGroup, 7> expectedGroups = {
+    const std::array<cardputer::ToolCapabilityGroup, 12> expectedGroups = {
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Files,
@@ -303,8 +306,13 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapabilityGroup::Files,
         cardputer::ToolCapabilityGroup::Files,
         cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Ssh,
     };
-    const std::array<cardputer::ToolCapability, 7> expectedPrimary = {
+    const std::array<cardputer::ToolCapability, 12> expectedPrimary = {
         cardputer::ToolCapability::WebSearch,
         cardputer::ToolCapability::WebFetch,
         cardputer::ToolCapability::FilesRead,
@@ -312,8 +320,13 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapability::FilesWriteDelete,
         cardputer::ToolCapability::FilesWriteDelete,
         cardputer::ToolCapability::SshMutate,
+        cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SftpReadWrite,
+        cardputer::ToolCapability::SshRead,
     };
-    require(catalog.size() == 7, "Tool catalog size changed");
+    require(catalog.size() == 12, "Tool catalog size changed");
     for (std::size_t index = 0; index < catalog.size(); ++index) {
         require(static_cast<std::size_t>(catalog[index].schema) == index &&
                     expectedNames[index] == catalog[index].name &&
@@ -329,8 +342,9 @@ void testToolCatalogAndRequestPlan()
                     &catalog[index],
                 "Canonical tool name did not resolve to its catalog row");
     }
-    const std::array<std::string, 5> noncanonicalNames = {
-        "WebSearch", "web-search", "SSH_COMMAND", "ssh-command", "sftp_list",
+    const std::array<std::string, 8> noncanonicalNames = {
+        "WebSearch", "web-search", "SSH_COMMAND", "ssh-command",
+        "SFTP_LIST", "sftp-list", "SSH_SAFE_ACTION", "ssh-safe-action",
     };
     for (const std::string& name : noncanonicalNames) {
         require(cardputer::toolCatalogEntryForName(name) == nullptr,
@@ -387,12 +401,38 @@ void testToolCatalogAndRequestPlan()
         resolution,
         {cardputer::ToolMessageIntentMode::Required,
          resolution.requiredGroups});
-    require(plan.schemas == 0 &&
-                plan.missingRequiredGroups == resolution.requiredGroups &&
+    require(plan.schemas == 0x800 &&
+                plan.missingRequiredGroups == 0 &&
                 cardputer::toolRequestPlanDecision(
                     plan, cardputer::ToolSchemaId::SshCommand) ==
-                    cardputer::ToolPermissionDecision::Unavailable,
-            "SSH read-only policy exposed the arbitrary command schema");
+                    cardputer::ToolPermissionDecision::Unavailable &&
+                cardputer::toolRequestPlanDecision(
+                    plan, cardputer::ToolSchemaId::SshSafeAction) ==
+                    cardputer::ToolPermissionDecision::Allow,
+            "SSH read-only policy did not expose only the fixed Safe Action schema");
+
+    const std::array<std::string, 5> expectedActionIds = {
+        "logs", "service_state", "containers", "disk", "processes",
+    };
+    const std::array<std::string, 5> expectedActionCommands = {
+        "journalctl --no-pager --lines=100 --output=short-iso",
+        "systemctl list-units --type=service --state=running,failed --no-pager --plain",
+        "docker ps --no-trunc",
+        "df -hP",
+        "ps -eo pid,ppid,user,stat,etime,comm",
+    };
+    const auto& safeActions = cardputer::sshSafeActionCatalog();
+    require(safeActions.size() == expectedActionIds.size(),
+            "SSH Safe Action catalog size changed");
+    for (std::size_t index = 0; index < safeActions.size(); ++index) {
+        require(expectedActionIds[index] == safeActions[index].id &&
+                    expectedActionCommands[index] == safeActions[index].command &&
+                    cardputer::sshSafeActionEntryForId(expectedActionIds[index]) ==
+                        &safeActions[index],
+                "SSH Safe Action identity or fixed command changed");
+    }
+    require(cardputer::sshSafeActionEntryForId("unknown") == nullptr,
+            "Unknown SSH Safe Action id resolved");
 
     resolution = uniformToolResolution(
         cardputer::ToolPermissionDecision::Deny);
@@ -449,7 +489,7 @@ void testToolCatalogAndRequestPlan()
                     resolvedBefore.permissions[index].source;
         }
         require(plan.error == cardputer::ToolPolicyContractError::None &&
-                    plan.schemas == 0x7F &&
+                    plan.schemas == 0xFFF &&
                     plan.missingRequiredGroups ==
                         static_cast<std::uint8_t>(mask & pythonGroup) &&
                     remainingGroups ==
@@ -472,7 +512,7 @@ void testToolCatalogAndRequestPlan()
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
         plan, remaining, "WebSearch");
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
-        plan, remaining, "sftp_list");
+        plan, remaining, "SFTP_LIST");
     require(remaining == requiredUnion,
             "Unknown or noncanonical tool call satisfied a required group");
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
@@ -497,9 +537,9 @@ void testToolCatalogAndRequestPlan()
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
         plan, remaining, "read_file");
     remaining = cardputer::remainingRequiredGroupsAfterToolCall(
-        plan, remaining, "ssh_command");
+        plan, remaining, "sftp_list");
     require(remaining == 0,
-            "Exact multi-group tool calls left a required group unmatched");
+            "Exact SFTP call did not satisfy the SSH required group");
 
     cardputer::ToolRequestPlan forged = plan;
     forged.decisions[static_cast<std::size_t>(
@@ -514,7 +554,7 @@ void testToolCatalogAndRequestPlan()
             "Inconsistent denied schema satisfied a required group");
     forged = plan;
     forged.schemas = static_cast<cardputer::ToolSchemaMask>(
-        forged.schemas | 0x80U);
+        forged.schemas | 0x1000U);
     require(!cardputer::toolRequestPlanIsConsistent(forged),
             "Plan with an unknown schema bit was accepted");
     forged = plan;
@@ -583,6 +623,18 @@ void testToolCatalogAndRequestPlan()
                 cardputer::toolConfirmationReason(
                     cardputer::ToolPermissionDecision::Allow,
                     cardputer::ToolSchemaId::AppendFile, true) ==
+                    cardputer::ToolConfirmationReason::None &&
+                cardputer::toolConfirmationReason(
+                    cardputer::ToolPermissionDecision::Allow,
+                    cardputer::ToolSchemaId::SftpWrite, true) ==
+                    cardputer::ToolConfirmationReason::Mandatory &&
+                cardputer::toolConfirmationReason(
+                    cardputer::ToolPermissionDecision::Allow,
+                    cardputer::ToolSchemaId::SftpMove, true) ==
+                    cardputer::ToolConfirmationReason::Mandatory &&
+                cardputer::toolConfirmationReason(
+                    cardputer::ToolPermissionDecision::Allow,
+                    cardputer::ToolSchemaId::SftpRead, true) ==
                     cardputer::ToolConfirmationReason::None,
             "Destructive file confirmation matrix is incorrect");
     require(cardputer::toolConfirmationReason(
@@ -736,6 +788,46 @@ void testPendingToolPreview()
     require(!cardputer::buildPendingFileReplacementPreview(
                  "x", 2, true, "y").success,
             "File preview accepted inconsistent completeness metadata");
+}
+
+void testSshProfileCeilings()
+{
+    const auto one = cardputer::decodeSshProfileId(
+        "0000000000000001", 16);
+    const auto maximum = cardputer::decodeSshProfileId(
+        "ffffffffffffffff", 16);
+    require(one.error == cardputer::SshProfileIdCodecError::None &&
+                one.profileId == 1 &&
+                maximum.error == cardputer::SshProfileIdCodecError::None &&
+                maximum.profileId == UINT64_MAX,
+            "Canonical SSH profile IDs did not decode exactly");
+    const auto encoded = cardputer::encodeSshProfileId(UINT64_MAX);
+    require(encoded.error == cardputer::SshProfileIdCodecError::None &&
+                std::string(encoded.value.data(), encoded.length) ==
+                    "ffffffffffffffff",
+            "SSH profile ID formatter did not emit 16 lowercase hex characters");
+    require(cardputer::encodeSshProfileId(0).error ==
+                cardputer::SshProfileIdCodecError::InvalidValue &&
+                cardputer::isValidSshProfileCeiling("", 0) &&
+                !cardputer::isValidSshProfileCeiling("0000000000000000", 16) &&
+                !cardputer::isValidSshProfileCeiling("0000000000000001x", 17) &&
+                !cardputer::isValidSshProfileCeiling("000000000000000A", 16) &&
+                !cardputer::isValidSshProfileCeiling("000000000000000g", 16),
+            "SSH profile ceiling validation accepted a noncanonical ID");
+    require(cardputer::sshProfileCeilingsAllowSelected(
+                1, "", 0, "", 0) &&
+                cardputer::sshProfileCeilingsAllowSelected(
+                    1, "0000000000000001", 16, "", 0) &&
+                cardputer::sshProfileCeilingsAllowSelected(
+                    1, "0000000000000001", 16,
+                    "0000000000000001", 16) &&
+                !cardputer::sshProfileCeilingsAllowSelected(
+                    0, "", 0, "", 0) &&
+                !cardputer::sshProfileCeilingsAllowSelected(
+                    1, "0000000000000002", 16, "", 0) &&
+                !cardputer::sshProfileCeilingsAllowSelected(
+                    1, "", 0, "0000000000000002", 16),
+            "Project/chat SSH ceilings did not conjunctively narrow selected authority");
 }
 
 void testToolPolicyPrecedence()
@@ -1407,6 +1499,30 @@ void testJsonStringReader()
     require(escaped.success && escaped.value == "quote: \" slash: \\ unicode: П emoji: 😀",
             "Escaped JSON string decoding failed");
 
+    const std::string canonicalCommand =
+        "{\"command\":\"printf ok\",\"max_inline_output_bytes\":16384,"
+        "\"timeout_ms\":60000}";
+    const cardputer::json_reader::JsonStringValueResult decodedCommand =
+        cardputer::readCanonicalStringArgument(
+            canonicalCommand, "command", 1024);
+    require(decodedCommand.success && decodedCommand.value == "printf ok",
+            "Canonical SSH command options blocked command extraction");
+
+    const std::string canonicalAction =
+        "{\"action\":\"disk\",\"max_inline_output_bytes\":16384,"
+        "\"timeout_ms\":60000}";
+    const cardputer::json_reader::JsonStringValueResult decodedAction =
+        cardputer::readCanonicalStringArgument(
+            canonicalAction, "action", 32);
+    require(decodedAction.success && decodedAction.value == "disk",
+            "Canonical SSH Safe Action options blocked action extraction");
+
+    const std::string oversizedCanonicalField =
+        "{\"action\":\"disk\",\"abcdefghijklmnopqrstuvwx\":true}";
+    require(!cardputer::readCanonicalStringArgument(
+                 oversizedCanonicalField, "action", 32).success,
+            "Canonical tool argument key above 23 bytes was accepted");
+
     const std::string duplicateRecord =
         "{\"content\":\"first\",\"content\":\"second\"}";
     MemoryJsonReader duplicateReader(duplicateRecord);
@@ -1835,6 +1951,58 @@ void testOfflineCalculator()
             "Calculator result formatting failed");
 }
 
+void testSshCommandOptions()
+{
+    const auto require = [](bool condition, const char* message) {
+        if (!condition) {
+            throw std::runtime_error(message);
+        }
+    };
+    using cardputer::SshCommandTerminalState;
+    require(cardputer::isValidSshCommandTimeout(1000),
+            "minimum SSH command timeout must be valid");
+    require(cardputer::isValidSshCommandTimeout(60000),
+            "maximum SSH command timeout must be valid");
+    require(!cardputer::isValidSshCommandTimeout(999) &&
+                !cardputer::isValidSshCommandTimeout(60001),
+            "SSH command timeout bounds must be exact");
+    require(cardputer::isValidSshCommandInlineOutputLimit(1) &&
+                cardputer::isValidSshCommandInlineOutputLimit(16384),
+            "SSH command output boundary values must be valid");
+    require(!cardputer::isValidSshCommandInlineOutputLimit(0) &&
+                !cardputer::isValidSshCommandInlineOutputLimit(16385),
+            "SSH command output bounds must be exact");
+    require(cardputer::kDefaultSshCommandTimeoutMs == 60000 &&
+                cardputer::kDefaultSshCommandInlineOutputBytes == 16384,
+            "SSH command defaults must match the public contract");
+
+    constexpr std::uint32_t startedAt = UINT32_MAX - 500U;
+    require(!cardputer::sshCommandDeadlineExpired(startedAt, 498U, 1000U) &&
+                cardputer::sshCommandDeadlineExpired(startedAt, 499U, 1000U),
+            "SSH command deadline must remain correct across millis wraparound");
+    require(cardputer::observeSshCommandTerminalState(
+                SshCommandTerminalState::None, true, startedAt, 499U, 1000U) ==
+                SshCommandTerminalState::UserCancelled,
+            "user cancellation must win when cancellation and timeout are first observed together");
+    require(cardputer::observeSshCommandTerminalState(
+                SshCommandTerminalState::TimedOut, true, startedAt, 499U, 1000U) ==
+                SshCommandTerminalState::TimedOut,
+            "the first observed SSH terminal state must remain latched");
+
+    require(cardputer::sshCommandOutputFits(10000, 6384, 16384),
+            "combined SSH output must fit exactly at the inline limit");
+    require(!cardputer::sshCommandOutputFits(10000, 6385, 16384) &&
+                !cardputer::sshCommandOutputFits(16385, 0, 16384),
+            "combined SSH output must reject overflow without unsigned underflow");
+    std::string output = "abc";
+    require(cardputer::appendSshCommandOutput(output, "de", 2, 5) &&
+                output == "abcde",
+            "SSH output append must preserve combined stream order at the exact cap");
+    require(!cardputer::appendSshCommandOutput(output, "f", 1, 5) &&
+                output.empty(),
+            "SSH output overflow must clear all partial output");
+}
+
 }  // namespace
 
 int main()
@@ -1852,6 +2020,7 @@ int main()
         testLargePromptTitle();
         testInstructionPrecedence();
         testToolPolicyContracts();
+        testSshProfileCeilings();
         testToolMessageIntent();
         testToolMessageIntentCodec();
         testToolCatalogAndRequestPlan();
@@ -1871,6 +2040,7 @@ int main()
         testWorkspaceRouting();
         testWebSearchRouting();
         testSshTerminalFiltering();
+        testSshCommandOptions();
         testDocumentReader();
         testOfflineCalculator();
         std::cout << "host_tests: PASS\n";
