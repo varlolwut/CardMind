@@ -181,6 +181,41 @@ after that row's own acceptance observations pass.
   installed WebServer 3.2.1 semantics, exact cleanup/error ownership, unchanged adjacent behavior,
   exact compile artifact and fresh review, and returned closure `GO`. The accepted residual is only
   the unobserved real removal-failure path; no runtime success or performance claim is added.
+- Commit `dd4c932f10a88ac987421c6bc57ee78aff6b24ec` contains exactly the two approved paths,
+  passed the local row checker, and is published with exact Author/Committer and authenticated
+  GitHub branch SHA verification.
+
+### Active P4-21 terminal publication closure (2026-09-01)
+
+- Architect directed the terminal Phase 4 closure/PR/CI/merge sequence after exact P4-17 correction
+  remote verification at `dd4c932f10a88ac987421c6bc57ee78aff6b24ec`.
+- P4-21 is the sole `in_progress` row. All functional rows are completed or explicitly removed.
+  This terminal pass owns only final branch CI, PR/review/merge, exact remote-state verification
+  and truthful trace closure after every published reopen correction.
+- The exact final 3.2.1 build/upload and accepted runtime residuals are already reviewed evidence.
+  No further build, upload, COM8, Device, Web, fixture or recovery action is authorized or needed.
+
+#### Exact-head CI source-oracle correction (2026-09-01)
+
+- Authenticated workflow run `33535723112` at exact head
+  `dd4c932f10a88ac987421c6bc57ee78aff6b24ec` failed only the retained WebUI source assertion after
+  strict host tests passed. The assertion sliced `handleSshKeyUploadData()`, counted storage calls
+  and required the old literal inline success check; the reviewed P4-17 correction instead stores
+  the result and checks both storage availability and exact removal.
+- Architect classified this as a P4-21 retained-test defect, not a P4-17 production regression.
+  Production is frozen. The complete seven-line key-upload source-slice/count/literal block is
+  removed with no replacement snapshot, call count, duplicated constant, helper or harness.
+- Expected write set for this correction is exactly this trace plus
+  `tests/web_console_ui_test.mjs`. Proportional proof is `git diff --check` and the unchanged WebUI
+  smoke; no build, upload, COM8, Device, Web, fixture or recovery action belongs to it. Personal
+  Architect closure review remains mandatory before commit/publication and CI rerun.
+- The exact correction passed `git diff --check` and the unchanged retained smoke reported
+  `WEB_CONSOLE_UI_TEST result=pass`. No production file, generated asset, dependency, runtime state
+  or resource usage changed; no exact-owned cleanup obligation exists.
+- Architect personally reviewed the failed CI log and exact trace/test diff and returned focused
+  closure `GO`. A fresh independent proof red-team also returned `GO`: the removed block executed
+  no production boundary, could false-pass or false-fail on source shape, and its removal loses no
+  observable evidence; no replacement assertion is appropriate.
 
 ## Scope lock
 
@@ -246,7 +281,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
 | P4-20 | Changed-boundary-only recovery and security acceptance | Compose the observed real reachable-profile Cardputer private-key connection with completed P4-02/P4-11/P4-17 key, mismatch-before-auth, canonical exact-host rewrite and authenticated selected-host forget evidence; retain the exact-owned failed-endpoint lifecycle/cleanup evidence and explicit Phase 9 ownership of the unreachable rotatable-endpoint runtime; broad re-certification of unchanged NVS/SD was removed by user | completed |
-| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; final-image SSH passes the fragmented functional sequence without reset/freeze, while the platform-unobservable post-fix numeric active-session sample is removed from acceptance and retained as a user-accepted residual with no inferred performance claim; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | pending |
+| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; final-image SSH passes the fragmented functional sequence without reset/freeze, while the platform-unobservable post-fix numeric active-session sample is removed from acceptance and retained as a user-accepted residual with no inferred performance claim; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | in_progress |
 
 ## P4-01 design gate
 

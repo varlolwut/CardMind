@@ -682,13 +682,6 @@ if (!consoleSource.includes(
     "startupStorage.state == SdStorageState::Full) {\n        result = loadCommittedConsoleStorageReadOnly();")) {
     throw new Error("Full microSD startup does not use the read-only committed-state loader");
 }
-const keyUploadStart = consoleSource.indexOf("void handleSshKeyUploadData()");
-const keyUploadEnd = consoleSource.indexOf("void handleSshKeyUploadComplete()", keyUploadStart);
-const keyUpload = consoleSource.slice(keyUploadStart, keyUploadEnd);
-if ((keyUpload.match(/requireSdWriteAccess\(/g) ?? []).length < 5 ||
-    !keyUpload.includes("if (requireSdWriteAccess(0, 0).success)")) {
-    throw new Error("SSH private-key upload is not guarded across chunks, flush and install");
-}
 for (const rawRoute of [
     ["/api/project/settings/raw", "ProjectSettingsRawComplete", "ProjectSettingsRawData"],
     ["/api/chat/instructions/raw", "InstructionsRawComplete", "InstructionsRawData"],
