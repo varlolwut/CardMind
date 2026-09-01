@@ -4,6 +4,103 @@ This is the only active Phase 4 matrix. Each row is one independently observable
 roadmap, interface, recovery, security, or closure boundary. Evidence is retained only
 after that row's own acceptance observations pass.
 
+### P4-02 indexed-delete key-record cleanup closure (2026-09-01)
+
+- Architect authorized this isolated reopen after P4-17 review found that the existing
+  indexed profile delete may leave the deleted `qN`/`iN` private-key binding orphaned
+  until unrelated SSH initialization runs.
+- P4-02 is `completed` after personal Architect closure `GO`. P4-17 remains
+  `reopen_pending` and frozen until the exact P4-02 commit is published and remote-verified.
+- Locked clause and observation: indexed profile deletion must move retained profile/key
+  bindings together, remove inactive `qN`/`iN`, and remove only private-key records no
+  remaining profile owns. Cleanup failure must be explicit; private-key bytes and IDs
+  remain non-addressable.
+- Inventory: `deleteSshProfile()` loads the bounded five-profile authority, erases the
+  chosen profile/ID, and calls `writeProfilesAfterIndexedDelete()`. That writer validates
+  old `cnt` and source IDs, runs the existing bounded cleanup against old authority,
+  shifts checked profile/`iN`/`qN` state, checked-removes inactive indexed state, commits
+  selection and `cnt`, closes NVS, then calls `verifyWrittenSshProfiles()`. Because the
+  pre-mutation cleanup still sees the deleted `qN` reference and no post-verification
+  cleanup runs, its now-unreferenced fixed-slot record can survive until unrelated boot or
+  mutation initialization. `cleanupSshPrivateKeyRecords()` already reads only bounded
+  references/slot metadata, verifies referenced records, and checked-removes exact
+  unreferenced slot ID/blob keys without reading key bytes.
+- Frozen minimal design: preserve every existing delete/shift/check/commit step. Capture
+  `verifyWrittenSshProfiles()`; return its failure unchanged. Only after successful
+  committed-profile verification call the existing `cleanupSshPrivateKeyRecords()` once.
+  Success returns the existing deletion success. Cleanup failure is wrapped as an actionable
+  partial result that explicitly states the SSH profile was already deleted but orphan
+  private-key cleanup failed; callers and evidence must not retry the same shifted delete
+  index. It never rolls back, retries, changes authority, or masks the bounded
+  boot/pre-mutation cleanup owner. Crash before commit retains old authority;
+  crash after commit but before cleanup can retain only the already-bounded orphan handled
+  by the existing owner.
+- Frozen proof and forbidden effects: actual-diff/static review must show exactly one
+  post-verification cleanup call, no call after failed verification, no schema/helper/type
+  or ordering change, unchanged checked inactive `qN`/`iN` removal, and explicit committed-
+  delete partial-result semantics. Compile compatibility is followed by one shared
+  proportional runtime only after this correction and frozen P4-17 are stable: the existing
+  authenticated P4-17 valid-key exact-owned profile is deleted through the existing endpoint,
+  and HTTP success is accepted only after `deleteSshProfile()` completes verification plus
+  post-cleanup success. The same lifecycle must prove repeated public absence and restore
+  selection/inventory; an explicit partial cleanup result is reported without retrying that
+  delete index. No new selector/harness, second Device lifecycle, cleanup framework, or
+  repeated capacity scenario belongs to this reopen.
+- Expected retained write set is exactly this trace plus
+  `firmware/CardputerAssistant/src/ssh_client.cpp`. Fresh bounded read-only reviewer
+  `01a05d9d-dd5e-70f0-a8c7-527bd9aefb8c` returned `GO`: retain the existing pre-mutation
+  cleanup and add exactly one post-verification invocation; no hidden authority regression,
+  new owner, schema, type, helper, or additional production file is required. Architect then
+  returned a two-point gate `STOP`: wrap cleanup failure as an explicit already-deleted partial
+  result and share the exact-owned runtime with P4-17 instead of relying on compile-only proof.
+  The same reviewer's single blocker-only follow-up returned `GO`: both corrections resolve the
+  retry and executable-proof gaps without adding a selector, harness, lifecycle or production
+  responsibility. The reviewer is closed.
+- Architect returned final pre-edit `GO`. The implemented boundary keeps every existing
+  pre-clean/shift/check/commit/verification step, returns verification failure unchanged,
+  invokes the existing bounded cleanup once only after successful verification, preserves
+  ordinary success, and wraps cleanup failure as an explicit already-deleted result that
+  instructs callers not to retry the shifted delete index.
+- Workspace-safe evidence passed: `git diff --check`; the P4-02 production diff is exactly
+  14 insertions/1 deletion in `ssh_client.cpp`; scoped literal ordering observed inactive
+  removal at line 1186, count commit 1199, verification 1205, post-cleanup 1210 and explicit
+  partial/no-retry result 1214-1215. No P4-17 production hunk changed.
+- Fresh read-only code reviewer `01a05da8-bdda-7cf2-9177-26492425c6ab` returned `GO` on the
+  actual stable diff: deletion authority, checked shift/removal and commit order are preserved;
+  no key bytes are read/exposed and no new owner exists. Accepted residual: a crash after
+  commit and before cleanup may retain one bounded orphan until existing boot/pre-mutation
+  cleanup. The reviewer is closed without follow-up. Final build/external evidence and the
+  personal Architect closure decision are recorded below.
+- The correction is limited to the existing indexed-delete and existing bounded key-record
+  cleanup boundaries. No schema, COW/recovery layer, transaction, retry, framework,
+  compensating Web cleanup, or P4-01 redesign is allowed.
+- Architect personally reviewed the actual +14/-1 production hunk, producer/consumer and
+  commit/verification ordering, original P4-02 runtime evidence, fresh design/code reviews,
+  exact 3.2.1 build/upload, external COM8-open blocker and disposable cleanup, and returned
+  closure `GO`. Accepted residual: immediate post-fix delete cleanup was not observed at
+  runtime because the sole reviewed lifecycle stopped before opening serial; a later P4-17
+  exact fixture deletion must reopen P4-02 if it exposes a cleanup defect.
+
+#### Shared P4-02/P4-17 external evidence blocker (2026-09-01)
+
+- Architect built and uploaded the exact final source once after the two reviewed corrections.
+  Core/options gate and upload hash verification passed: sketch 3,442,890 bytes, globals 65,700
+  bytes, app 3,443,072 bytes, SHA-256
+  `4A8D6299ECF0FE53E86B2A24FB8DC57228E53432893D71DE416411B726F92EB2`.
+- One exact-owned disposable shared lifecycle was independently red-teamed `GO`; its PowerShell
+  and Node parsers passed before Architect made the single authorized external invocation. At
+  test start, `SerialPort.Open()` failed immediately with `Could not find file 'COM8'` and exit 1.
+  No serial handle opened and no PING, CONSOLE, EXIT, HTTP/Web/login/request, fixture, key/profile,
+  NVS, SD, SSH, trust, known-host, project/chat/workspace or remote mutation occurred.
+- This is a concrete external-blocker interval from the single invocation through immediate port-
+  open failure. The first-readiness-loss rule terminated the path; no retry, port probe, reset,
+  recovery, rebuild or reupload followed. Both exact disposable files were deleted and verified
+  absent. Production remains frozen.
+- The P4-02 post-verification cleanup and the corrected P4-17 invalid/valid upload completion route
+  therefore have final-source review/build compatibility but no post-correction runtime observation.
+  This is an explicit evidence gap, not a performance or functional success claim; closure or
+  deferral requires Architect ownership and may not be inferred by this task.
+
 ## Scope lock
 
 - Implement only `ROADMAP.md` Phase 4 SSH and remote-workspace behavior.

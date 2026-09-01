@@ -1202,7 +1202,20 @@ OperationResult writeProfilesAfterIndexedDelete(
         return {false, "Failed to commit SSH profile deletion"};
     }
     preferences.end();
-    return verifyWrittenSshProfiles(profiles, selectedIndex, profileIds);
+    const OperationResult verified =
+        verifyWrittenSshProfiles(profiles, selectedIndex, profileIds);
+    if (!verified.success) {
+        return verified;
+    }
+    const OperationResult cleanedAfterCommit = cleanupSshPrivateKeyRecords();
+    if (!cleanedAfterCommit.success) {
+        return {
+            false,
+            String("SSH profile was deleted, but orphan private-key cleanup failed; ") +
+                "do not retry the profile deletion: " + cleanedAfterCommit.error,
+        };
+    }
+    return {true, ""};
 }
 
 bool isValidSshFingerprint(const String& fingerprint)
