@@ -277,7 +277,7 @@ void addToolSchema(JsonArray tools, ToolSchemaId schema)
             parameters["properties"]["max_inline_output_bytes"]["default"] =
                 kDefaultSshCommandInlineOutputBytes;
             parameters["properties"]["max_inline_output_bytes"]["description"] =
-                "Maximum combined stdout and stderr bytes returned inline; overflow fails without partial output.";
+                "Maximum combined stdout and stderr bytes returned inline; overflow streams once to a downloadable SD-backed command log and returns only a bounded summary/reference.";
             JsonArray required = parameters["required"].to<JsonArray>();
             required.add("command");
             break;

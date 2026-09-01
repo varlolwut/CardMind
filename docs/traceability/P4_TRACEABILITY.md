@@ -64,7 +64,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-14 | Project/chat ceilings bound to immutable opaque profile IDs | Authenticated config/project metadata may carry the ID; project/chat selection only narrows hosts and cannot exceed global authority or redirect stale authority | completed |
 | P4-15 | Credential/private-key/profile-ID non-addressability across model, file tools, API, logs, serial, and diagnostics | Model SSH never returns credential/private-key bytes, private-key path, or internal profile ID; authenticated config APIs expose only allowed non-secret ID/summary data | completed |
 | P4-16 | Consolidated Device Phase 4 journey for profile/security plus required command/SFTP/transfer controls using existing terminal/history | Required Device controls and acceptance are observable without a separate journey subsystem | completed |
-| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and authenticated public state are observable without terminal tabs, SSH connection/trust mutation or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; the mismatch-only forget control is hidden in ordinary state and resolves host/port server-side | completed |
+| P4-17 | Consolidated Web Phase 4 journey for profile/security plus required command/SFTP/transfer controls using the existing single terminal | Required Web controls and authenticated public state are observable without terminal tabs, SSH connection/trust mutation or a separate journey subsystem; the real project/chat ceiling controls emit the P4-14 encoded header and display their saved/effective state; the mismatch-only forget control is hidden in ordinary state and resolves host/port server-side | reopen_pending |
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
 | P4-20 | Changed-boundary-only recovery and security acceptance | Compose the observed real reachable-profile Cardputer private-key connection with completed P4-02/P4-11/P4-17 key, mismatch-before-auth, canonical exact-host rewrite and authenticated selected-host forget evidence; retain the exact-owned failed-endpoint lifecycle/cleanup evidence and explicit Phase 9 ownership of the unreachable rotatable-endpoint runtime; broad re-certification of unchanged NVS/SD was removed by user | completed |
@@ -1108,6 +1108,69 @@ state, API, timeout, output-storage or channel-management contract changes.
 - P4-05 completed at 2026-08-30 23:59:26 +03:00 after approximately 89 minutes. The mandatory
   material pivots were the independently closed P4-04 validator regression and then the proven
   same-iteration cancellation-order correction; no third patch/review loop was entered.
+
+### Terminal schema-description reopen (2026-09-01)
+
+**Status:** `in_progress` after Architect terminal-audit ownership and pre-edit design authorization.
+
+- Exact clause: ROADMAP lines 480-482 make `max_inline_output_bytes` the combined stdout/stderr
+  inline limit and, after P4-05, require overflow to stream once to SD while the model receives only
+  a bounded summary/reference. The existing runtime and retained P4-05 evidence already implement
+  that behavior.
+- Proven defect: the sole `ToolSchemaId::SshCommand` producer in `api_client.cpp` still describes
+  overflow as failing without partial output, which is the superseded pre-P4-05 behavior and can
+  mislead the model. Runtime capture, storage, cancellation, audit and download consumers are not
+  defective and remain frozen.
+- Minimal design: replace only that property description with the implemented one-pass SD-log plus
+  bounded summary/reference contract. Do not alter schema fields or limits, execution, persistence,
+  routes, policy, Device/Web behavior, output formatting or any P4-06+ boundary.
+- Frozen proof: direct inspection of the actual one-line schema producer diff and generated-schema
+  source ownership, existing unchanged schema/catalog coverage, cheap diff/static checks and the
+  pinned compile are proportional. No Device/Web action, fixture, cleanup or resource measurement
+  is owned.
+- Architect stopped and removed a proposed retained `host_tests.cpp` source-text assertion because
+  it inspected literal source instead of executing the producer. No replacement seam, module or
+  harness is justified for one description string; `tests/host_tests.cpp` is restored to HEAD.
+- Expected write set is exactly this canonical trace and
+  `firmware/CardputerAssistant/src/api_client.cpp`. No new module, helper, framework or harness is
+  allowed. Architect's terminal audit is the independent pre-edit review for this frozen correction;
+  completion, staging and commit still require a fresh personal closure `GO`.
+
+**Reopen evidence checkpoint:** 2026-09-01 17:35:43 +03:00.
+**Reopen status:** `evidence_ready_pending_personal_GO`.
+
+- The actual production correction is one replacement in
+  `addToolSchema(..., ToolSchemaId::SshCommand)`: the obsolete fail-on-overflow description is gone
+  and the property now states the already-implemented one-pass downloadable SD log plus bounded
+  summary/reference behavior. Fields, minimum/maximum/default values and every runtime consumer are
+  unchanged.
+- Workspace-safe proof passed: `git diff --check`; exactly this trace and `api_client.cpp` are
+  modified; the index is empty; `tests/host_tests.cpp` is byte-identical to HEAD; the new production
+  phrase occurs exactly once and the obsolete phrase zero times; the changed filename-only secret
+  scan is clean. The rejected source-text host assertion is not retained or claimed as evidence.
+- Architect executed the one authorized build-skill boundary. Vendor pins passed (M5Cardputer
+  `f1392858b9994c3547120e602a57d3553d16ab01`, M5Unified
+  `774d920cd6851a5231748b56ece1b073645f313f`, M5GFX
+  `93b480bb349749202c8a2a953065c8ae95f58320`, ArduinoJson `7.2.1`). Exact compile-only passed with
+  FQBN `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`, unique M5Stack ESP32
+  core `3.2.1`, sketch `3,441,062` bytes, globals `65,700` bytes, local-variable headroom `261,980`
+  bytes, app image `3,441,248` bytes and SHA-256
+  `F630EF3657C8C150D4E1DB89B32A84549787602D983A02EDD3CB1EF2B38F97BA`.
+- No upload, COM8, Device/Web action, fixture or state mutation occurred. Cleanup and runtime latency
+  are not applicable to a schema-description-only correction. Residual risk is limited to the lack
+  of a redundant live model-schema observation; the actual producer assignment, existing unchanged
+  schema/catalog coverage and exact firmware compile are the proportional proof.
+
+**Architect personal closure review:** `GO` at 2026-09-01 17:38:16 +03:00.
+**Reopen completed:** 2026-09-01 17:38:16 +03:00.
+
+- Architect reviewed the complete actual two-path diff and raw evidence. The exercised production
+  path is `addToolSchema(..., ToolSchemaId::SshCommand)`, the sole model-facing schema producer; its
+  observable description now matches the retained P4-05 runtime contract.
+- The review confirmed the forbidden effects absent: schema fields and bounds, runtime capture,
+  storage, cancellation, audit, download, policy, routes, UI and tests are unchanged. Exact pinned
+  compile compatibility/resources were accepted, as was the narrow lack of a redundant live-schema
+  observation for this description-only correction. No blocker remains.
 
 ## P4-06 design gate
 
@@ -3414,6 +3477,21 @@ No staging or commit is permitted before the later evidence-ready Architect clos
   SHA-256 `FD1103603FF9A98EE62787BF65B26916CE91528CE32BA68A9D4CE7C48C17B7E1`.
   No new numeric runtime resource claim is required for this UI integration row. P4-20 retains the
   mandatory real private-key mismatch/forget lifecycle; P4-07 retains backend transfer evidence.
+
+### Terminal private-key upload cleanup reopen queue (2026-09-01)
+
+**Status:** `reopen_pending`; P4-05 remains the sole active row.
+
+- Architect's terminal audit found that `web_console.cpp` installs an uploaded private key but
+  ignores failure to remove the exact SD upload temporary file before reporting success. That can
+  leave plaintext key material on removable storage and is owned by P4-17's authenticated Web key
+  upload boundary.
+- The later frozen correction must check exact temporary-file deletion and report cleanup failure
+  without rolling back or changing the already-installed NVS key record. Success, install failure,
+  deletion failure and aborted-upload cleanup require explicit ownership. No recovery manager,
+  credential framework or adjacent SSH behavior belongs to the correction.
+- No P4-17 production, test, Device/Web, staging or commit action is permitted until P4-05 is
+  independently closed, published and remote-verified, then P4-17 becomes the sole active row.
 
 ## P4-20 design gate
 
