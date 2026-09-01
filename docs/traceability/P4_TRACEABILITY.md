@@ -127,6 +127,61 @@ after that row's own acceptance observations pass.
 - The separate P4-02 indexed-delete orphan-cleanup correction is closed and published at
   `0424155908f592e682492b38b357f944a4d2e7d3`; it is not owned or compensated for by P4-17.
 
+### P4-17 upload-failure cleanup closure (2026-09-01)
+
+- Terminal proof review found one exact row-owned defect in the existing multipart private-key
+  upload state machine. In `UPLOAD_FILE_WRITE`, the storage-failure, oversize/invalid-file and
+  short-write branches close the locally created upload but either skip removal or ignore the
+  boolean result of `SD.remove()`. Installed ESP32 WebServer 3.2.1 proceeds to
+  `UPLOAD_FILE_END`, where the saved primary error returns immediately, so plaintext
+  `upload.tmp` can remain without an explicit cleanup failure.
+- P4-17 is `completed` after personal Architect closure `GO`. P4-21 remains `pending` until this
+  correction is committed, published and exact-remote-verified. No completed acceptance boundary
+  is otherwise reopened.
+- Frozen minimal design: in only those three locally-created write-failure branches, preserve the
+  primary error, close the file, and use the existing exact temporary-key path removal semantics
+  while SD remains available. Append an explicit cleanup failure when absence cannot be proven.
+  `UPLOAD_FILE_END` continues to consume the saved outcome. There is no retry, rollback, helper,
+  route, schema, UI, key-install, profile-binding, storage framework or adjacent cleanup change.
+- Frozen proof: actual diff and pinned WebServer source establish the three failure-to-END
+  transitions, exact-path ownership, checked removal and combined primary/cleanup failure; static
+  checks cover every affected branch and unchanged success/abort ownership; one exact pinned 3.2.1
+  compile proves compatibility; one fresh focused read-only code review precedes personal Architect
+  closure. No upload, COM8, Device, Web, fixture or recovery action belongs to this reopen.
+- Expected retained write set is exactly this trace and
+  `firmware/CardputerAssistant/src/web_console.cpp`.
+- Architect's terminal proof review supplied the bounded pre-edit ownership/design gate and
+  authorized exactly this three-branch correction. No additional design approval cycle is needed;
+  the stable actual diff then received one fresh focused read-only code review and personal
+  Architect closure `GO` before completion.
+- The primary-agent production correction is exactly the three frozen `UPLOAD_FILE_WRITE`
+  branches. Each preserves its primary error, closes the locally created file, performs one
+  zero-floor storage check, checked-removes only the fixed temporary key-upload path, and appends
+  an explicit cleanup failure when removal cannot be proven. Success, `UPLOAD_FILE_END`,
+  `UPLOAD_FILE_ABORTED`, authentication, key installation and profile binding are unchanged.
+- Cheap evidence passed: `git diff --check`; the production hunk is 19 insertions/4 deletions in
+  `web_console.cpp`; installed M5Stack ESP32 WebServer 3.2.1 `Parsing.cpp` sets
+  `UPLOAD_FILE_WRITE`, invokes the upload callback, then sets and invokes `UPLOAD_FILE_END` after
+  the multipart boundary, so a saved write error must own its cleanup before END returns.
+- One exact pinned compile-only build passed with exact FQBN and one unique resolved M5Stack core
+  3.2.1: sketch 3,443,418 bytes, globals 65,700 bytes, app image 3,443,600 bytes, SHA-256
+  `E5350F694509AFF2C60B05991E8BC21D4F976369C60CB1650A3DA3F88BD6AA0F`. The first read-only
+  options assertion misread the documented duplicate core path string as an array after the
+  successful compile; a corrected split-and-deduplicate gate passed against the same artifact,
+  so no build was repeated.
+- Fresh focused read-only code reviewer `01a05de3-585b-7043-9b9d-4743bb9b9fc0` returned `GO`:
+  all three scoped branches have exact checked cleanup and primary-plus-cleanup error composition;
+  vendor transition, authentication, installation, success/abort and secret handling remain
+  unchanged. The reviewer is closed without follow-up.
+- No upload, COM8, Device, Web, fixture or storage mutation ran. Runtime failure injection is not
+  retained or required for this isolated cleanup correction; residual risk is limited to the
+  unobserved real SD-remove failure path, whose required observable behavior is the reviewed
+  explicit combined error rather than silent success.
+- Architect personally reviewed the actual two-path diff, all three write-failure transitions,
+  installed WebServer 3.2.1 semantics, exact cleanup/error ownership, unchanged adjacent behavior,
+  exact compile artifact and fresh review, and returned closure `GO`. The accepted residual is only
+  the unobserved real removal-failure path; no runtime success or performance claim is added.
+
 ## Scope lock
 
 - Implement only `ROADMAP.md` Phase 4 SSH and remote-workspace behavior.
@@ -191,7 +246,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
 | P4-20 | Changed-boundary-only recovery and security acceptance | Compose the observed real reachable-profile Cardputer private-key connection with completed P4-02/P4-11/P4-17 key, mismatch-before-auth, canonical exact-host rewrite and authenticated selected-host forget evidence; retain the exact-owned failed-endpoint lifecycle/cleanup evidence and explicit Phase 9 ownership of the unreachable rotatable-endpoint runtime; broad re-certification of unchanged NVS/SD was removed by user | completed |
-| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; final-image SSH passes the fragmented functional sequence without reset/freeze, while the platform-unobservable post-fix numeric active-session sample is removed from acceptance and retained as a user-accepted residual with no inferred performance claim; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | completed |
+| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; final-image SSH passes the fragmented functional sequence without reset/freeze, while the platform-unobservable post-fix numeric active-session sample is removed from acceptance and retained as a user-accepted residual with no inferred performance claim; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | pending |
 
 ## P4-01 design gate
 

@@ -4500,6 +4500,13 @@ void handleSshKeyUploadData()
             if (sshKeyUploadFile) {
                 sshKeyUploadFile.close();
             }
+            const OperationResult cleanupStorage = requireSdWriteAccess(0, 0);
+            if (!cleanupStorage.success) {
+                sshKeyUploadError += String("; temporary upload cleanup failed: ") +
+                    cleanupStorage.error;
+            } else if (!SD.remove(kSshKeyUploadPath)) {
+                sshKeyUploadError += "; temporary upload cleanup failed";
+            }
             return;
         }
         if (!sshKeyUploadFile || upload.currentSize > 16384 - sshKeyUploadBytes) {
@@ -4507,8 +4514,12 @@ void handleSshKeyUploadData()
             if (sshKeyUploadFile) {
                 sshKeyUploadFile.close();
             }
-            if (requireSdWriteAccess(0, 0).success) {
-                SD.remove(kSshKeyUploadPath);
+            const OperationResult cleanupStorage = requireSdWriteAccess(0, 0);
+            if (!cleanupStorage.success) {
+                sshKeyUploadError += String("; temporary upload cleanup failed: ") +
+                    cleanupStorage.error;
+            } else if (!SD.remove(kSshKeyUploadPath)) {
+                sshKeyUploadError += "; temporary upload cleanup failed";
             }
             return;
         }
@@ -4516,8 +4527,12 @@ void handleSshKeyUploadData()
         if (written != upload.currentSize) {
             sshKeyUploadError = "microSD did not accept the complete SSH key chunk";
             sshKeyUploadFile.close();
-            if (requireSdWriteAccess(0, 0).success) {
-                SD.remove(kSshKeyUploadPath);
+            const OperationResult cleanupStorage = requireSdWriteAccess(0, 0);
+            if (!cleanupStorage.success) {
+                sshKeyUploadError += String("; temporary upload cleanup failed: ") +
+                    cleanupStorage.error;
+            } else if (!SD.remove(kSshKeyUploadPath)) {
+                sshKeyUploadError += "; temporary upload cleanup failed";
             }
             return;
         }
