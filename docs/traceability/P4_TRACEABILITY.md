@@ -3712,9 +3712,10 @@ with the frozen canonical-semantic and transport-unknown contract.
 
 ## P4-21 phase-closure gate
 
-**Status:** completed
+**Status:** completed after fresh Architect CI-budget correction `GO`
 **Started:** 2026-09-01 04:02:50 +03:00.
 **Completed:** 2026-09-01 13:49:17 +03:00.
+**Reopened:** 2026-09-01 14:24:09 +03:00.
 
 P4-21 owns only Phase 4 closure: canonical requirement/evidence reconciliation, documentation and
 license/filename-only secret checks, proportional focused changed-boundary regression for the phase
@@ -4181,3 +4182,41 @@ evidence follows through the terminal row-close/GitHub workflow and is not pre-c
 - Authenticated GitHub currently reports no workflow run and no PR for the uncommitted P4-21
   payload, as expected. A green branch/PR CI run, reviewed PR and merge only to `develop` remain
   mandatory post-GO publication gates; `main` must remain unchanged.
+
+### Approved terminal CI-budget reopen
+
+**Status:** completed after fresh Architect correction closure `GO`.
+
+- The preceding no-run/no-PR observation was true at the original closure gate. After publication,
+  PR #2 run `33501405083` compiled the exact accepted image and passed host tests, then failed only
+  `Measure firmware memory`: `flash_text_bytes=2079712` exceeded the stale `2000000` limit by
+  `79712` bytes. The app binary partition gate, globals and compilation passed.
+- Git history and the budget rationale establish ownership: `2000000` represented measured Phase 3
+  flash text plus a 40-KiB anomaly guard, while app binary and minimum free space remain the actual
+  partition-safety gates. Architect assigned this terminal failure to P4-21 CI configuration, not
+  production, and explicitly authorized the reopen.
+- The exact correction sets only `limits.flash_text_bytes` to `2120672`, the accepted Phase 4
+  measurement plus exactly `40960` bytes, and updates only the matching rationale. The v1.12.0
+  baseline remains the warning source. Baseline version, warning percentage, app/free/rodata/DRAM/
+  IRAM limits, workflow, parser, production, tests, build and Device/Web behavior are frozen.
+- The canonical trace moved from the protected `.agents/P4_TRACEABILITY.md` path to
+  `docs/traceability/P4_TRACEABILITY.md` because repeated writes to the former required manual
+  action-time approval despite the standing project authorization. `AGENTS.md` and `ROADMAP.md`
+  now name only the new live path. Historical completed-row references remain unchanged evidence;
+  the old path stays frozen and is removed from Git tracking by the correction commit without a
+  further protected-file write.
+- Frozen proof is JSON/schema parsing, the exact three-path migration/budget diff, exact arithmetic
+  `2079712 + 40960 = 2120672`, unchanged partition-safety limits and fresh focused Architect closure
+  review. The failed-job log and unchanged compiled artifact are authoritative; no build or Device
+  repetition is owned by this correction.
+- Reopen write set is exactly deletion of tracked `.agents/P4_TRACEABILITY.md`, addition of
+  `docs/traceability/P4_TRACEABILITY.md`, and modification of `ci/firmware-budget.json`.
+- Architect personally reviewed the actual budget diff, raw failed GitHub job and migrated trace.
+  The exercised changed boundary was production `tools/firmware_metrics.py::parse_budget` reading
+  the corrected JSON. It accepted `2120672`; exact arithmetic leaves `40960` bytes above the
+  observed `2079712`. Required CI behavior is therefore restored for the accepted Phase 4 image.
+  The forbidden effects are absent: app-binary/free-space safety gates, every other section limit,
+  warning baseline/version, workflow, parser, production, tests and Device/Web state are unchanged.
+  No build, runtime resource/latency claim, fixture or cleanup obligation was introduced.
+- Fresh mandatory Architect correction closure verdict: `GO`. P4-21 is completed again; the exact
+  migration/budget correction may be staged, committed, published and verified before PR CI resumes.

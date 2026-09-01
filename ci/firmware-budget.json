@@ -5,10 +5,10 @@
   "limits": {
     "app_binary_bytes": 3670016,
     "app_free_bytes_minimum": 524288,
-    "flash_text_bytes": 2000000,
+    "flash_text_bytes": 2120672,
     "flash_rodata_bytes": 1450000,
     "static_dram_bytes": 83000,
     "iram_bytes": 101000
   },
-  "rationale": "The app-size and free-space limits are hard partition-safety gates retaining at least 512 KiB. Section limits detect anomalous growth: rodata, DRAM and IRAM retain approximately 30 percent over the v1.12.0 baseline, while flash text accommodates the measured Phase 3 image plus a 40 KiB guard. The linker remains the final authority for SoC memory-region capacity."
+  "rationale": "The app-size and free-space limits are hard partition-safety gates retaining at least 512 KiB. Section limits detect anomalous growth: rodata, DRAM and IRAM retain approximately 30 percent over the v1.12.0 baseline, while flash text accommodates the measured Phase 4 image plus a 40 KiB guard and the v1.12.0 baseline still supplies growth warnings. The linker remains the final authority for SoC memory-region capacity."
 }
