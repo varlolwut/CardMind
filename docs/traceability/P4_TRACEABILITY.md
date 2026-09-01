@@ -185,13 +185,13 @@ after that row's own acceptance observations pass.
   passed the local row checker, and is published with exact Author/Committer and authenticated
   GitHub branch SHA verification.
 
-### Active P4-21 terminal publication closure (2026-09-01)
+### P4-21 terminal phase closure (2026-09-01)
 
 - Architect directed the terminal Phase 4 closure/PR/CI/merge sequence after exact P4-17 correction
   remote verification at `dd4c932f10a88ac987421c6bc57ee78aff6b24ec`.
-- P4-21 is the sole `in_progress` row. All functional rows are completed or explicitly removed.
-  This terminal pass owns only final branch CI, PR/review/merge, exact remote-state verification
-  and truthful trace closure after every published reopen correction.
+- P4-21 is `completed` after final personal Architect phase closure `GO`. All functional rows are
+  completed or explicitly removed. This terminal pass owns only final branch CI, PR/review/merge,
+  exact remote-state verification and truthful trace closure after every published correction.
 - The exact final 3.2.1 build/upload and accepted runtime residuals are already reviewed evidence.
   No further build, upload, COM8, Device, Web, fixture or recovery action is authorized or needed.
 
@@ -216,6 +216,21 @@ after that row's own acceptance observations pass.
   closure `GO`. A fresh independent proof red-team also returned `GO`: the removed block executed
   no production boundary, could false-pass or false-fail on source shape, and its removal loses no
   observable evidence; no replacement assertion is appropriate.
+- Commit `cf1737b4f62d552ab88f6e6dd135f832cf6fe686` contains exactly this trace/test correction,
+  has exact Author/Committer and is authenticated-remote-verified. Exact-head workflow run
+  `33536217324` completed `success`; PR #2 is open, non-draft and mergeable `clean`, with head
+  `cf1737b4f62d552ab88f6e6dd135f832cf6fe686` and base `develop` at
+  `99f6de9e0e5d558ba0162c714a14044111d9aab2`.
+- Before this final evidence-only trace update, the tracked index/worktree were clean; only the
+  three approved Architect-owned `.codex/agents` paths remained untracked. Authenticated GitHub
+  still resolves `main` to `681cc8ffa9b6d26897d4847001d5d57f17b5d340`; the sole retained local
+  stash remains `6073fd15eb2836351ef2ae4323926565339a495b`. Merge remained forbidden until the
+  personal Architect final phase decision recorded below.
+- Architect personally reviewed the complete phase package, all five product acceptance boundaries,
+  terminal corrections/reviews, exact builds/resources, security/docs/secret/license/cleanup
+  evidence, truthful residuals, every row publication, PR #2 and exact-head successful run
+  `33536217324`, and returned final Phase 4 closure `GO`. No unresolved mandatory Phase 4 product
+  blocker remains; the trace-only publication, green-CI and merge-to-`develop` sequence is approved.
 
 ## Scope lock
 
@@ -281,7 +296,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
 | P4-20 | Changed-boundary-only recovery and security acceptance | Compose the observed real reachable-profile Cardputer private-key connection with completed P4-02/P4-11/P4-17 key, mismatch-before-auth, canonical exact-host rewrite and authenticated selected-host forget evidence; retain the exact-owned failed-endpoint lifecycle/cleanup evidence and explicit Phase 9 ownership of the unreachable rotatable-endpoint runtime; broad re-certification of unchanged NVS/SD was removed by user | completed |
-| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; final-image SSH passes the fragmented functional sequence without reset/freeze, while the platform-unobservable post-fix numeric active-session sample is removed from acceptance and retained as a user-accepted residual with no inferred performance claim; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | in_progress |
+| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; final-image SSH passes the fragmented functional sequence without reset/freeze, while the platform-unobservable post-fix numeric active-session sample is removed from acceptance and retained as a user-accepted residual with no inferred performance claim; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | completed |
 
 ## P4-01 design gate
 
