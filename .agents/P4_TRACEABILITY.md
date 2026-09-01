@@ -68,7 +68,7 @@ small fixed built-in reviewed set without presets, editor, macros, persistence o
 | P4-18 | Removed by user as a separate subsystem: Device command/SFTP/transfer journey | Required controls moved to P4-16; no separate implementation | removed_by_user |
 | P4-19 | Removed by user as a separate subsystem: Web command/SFTP/transfer journey | Required controls moved to P4-17; no separate implementation | removed_by_user |
 | P4-20 | Changed-boundary-only recovery and security acceptance | Compose the observed real reachable-profile Cardputer private-key connection with completed P4-02/P4-11/P4-17 key, mismatch-before-auth, canonical exact-host rewrite and authenticated selected-host forget evidence; retain the exact-owned failed-endpoint lifecycle/cleanup evidence and explicit Phase 9 ownership of the unreachable rotatable-endpoint runtime; broad re-certification of unchanged NVS/SD was removed by user | completed |
-| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; active SSH is compared with the existing active-SSH heap/largest-block/stack/latency baseline and must not regress or reset/freeze; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | pending |
+| P4-21 | Phase closure: documentation, focused/full regression, performance/resources, cleanup, independent review, CI/PR/merge | Docs/threat model/licenses/secret scans and exact Device/Web regressions pass without repeating P4-17/P4-20-specific scenarios; idle/general mode retains the 70 KiB floor; final-image SSH passes the fragmented functional sequence without reset/freeze, while the platform-unobservable post-fix numeric active-session sample is removed from acceptance and retained as a user-accepted residual with no inferred performance claim; SD ownership and exact cleanup are evidenced; final review has no blockers; green CI and reviewed PR merge only to `develop` with `main` and stash unchanged | completed |
 
 ## P4-01 design gate
 
@@ -3709,3 +3709,475 @@ with the frozen canonical-semantic and transport-unknown contract.
   endpoint failed before SSH protocol. The accepted residual remains mandatory in Phase 9: one
   reachable collision-owned rotatable endpoint must observe mismatch before authentication, exact
   forget without reconnect and semantic preservation of unrelated canonical records.
+
+## P4-21 phase-closure gate
+
+**Status:** completed
+**Started:** 2026-09-01 04:02:50 +03:00.
+**Completed:** 2026-09-01 13:49:17 +03:00.
+
+P4-21 owns only Phase 4 closure: canonical requirement/evidence reconciliation, documentation and
+license/filename-only secret checks, proportional focused changed-boundary regression for the phase
+branch, exact pinned build, final Device/Web/resource evidence for changed boundaries, exact-owned
+cleanup, independent final review, green CI and reviewed merge only into `develop`. Complete hardware
+and Web Console regression remains the `develop`-to-`main` release-candidate gate. P4-21 adds no
+product behavior, diagnostic, framework, future-phase implementation or repetition of
+P4-17/P4-20-specific scenarios.
+
+### Closure inventory, proof lock and harness ownership
+
+- CI-equivalent local owners are the existing third-party verifier, MicroPython syntax/supervisor
+  tests, strict host C++ suite and Web Console UI suite from `.github/workflows/firmware.yml`.
+  The exact Windows Arduino build uses the pinned P4 build skill, M5Stack core 3.2.1, repository
+  vendor pins and the custom 8 MiB FQBN. No package manager or new dependency is needed.
+- Real Device regression is owned by `tools/device_regression.ps1`. Read-only inventory found a
+  concrete harness defect against the current canonical Device rule: it retries `PING` up to three
+  times before every case and unconditionally writes `EXIT` from `finally`, including after normal
+  readiness is lost. This is a P4-21 test-harness defect, not firmware behavior or another completed
+  roadmap row.
+- The minimal test-only correction performs exactly one initial `PING` with one fixed total
+  deadline, keeps one carried partial-input owner across readiness and every case, classifies all
+  queued complete lines and the carried partial before each write, and processes each current batch
+  completely before accepting `PONG` or a case completion. Reset/panic takes precedence, and reset,
+  panic, serial I/O failure or command timeout marks readiness lost and permits no later serial write.
+  The finalizer closes the port without a command. If Web Console was confirmed active and a
+  non-readiness assertion fails while serial is still responsive, one exact `EXIT` cleanup must
+  observe `WEB_CONSOLE result=stopped`; its first failure marks readiness lost and ends the path. No
+  retry/recovery/reset/upload/power/card action is added.
+- The retained `hardware_web_e2e` full/SSH path is not eligible closure evidence because its source
+  can auto-trust an unknown SSH host. P4-21 will not edit or run it. Final authenticated Web resource
+  evidence uses one disposable existing-endpoint lifecycle that fails closed on unknown/mismatch,
+  performs no profile/key/trust mutation, measures idle/open/closed state and restores the selected
+  profile and closed terminal. P4-17/P4-20-specific journeys are not repeated.
+
+### Frozen closure proof matrix
+
+| Boundary | Smallest evidence | Forbidden effect |
+|---|---|---|
+| Canonical Phase 4 scope | Complete ROADMAP/P3/P4 reconciliation; all prior rows completed or explicitly removed | No silent defer, duplicate feature or P5-P9 implementation |
+| Documentation/licenses/secrets | Existing third-party verifier, documentation audit and tracked filename-only secret scan | No secret contents printed and no ignored credential/key fixture included |
+| Host/static/Web UI | CI-equivalent Python, MicroPython, strict host C++ and retained Web UI suites | No duplicated source-snapshot harness or weakened oracle |
+| Exact firmware | Vendor pin check, one pinned 3.2.1 compile, options/FQBN gate, image hash and flash/global-RAM report | No alternate core/toolchain, erase or upload-as-recovery |
+| Phase-branch Device evidence | Corrected retained runner plus focused changed-boundary selectors; complete hardware/Web regression remains the `develop`-to-`main` release-candidate gate | One initial readiness attempt; first loss ends all writes and no recovery chain |
+| Web/active SSH resources | Final-image configured SSH terminal/SFTP plus fragmented-sequence probe and static no-extra-reservation ownership; numeric active-session heap/largest-block/worker-stack/latency observation removed by canonical decision | No inferred numeric value or performance/no-regression claim; no unknown trust, remote mutation, profile/key edit or P4-17/P4-20 replay |
+| Cleanup/state | Exact fixture/artifact absence and original profile/project/chat/workspace selections/inventories | No unrelated delete, stash/ref/main mutation or retained disposable output |
+| Publication | Fresh independent final review, Architect personal GO, row commit/push, green CI, reviewed PR and merge only to `develop` | No WIP push, history rewrite, `main` change or merge before gates |
+
+Expected and actual row write set is exactly `ROADMAP.md`, `.agents/P4_TRACEABILITY.md`, the minimal
+`tools/device_regression.ps1` readiness/oracle lifecycle correction and the existing
+`firmware/CardputerAssistant/src/ssh_client.cpp` contiguous-headroom correction. Any other production,
+retained UI, schema, route, policy, storage, vendor/config, build-workflow or test file is out of
+scope and requires an explicit ownership decision before edit.
+
+### Pre-device harness review and cheap evidence
+
+- The resumed fresh read-only proof reviewer returned `STOP` before Device execution: reset/panic
+  recognition originally logged before setting the terminal readiness state, and serial
+  read/write/flush exceptions could leave readiness apparently available. The outer failure cleanup
+  also treated an open port as proof of responsiveness and could therefore write `EXIT` after a
+  transport failure.
+- The bounded correction sets readiness loss before fallible crash logging, classifies every serial
+  I/O exception before rethrow, and permits the one Web Console failure cleanup only after a
+  completed non-reset case line explicitly confirmed the serial path responsive. The initial single
+  `PING`, fixed deadline, timeout/reset ownership and close/dispose-only finalizer remain unchanged.
+- Observed cheap evidence: vendor-pin/static gate passed; the native CI-equivalent third-party,
+  MicroPython syntax/supervisor and Web UI checks passed; the corrected WSL strict C++ command
+  returned `host_tests: PASS` and removed its exact-owned temporary ELF through its trap.
+- The same reviewer used its single blocker-only follow-up and returned `GO`: both reset/panic paths
+  set readiness loss before logging, serial I/O failures fail closed, Web cleanup requires an exact
+  completion-line responsiveness observation, and `finally` only closes/disposes. The reviewer was
+  then closed and is not reused for phase-final review.
+- Architect then found one healthy-path lifecycle omission before closure: the standalone
+  `web-console-start` suite contained only `CONSOLE`, so removing the unconditional finalizer write
+  could leave the normal successful handler active. The bounded correction adds one explicit
+  stopped-pattern `EXIT` case to that suite. Normal success now closes explicitly; a responsive
+  non-readiness failure uses the separately guarded one-exit cleanup; readiness loss permits neither
+  retry nor write.
+- The one exact M5Stack 3.2.1 compile passed with exact FQBN and only resolved core `3.2.1`:
+  application flash `3,440,354` bytes, globals `65,700` bytes, app image `3,440,544` bytes,
+  SHA-256 `FD1103603FF9A98EE62787BF65B26916CE91528CE32BA68A9D4CE7C48C17B7E1`. This is byte-identical
+  to the already uploaded P4-17 final image, so no upload is required or permitted as recovery.
+- The tracked filename-only secret scan found zero suspicious credential/key/secret filenames.
+  Read-only Git evidence retained `main` at `681cc8ffa9b6d26897d4847001d5d57f17b5d340`, the sole
+  stash at `6073fd15eb2836351ef2ae4323926565339a495b`, an empty index, and only the frozen two tracked
+  P4-21 paths plus the three approved Architect-owned untracked agent definitions.
+- The first corrected `full` Device run reached and passed status, pure functions, UI budget,
+  cancellation, storage/chat/file/settings, offline/SSH/Python/audio, Web Console start/status/exit
+  plus post-console responsiveness, chat/file/search API and cache boundaries. It then failed the
+  inherited external-model `SEARCHTEST`: the model returned 1,688 response bytes without any tool
+  call (`search_called=no`, `tool=none`, missing required Web group `0x1`). No reset/panic occurred,
+  the exact Web Console cleanup was observed, and the exact-owned temporary log was removed. This is
+  not a full-regression pass and is classified outside P4 product/harness behavior pending ownership
+  resolution; the unchanged experiment must not be repeated without a materially different proof.
+- Architect classified that failure as a P4-21 retained-runner oracle defect, not firmware or P4
+  production: `tool=none` means no callback supplied a name, `search_called=no` proves exact
+  `web_search` never routed, and the positive response plus exact missing-required Web group `0x1`
+  error is the existing fail-closed no-effect outcome. Both retained copies now accept only the
+  historical `WebSearch` alias or `none` on that exact rejected branch; arbitrary/canonical failed
+  names, generic or zero-byte/preflight failures remain rejected. The failed run is not acceptance
+  evidence. The then-planned complete rerun is superseded by the closure evidence ownership below.
+- Post-correction static evidence found exactly one initial `PING`, one standalone `CONSOLE`, one
+  standalone `EXIT`, and no finalizer writes. One focused `web-console-start` Device selector then
+  passed both cases with exactly one ready and one stopped observation; normal readiness remained
+  healthy and the exact-owned temporary log was deleted.
+- The single Architect-authorized corrected `full` run passed the corrected fail-closed
+  `SEARCHTEST` and the following UI search path. It then stopped at the inherited `SSHPROBE` before
+  the remaining cases: `libssh2_session_init_ex` could not allocate its `24,576`-byte block after
+  earlier session allocations, with allocator evidence of `98,920` free internal bytes and the
+  serial result reporting free heap `98,816`, largest 8-bit block `32,756`, stack `2,508`. No
+  reset/panic occurred, Web Console cleanup stopped, and the temporary log was removed. Because the
+  final image is byte-identical to P4-17 and this may be sequential-suite fragmentation/headroom,
+  production ownership is unresolved; no rerun, reorder, oracle change or production edit is allowed
+  before Architect classification. This is not full-regression acceptance evidence.
+- The first disposable Web/active-SSH resource attempt is classified only as a wrapper/reporting
+  defect: it lost the Node result and synthesized `primary=none; cleanup=none`, so it proves neither
+  product PASS nor readiness/product failure. Architect authorized one materially different attempt
+  whose Node process emits one bounded non-secret structured result before exit handling, whose
+  holder preserves primary and cleanup outcomes separately, and whose single shared health state
+  gates every later serial/HTTP write. A first transport/readiness loss ends without EXIT/retry;
+  only a healthy product/assertion failure permits one verified Console stop. No retained harness,
+  trust/profile/key mutation, build/upload or replay is allowed.
+- The one authorized corrected resource attempt emitted and preserved exactly one structured result.
+  Serial/Web health remained `healthy`, no trust was submitted, selected-profile SSH cleanup reached
+  stopped, the Console reached its exact stopped marker, and the disposable script was removed. The
+  selected existing profile nevertheless reached `ssh_connection_failed` during connect before any
+  active-session metric or marker; this supplies no active-SSH performance PASS and is not repeated.
+  Together with the preceding public probe allocation failure it requires ownership classification,
+  but does not by itself prove the same root cause or expose any host/key/credential authority detail.
+- The final Architect-authorized owner-classification observation was direct and conclusive. Before
+  selected-profile connect, authenticated public metrics were free heap `97,272`, largest block
+  `34,804`, minimum heap `6,560`, main-loop stack `2,508`, reset reason `1`. The existing public
+  worker error sanitized to `session_alloc`, matching the independent `SSHPROBE` vendor-allocation
+  boundary rather than endpoint/TCP/handshake/auth. No trust was submitted; profile/key identity and
+  revision remained unchanged; SSH cleanup and exact Console stop passed; the disposable script was
+  removed. This is a real production resource blocker, not active-SSH acceptance evidence, and no
+  further Device/HTTP action is permitted before Architect localization.
+
+### Active-SSH contiguous-headroom correction pre-edit gate
+
+**Status:** runtime_STOP; reviewed reorder compiled/uploaded but did not satisfy late-suite
+contiguous-headroom acceptance; read-only ownership analysis required before any further Device or
+production action.
+
+- Architect localized the two independent failures to P4-21's locked active-SSH resource acceptance:
+  the public probe and the selected-profile Web worker both report `session_alloc`. The startup order
+  predates P4, so no completed row is reopened. Installed libssh2 1.11.1 `session.c` confirms that
+  `libssh2_session_init_ex` has no socket dependency and allocates `sizeof(LIBSSH2_SESSION)`, then
+  exact `24,576`- and `16,384`-byte packet buffers. The failed `24,576` allocation is therefore
+  simultaneous contiguous-headroom exhaustion while TCP/banner buffers are live.
+- Minimal candidate: in both `probeSshHost` and `SshClient::connectControlled`, move only the existing
+  allocator setup plus `libssh2_session_init_ex` block before the existing TCP connect. Validation,
+  first cancellation, timeout values, blocking mode, KEX preference, trust/host-key, handshake,
+  authentication, errors and all later behavior stay in their current relative order. No allocation
+  is retried and no resource threshold/fallback is added.
+
+| Existing return boundary after reorder | Exact durable/runtime cleanup |
+|---|---|
+| Probe validation or `libssh2_init` failure | Unchanged: no session/client/runtime ownership exists |
+| Probe session allocation failure before TCP | Unchanged error; no session exists; call existing `libssh2_exit` |
+| Probe TCP connect failure | Free the already-created session, then existing `libssh2_exit`; no connected client exists |
+| Probe banner timeout or non-SSH first byte | Free session, then existing `client.stop` and `libssh2_exit` |
+| Probe KEX preference, handshake or host-key formatting failure | Existing session free/disconnect where applicable, client stop and runtime exit remain unchanged |
+| Probe success | Existing disconnect, session free, client stop and runtime exit remain unchanged |
+| Regular validation/first cancellation/runtime-init failure | Unchanged: no new owner exists |
+| Regular session allocation failure before TCP | Existing `close()` sees runtime initialized, no session/network, and exits libssh2 exactly once |
+| Regular TCP failure or post-connect cancellation | Existing `close()` frees the preallocated session, stops network and exits runtime exactly once |
+| Regular KEX/handshake/host-key failure or later caller close | Existing `close()` remains the sole session/channel/SFTP/network/runtime cleanup owner |
+
+- Forbidden: allocator/pool/framework, PSRAM scheme, packet/vendor/KEX/config change, retry, delay,
+  recovery, worker-stack tuning, test reordering, fallback, resource guard, new helper/type/test,
+  diagnostic, API/UI or adjacent SSH behavior.
+- Proportional proof after a fresh pre-edit `GO`: cheap diff/static/host checks; one exact pinned build
+  and upload as implementation verification, never recovery; one corrected `full` suite with no
+  further oracle/order change; then one authenticated no-auto-trust selected-profile pre/open/closed
+  resource, worker-stack and latency observation with read-only marker and exact cleanup. Compare
+  against the failing pre-connect `97,272` free / `34,804` largest topology, retained active-SSH
+  baseline and 70-KiB idle floor. First readiness loss ends the path without escalation.
+- A fresh bounded read-only reviewer returned `GO` with no blocker. It verified from installed
+  libssh2 source that session initialization has no socket dependency; enumerated every probe and
+  regular early return as single-owned with no leak/double-free; confirmed preallocating only the
+  existing session and packet buffers is the smallest coherent contiguous-headroom correction; and
+  confirmed the frozen full-suite plus selected-profile proof reaches both changed paths. The
+  reviewer was closed immediately and is not reused for implementation or closure review.
+- Architect personally returned pre-edit `GO` for the frozen three-path design. The following
+  primary patch call returned truncated tool output, so its application result is deliberately not
+  inferred. At the 2026-09-01 reboot-safe boundary no validation or external action was running;
+  resume must inspect the authoritative `ssh_client.cpp` and this row once, then complete only any
+  missing frozen hunks rather than reapplying the patch blindly.
+- After reboot, authoritative source inspection proved that the primary patch had applied the exact
+  frozen reorder in both call paths with all three new probe cleanup edges present and no duplicate
+  allocator/session block. `git diff --check`, the focused ordering/cleanup static check and all
+  pinned vendor checks passed. The strict WSL host suite returned `host_tests: PASS`; its first
+  invocation was a command-quoting failure before compilation, and the corrected collision-checked
+  literal exact-owned ELF invocation passed and trap-cleaned the file.
+- A fresh post-patch read-only code reviewer returned `GO`: the actual diff preserves validation,
+  cancellation, timeout, KEX, trust, handshake/auth and error semantics; probe early returns and
+  regular `close()` remain singly owned with no leak or double-free; and no hidden responsibility or
+  adjacent behavior was added. The reviewer was closed and will not be reused for closure.
+- The exact pinned M5Stack 3.2.1 build passed with exact FQBN, only resolved core `3.2.1`, flash
+  `3,440,382` bytes, globals `65,700` bytes and app image `3,440,576` bytes, SHA-256
+  `313CE0CEA69959384F29682617D4F4FF8C97ECB1FC38D5764D7FADBEBE09243C`. The single authorized
+  implementation-verification upload completed with flash hash verified and COM8 re-enumerated.
+- The one corrected `full` regression again passed all preceding boundaries through model search and
+  UI search, then stopped at `SSH host probe`: `libssh2_session_init_ex` still failed its exact
+  `24,576`-byte allocation with `100,916` free allocator bytes; post-failure metrics were free heap
+  `101,068`, largest block `28,148`, stack `2,508`. No reset/panic or readiness loss occurred; Web
+  cleanup had stopped and the collision-checked exact-owned log was deleted. The frozen reorder is
+  therefore insufficient for late-suite contiguous headroom and is not closure evidence. No repeat,
+  selected-profile Web proof or further production edit is permitted until ownership is reclassified.
+
+### Second and final contiguous-headroom pivot gate
+
+**Status:** numeric_active_observation_removed; the full observer history below is retained, its
+values remain unknown, and the missing sample is a user-accepted residual rather than acceptance
+evidence. P4-21 remains the only `in_progress` row pending personal Architect closure review.
+
+- Target-object disassembly of the exact pinned ESP32-S3 libssh2 1.11.1 build proved
+  `sizeof(LIBSSH2_SESSION) == 10,744`; installed source fixes the following two allocations at
+  `PACKETBUFSIZE == 24,576` and `MAX_SSH_OUT_PACKET_LEN == 16,384`. The observed largest block
+  `28,148` is restored only after failed init unwinds the first `10,744` bytes, so moving init before
+  TCP cannot guarantee the three internal allocations on the late-suite fragmented heap.
+- Architect authorized one final narrow design in existing `ssh_client.cpp`: retain the pre-TCP
+  session-init order and add one shared pinned-vendor init adapter. It transiently reserves exactly
+  the three already-required blocks in descending size order, using the existing selected heap
+  capabilities and the private-header constants/`sizeof` rather than production numeric literals.
+  Existing allocator callbacks then transfer those exact pointers to libssh2 in its pinned request
+  order with no copy and no additional steady-state allocation. This is not a persistent pool,
+  fallback, retry or reusable allocator framework.
+
+| Transition | Exact ownership and result |
+|---|---|
+| Adapter entry | Reservation slots are empty; failed-size/index/mismatch state is reset for this one init |
+| Reserve `PACKETBUFSIZE`, output packet, then session struct | Each successful pointer is adapter-owned; any reservation failure records its exact source-derived size, frees only prior reservations and never calls libssh2 |
+| Expected allocate callback | Exact next pinned size and non-null slot transfer that pointer to libssh2, clear the slot and advance once; no heap allocation occurs |
+| Unexpected allocate size/order/count or init-time realloc | Set mismatch/failed size and return null; libssh2 unwinds every already-transferred pointer through the existing free callback, then the adapter frees only still-non-null reservations |
+| Init returns null | Disable reservation mode, free only remaining adapter-owned slots, and return null; vendor init has already unwound every transferred pointer |
+| Init returns non-null but transfer count/state is incomplete or mismatched | Disable reservation mode, call `libssh2_session_free()` so the returned session releases every transferred pointer, then free only still-non-null adapter-owned slots and return null |
+| Init returns complete session | All three slots are null and exactly three transfers occurred; disable reservation mode and return the session; every later alloc/realloc/free is the unchanged direct heap callback path |
+| Probe/regular later failure or close | Existing probe branches and `SshClient::close()` remain the sole owners of the returned libssh2 session, network and runtime cleanup |
+
+- Forbidden remains: vendor/config/buffer-size change, test reorder/delay, persistent pool/reserve,
+  retry/fallback, generic allocator API, new file/type/framework, resource threshold, Device/UI/API
+  behavior or any third implementation approach. The tracked write set stays exactly the existing
+  `ssh_client.cpp`, P4-21 runner and this trace.
+- Frozen proof: one bounded pre-edit review of reservation ownership and unexpected-order cleanup;
+  one coherent primary patch; cheap diff/static/strict-host checks and fresh code review; one exact
+  pinned build/options gate/upload; one unchanged corrected `full` suite; then one authenticated
+  no-auto-trust selected-profile pre/open/closed resource, worker-stack and latency observation with
+  exact cleanup. First readiness loss ends the path. If this changed boundary fails, implementation
+  stops without a third approach.
+- The fresh bounded design reviewer returned one `STOP` on the initially omitted owner for a
+  non-null but rejected session. The corrected transition disables reservation mode, frees that
+  session through `libssh2_session_free()`, then frees only untransferred slots. Its single
+  blocker-only follow-up returned `GO`; the reviewer was closed and will not be reused.
+- Architect personally returned pre-edit `GO` for the corrected state machine. The primary agent
+  then implemented exactly one source-derived descending reservation adapter in existing
+  `ssh_client.cpp`, extended only the existing allocator state/callbacks, and routed the probe and
+  regular client through it while retaining their pre-TCP session-init order. No vendor, runner,
+  API, config or additional production owner changed.
+- Post-patch cheap evidence passed: `git diff --check`; one adapter/one pinned vendor-init/two-callsite
+  ownership; source-derived sizes with no allocation-size literal in the adapter; rejected-session
+  cleanup after reservation mode is disabled; and the strict WSL suite returned `host_tests: PASS`
+  with its collision-checked exact-owned ELF trap-cleaned. Fresh actual-code review is pending before
+  any build.
+- A different fresh actual-code reviewer returned `GO`: reservations are exactly
+  `24,576 -> 16,384 -> 10,744`, callback transfers exactly `10,744 -> 24,576 -> 16,384`, pointers
+  change owner without copy or extra allocation, every null/non-null/mismatch path has one cleanup
+  owner, allocator state outlives each session, repeated connect/close is safe, and all cancellation,
+  timeout, KEX, trust, handshake/auth and error behavior remains unchanged. The reviewer was closed.
+- The materially changed exact M5Stack 3.2.1 build passed with exact FQBN, sole resolved core `3.2.1`,
+  flash `3,440,982` bytes, globals `65,700` bytes and app image `3,441,168` bytes, SHA-256
+  `5267E73C29147DD78B58184C3296950CE041EC6ECB0E1557C3417712AC57F171`. A delayed Architect hold
+  arrived after the independent reviewer had already returned `GO` and the build had completed; no
+  upload had started. Architect then personally reviewed the actual adapter diff, accepted Hooke's
+  real verdict and this exact build/options/hash gate, and returned `GO` for one upload plus the two
+  frozen runtime proofs. The later duplicate Architect reviewer was interrupted without a verdict
+  and is not evidence.
+- The single approved upload of that exact image completed with every flash hash verified and COM8
+  re-enumerated. The one unchanged `full` suite then passed all cases through chat API but stopped
+  before the changed SSH probe at inherited `model file tool`: `TOOLTEST result=failed
+  stage=tool_roundtrip api=pass write=failed file=failed link=failed cleanup=pass error=`. No
+  reset/readiness-loss marker was observed and the collision-checked exact-owned log was deleted.
+  This is neither full-regression nor SSH-adapter evidence; no repeat, selected-profile proof or
+  production edit is allowed until the foreign/harness/provider ownership is classified.
+- Architect classified that `TOOLTEST` observation as unchanged external-model/diagnostic
+  nondeterminism: the prior uploaded image passed the same exact model/Web/search/UI prefix, the
+  final adapter has no model/file dependency, and both outcomes remained fail-closed with exact
+  cleanup. No model case was repeated. One disposable selector then reused only existing retained
+  case objects/patterns for the exact 23-case post-model tail. In one healthy COM8 session it passed
+  `SSHPROBE`, public SSH SFTP/PTY, STT/TTS, post-online responsiveness, configured SSH terminal and
+  SFTP, OTA metadata/download, P2 schema/migration/recovery and project Device parity. It then timed
+  out after 180 seconds waiting for inherited `shared project isolation`; the runner ended the path
+  and the exact-owned log was removed. The changed allocator boundary therefore passed, but this is
+  not a complete composed regression and the selected-profile resource proof was not attempted.
+- The temporary selector was removed immediately. Its inverse hunk exposed four line terminators
+  normalized by patch application; exact byte repair restored the pre-selector retained runner to
+  SHA-256 `C13093F91ED9FCE0F8A64F807149B709288DFC65565D953B8D697E49F9CCE3E8`, `29,408` bytes, with
+  zero temporary selector markers. No disposable mode or oracle remains in the row diff.
+- Architect personally classified the final evidence. The final-image `SSHPROBE`, configured
+  selected-profile SSH terminal and configured SFTP passes prove the adapter's functional
+  connect/trust/auth/PTY/SFTP boundary under the fragmented closure sequence; the unchanged
+  `TOOLTEST` and inherited P2 timeout reveal no demonstrated P4 production defect. They do not prove
+  the separately locked active-SSH resource observable: `runSshSessionTest` closes the session before
+  any retained sample, its surfaced output contains no exact serial metrics, existing samples are
+  post-close/main-stack, and largest block plus elapsed active latency are absent. Static proof that
+  the adapter leaves no extra reservation after init cannot substitute for active heap topology,
+  worker-stack margin or latency. This is the sole missing runtime proof. The failed-readiness path
+  is permanently ended: no further Device/serial/HTTP/Web action, recovery, build/upload, oracle,
+  harness or production correction is authorized. P4-21 cannot be completed, staged, committed,
+  pushed, reviewed for final merge or published until a separately valid proof decision exists.
+- The user subsequently prompted and Architect recorded one narrow final exception for the missing
+  observable. It authorizes exactly one new disposable direct observer against the already-uploaded
+  final image, not recovery or reuse of the prior broad path: one COM8 open, one fixed-deadline
+  `PING`, and one `CONSOLE` only after exact `PONG`. Missing `PONG` or prefix-matched ready closes and
+  disposes only, removes the observer and permanently stops without `EXIT`, retry, reset, rebuild,
+  upload or physical action. A healthy holder stays open through one ignored-credential authenticated
+  Web lifecycle using only the selected profile, never submits trust, captures comparable pre/open/
+  closed heap, minimum heap, largest block, actual SSH worker-stack and bounded connect/open latency,
+  executes one established no-history read-only marker, restores selected/closed state, then sends
+  one `EXIT` and requires exact stopped. Product/assertion failure permits only the same exact cleanup
+  and one guarded `EXIT`. Production, retained tests/runner, profile/key/trust/known_hosts,
+  project/chat/workspace/remote state, build and upload remain frozen. This decision permits one
+  attempt only; no repeat or recovery chain exists.
+- After the system restart, the complete visible 21-row plan was restored with only P4-21 active.
+  The one attempt remained unconsumed. Its collision-checked disposable observer is limited to one
+  serial holder and the authenticated read/start/input/output/stop Web boundaries. After draining
+  login output, one empty carriage-return line is the no-history marker: it executes no shell
+  command, creates no history entry or durable remote effect, and must produce fresh PTY output
+  while the same session remains open. The observer reports only boolean identity preservation and
+  non-secret metrics; it never emits profile IDs, hosts, credentials, cookies, CSRF values, terminal
+  output or authority internals. Its exact local file is removed after the sole process exits.
+- The sole authorized attempt is now consumed. One COM8 holder received exact `PONG` and the
+  prefix-matched Web Console ready marker; ignored-credential login, authenticated session and the
+  selected-profile preflight succeeded, with a valid nonzero selected public ID observed only as a
+  boolean. `POST /api/ssh/start` then returned HTTP `202`, while the disposable observer incorrectly
+  required `200`; it therefore stopped before polling connection state or sampling active resources.
+  This is an observer status-oracle defect, not product failure evidence. The same wrong status
+  assumption made its attempted SSH-stop cleanup report failure before polling; terminal closed/profile
+  preservation is consequently unobserved. The healthy serial holder still sent its single guarded
+  `EXIT` and observed exact `WEB_CONSOLE result=stopped`. No trust request, remote command, profile/key/
+  known-host/project/chat/workspace mutation, build, upload, reset or recovery occurred. The exact
+  disposable observer was removed. No active heap/largest-block/worker-stack/latency metric exists,
+  no repeat is permitted, and P4-21 remains closure-evidence STOP pending Architect ownership/closure
+  decision.
+- Architect conclusively assigned that attempt to the disposable observer and invalidated it as
+  acceptance evidence: installed `web_console.cpp` intentionally returns successful HTTP `202`
+  after accepting SSH start and while accepting stop, while idle stop may return `200`; the canonical
+  retained Web client accepts every successful 2xx and polls `/api/ssh/state` for the authoritative
+  stage. Exact `PONG`, prefix-ready and stopped observations prove readiness was never lost, so the
+  recovery prohibition was not triggered. Architect superseded only the no-repeat clause with one
+  final oracle-corrected rerun. It must accept 200 through 299 for start/stop, poll connected/open and
+  idle/closed states, otherwise preserve the same frozen endpoint/write/no-trust/no-mutation contract.
+  A readiness loss or any second observer defect permanently ends the path without another run.
+- The oracle-corrected rerun did not launch and remains unconsumed: the platform rejected the
+  action-time COM8/authenticated-Web execution before creating the process because it requires a
+  fresh direct user approval for this retry. No serial port, HTTP session or Device state was
+  touched. The unexecuted exact-owned observer was removed. This is an external approval blocker,
+  not proof or product evidence; it may not be bypassed or retried until the platform accepts the
+  user's explicit authorization.
+- The user then supplied the required direct action-time authorization for exactly this single
+  oracle-corrected COM8/local-WebUI lifecycle, explicitly excluding build, upload, reset and
+  recovery. The rerun remains unconsumed until process creation; its endpoint, state, mutation and
+  cleanup constraints remain otherwise unchanged.
+- The platform again rejected execution before process creation because the direct authorization
+  was relayed through Architect rather than posted by the user in this task. The corrected rerun is
+  still unconsumed; no COM8, HTTP or Device action occurred, and the recreated disposable observer
+  was removed. The same route may not be attempted or worked around until this task receives the
+  tool-enforced direct user authorization.
+- The user then posted that exact action-time authorization directly in this task. The corrected
+  rerun remains unconsumed until its process starts and is now eligible for the same frozen static
+  gate and single execution.
+- The platform nevertheless rejected the exact command again before process creation, classifying
+  even the direct current-task message as an untrusted transcript delta. The required static gate
+  had passed, but no COM8, HTTP or Device action occurred; the corrected rerun remains unconsumed
+  and the exact observer was removed. Tool policy explicitly prohibits another invocation,
+  workaround or indirect route. P4-21 therefore remains externally blocked on this exact missing
+  active-resource observation pending Architect closure disposition; this is not product evidence.
+
+### Evidence-ready closure reconciliation and accepted residual
+
+**Status:** completed after mandatory personal Architect closure `GO`. Publication, CI, PR and merge
+evidence follows through the terminal row-close/GitHub workflow and is not pre-claimed here.
+
+- The row-owned row payload remains exactly four paths: `ROADMAP.md`, this trace, the reviewed
+  `ssh_client.cpp` contiguous-headroom correction and the reviewed `device_regression.ps1`
+  readiness/oracle/stream-ownership correction. The index is empty. The only untracked paths are the
+  three approved Architect-owned `.codex/agents` definitions, outside P4-21 ownership.
+- The earlier P4-21 requirement for one complete `full` Device suite is superseded by canonical
+  release ownership: ROADMAP requires focused regression before a phase branch enters `develop`,
+  while complete hardware and Web Console regression belongs to the later `develop`-to-`main`
+  release-candidate gate. The incomplete retained full runs, external-model `TOOLTEST` nondeterminism
+  and inherited P2 timeout remain honest compositional evidence; no further Device suite is run.
+- Architect's personal closure review found one final retained-runner defect: readiness and each case
+  owned separate partial buffers, discarded queued serial input before writes and could accept a
+  completion before a later reset in the same batch. The bounded correction uses one carried partial
+  owner, classifies queued complete/partial input before every write, processes the entire current
+  batch with reset/panic precedence, and makes readiness loss terminal for every later write including
+  failure cleanup. This changes only the retained runner; `git diff --check`, PowerShell parsing,
+  exact write-site/stream-state/path checks and a fresh independent read-only proof red-team all
+  passed with no blocker.
+- The final proof red-team then identified one evidence-only `STOP`: every earlier fragmented SSH pass
+  used the old reader, so a reset after a completion line in the same serial batch could have been
+  hidden. Architect authorized one focused four-case sequence on the already-uploaded final image
+  through the corrected runner. It completed before a later superseding cancellation arrived; that
+  cancellation remains binding against every future Device/Web/build repetition.
+- The single corrected-reader run passed `SSHPROBE`, public SSH SFTP/PTY, configured selected-profile
+  SSH terminal and configured SFTP in one COM8 session. The full current batches contained no reset,
+  panic or readiness loss. The collision-owned temporary log was deleted and verified absent, the
+  tracked runner remained byte-identical, and no build, upload, reset, recovery or full suite ran.
+- Architect personally returned final P4-21 closure `GO` on the exact current payload. The executed
+  production paths are `probeSshHost` and regular `SshClient::connectControlled` through the
+  source-derived `initializeReservedSshSession` libssh2 allocation-transfer boundary. The focused
+  final-image sequence proves changed probe, public SFTP/PTY, selected terminal and configured SFTP
+  behavior under the corrected reader. Forbidden effects were absent: no reset/panic/readiness loss,
+  no steady adapter reservation, no profile/key/trust/known-host/project/chat/workspace/remote
+  mutation, and no retained temporary log. Numeric active-session heap/largest-block/actual
+  worker-stack/latency remain unknown with no optimization, performance or no-regression claim; the
+  inherited P2 terminal fixture absence remains the accepted exact-owned foreign-P2 residual.
+- Every prior implemented P4 row is published on the phase branch through
+  `3bfb2640b85e551418e32fb2498144937de2beae`; authenticated GitHub resolves that exact SHA.
+  All local phase commits report the required Alexey Bulygin Author and Committer. `develop` remains
+  `99f6de9e0e5d558ba0162c714a14044111d9aab2`, `main` remains
+  `681cc8ffa9b6d26897d4847001d5d57f17b5d340`, and the sole retained stash remains
+  `6073fd15eb2836351ef2ae4323926565339a495b`.
+- CI-equivalent third-party, MicroPython, strict host C++, static/vendor-pin and retained Web UI
+  checks passed. Documentation, plaintext-at-rest threat model, licenses and filename-only secret
+  checks passed without exposing secret contents. The exact final M5Stack 3.2.1/FQBN build passed at
+  flash `3,440,982`, globals `65,700`, app image `3,441,168`, SHA-256
+  `5267E73C29147DD78B58184C3296950CE041EC6ECB0E1557C3417712AC57F171`; the single upload verified
+  every flash hash.
+- On that final image, one healthy composed tail passed the changed `SSHPROBE`, public SSH SFTP/PTY,
+  configured selected-profile SSH terminal, configured SFTP and all intervening non-SSH boundaries
+  until an inherited P2 timeout. The allocator therefore passed functional connect/trust/auth/PTY/
+  SFTP use under the fragmented closure sequence. Static and independent code review prove the
+  reservation adapter transfers only the exact pinned libssh2 init allocations, leaves no adapter
+  reservation after init and preserves all later allocator/cleanup behavior. No reset, panic or
+  freeze was observed in the accepted changed-boundary evidence.
+- The idle/general resource floor remains observed above 70 KiB and the final image retained the
+  accepted globals budget. Post-correction numeric active-session heap, largest-block, actual
+  worker-stack and latency were not measured; their values are unknown. The only eligible observer
+  was prevented before process creation by repeated platform action-time rejection, even after
+  direct user approval; no Device readiness loss or product failure occurred. ROADMAP now removes
+  that numeric observation from Phase 4 acceptance and records the user's explicit acceptance of the
+  measurement residual, supported only by the final-image functional SSH pass and the
+  no-extra-steady-state-allocation review. This does not weaken a product behavior, infer a value,
+  claim measured optimization or active-session no-regression, or authorize a future retry/recovery
+  chain.
+- All P4-owned disposable logs, selectors and observers named by this row are absent. No P4-owned
+  profile, key, trusted-host, project, chat, workspace or remote fixture remains; selection/identity
+  stayed unchanged in every successful observable lifecycle. For the inherited `P2SHAREDTEST`
+  timeout, the later successful `PONG` proves the synchronous selector returned to the dispatcher and
+  source inspection proves every owned-fixture path invokes cleanup before return. Its terminal
+  cleanup result and final fixture absence were not observed after the timeout, so exact final absence
+  remains unknown and is accepted only as an exact-owned foreign-P2 residual. The latest rejected
+  observer never created a process or touched COM8/HTTP/Device state.
+- The five Phase 4 product acceptance boundaries remain independently satisfied by completed rows:
+  P4-05 proves cancellable long foreground output plus downloadable SD log; P4-03/P4-08 prove that
+  read-only authority cannot dispatch arbitrary remote mutation; P4-06 proves visible SFTP
+  destination and mandatory overwrite confirmation; P4-11/P4-17/P4-20 prove mismatch blocks before
+  authentication; P4-01/P4-02/P4-15 prove model/file/API non-addressability of credential and
+  private-key material. The unavailable numeric sample is closure performance evidence, not one of
+  these behaviors.
+- Authenticated GitHub currently reports no workflow run and no PR for the uncommitted P4-21
+  payload, as expected. A green branch/PR CI run, reviewed PR and merge only to `develop` remain
+  mandatory post-GO publication gates; `main` must remain unchanged.

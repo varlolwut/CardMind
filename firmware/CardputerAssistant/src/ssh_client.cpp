@@ -46,18 +46,43 @@ constexpr std::size_t kSshPrivateKeyRecordHeaderBytes = sizeof(std::uint64_t);
 constexpr std::size_t kMaximumSshPrivateKeyRecordSlots = kMaximumSshProfiles + 1;
 constexpr unsigned int kTerminalWindowBytes = 64 * 1024;
 constexpr unsigned int kTerminalPacketBytes = 8 * 1024;
+constexpr std::array<std::size_t, 3> kSshSessionInitAllocationSizes = {
+    sizeof(LIBSSH2_SESSION), PACKETBUFSIZE, MAX_SSH_OUT_PACKET_LEN};
+constexpr std::array<std::size_t, kSshSessionInitAllocationSizes.size()>
+    kSshSessionInitReservationOrder = {1, 2, 0};
 
 struct SshAllocatorState {
     std::size_t failedAllocationBytes;
     std::uint32_t capabilities;
+    std::array<void*, kSshSessionInitAllocationSizes.size()> sessionInitReservations;
+    std::size_t sessionInitTransferIndex;
+    bool sessionInitReservationActive;
+    bool sessionInitReservationMismatch;
 };
 
 void* allocateSshMemory(std::size_t count, void** abstract)
 {
     SshAllocatorState* state = abstract != nullptr
         ? static_cast<SshAllocatorState*>(*abstract) : nullptr;
-    void* memory = state == nullptr ? nullptr : heap_caps_malloc(count, state->capabilities);
-    if (memory == nullptr && abstract != nullptr && *abstract != nullptr) {
+    if (state == nullptr) {
+        return nullptr;
+    }
+    if (state->sessionInitReservationActive) {
+        const std::size_t index = state->sessionInitTransferIndex;
+        if (index >= kSshSessionInitAllocationSizes.size() ||
+            count != kSshSessionInitAllocationSizes[index] ||
+            state->sessionInitReservations[index] == nullptr) {
+            state->failedAllocationBytes = count;
+            state->sessionInitReservationMismatch = true;
+            return nullptr;
+        }
+        void* memory = state->sessionInitReservations[index];
+        state->sessionInitReservations[index] = nullptr;
+        state->sessionInitTransferIndex++;
+        return memory;
+    }
+    void* memory = heap_caps_malloc(count, state->capabilities);
+    if (memory == nullptr) {
         state->failedAllocationBytes = count;
     }
     return memory;
@@ -73,12 +98,60 @@ void* reallocateSshMemory(void* pointer, std::size_t count, void** abstract)
 {
     SshAllocatorState* state = abstract != nullptr
         ? static_cast<SshAllocatorState*>(*abstract) : nullptr;
+    if (state != nullptr && state->sessionInitReservationActive) {
+        state->failedAllocationBytes = count;
+        state->sessionInitReservationMismatch = true;
+        return nullptr;
+    }
     void* memory = state == nullptr
         ? nullptr : heap_caps_realloc(pointer, count, state->capabilities);
     if (memory == nullptr && abstract != nullptr && *abstract != nullptr) {
         state->failedAllocationBytes = count;
     }
     return memory;
+}
+
+LIBSSH2_SESSION* initializeReservedSshSession(SshAllocatorState& state)
+{
+    state.failedAllocationBytes = 0;
+    state.sessionInitTransferIndex = 0;
+    state.sessionInitReservationActive = false;
+    state.sessionInitReservationMismatch = false;
+    state.sessionInitReservations.fill(nullptr);
+    const auto releaseReservations = [&state]() {
+        for (void*& reservation : state.sessionInitReservations) {
+            if (reservation != nullptr) {
+                heap_caps_free(reservation);
+                reservation = nullptr;
+            }
+        }
+    };
+
+    for (const std::size_t index : kSshSessionInitReservationOrder) {
+        void* reservation = heap_caps_malloc(
+            kSshSessionInitAllocationSizes[index], state.capabilities);
+        if (reservation == nullptr) {
+            state.failedAllocationBytes = kSshSessionInitAllocationSizes[index];
+            releaseReservations();
+            return nullptr;
+        }
+        state.sessionInitReservations[index] = reservation;
+    }
+
+    state.sessionInitReservationActive = true;
+    LIBSSH2_SESSION* session = libssh2_session_init_ex(
+        allocateSshMemory, releaseSshMemory, reallocateSshMemory, &state);
+    state.sessionInitReservationActive = false;
+    const bool accepted = session != nullptr && !state.sessionInitReservationMismatch &&
+        state.sessionInitTransferIndex == kSshSessionInitAllocationSizes.size() &&
+        std::all_of(state.sessionInitReservations.begin(), state.sessionInitReservations.end(),
+                    [](const void* reservation) { return reservation == nullptr; });
+    if (!accepted && session != nullptr) {
+        libssh2_session_free(session);
+        session = nullptr;
+    }
+    releaseReservations();
+    return accepted ? session : nullptr;
 }
 
 bool isValidSshHost(const String& host)
@@ -1978,10 +2051,20 @@ SshHostProbeResult probeSshHost(const String& host, std::uint16_t port,
         ? static_cast<std::uint32_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         : static_cast<std::uint32_t>(MALLOC_CAP_8BIT);
     const std::size_t freeAllocatorMemory = heap_caps_get_free_size(allocationCapabilities);
+    SshAllocatorState allocator = {0, allocationCapabilities, {}, 0, false, false};
+    LIBSSH2_SESSION* session = initializeReservedSshSession(allocator);
+    if (session == nullptr) {
+        libssh2_exit();
+        return {false, "", "", "libssh2 could not allocate an SSH session; "
+                                 "requested " + String(allocator.failedAllocationBytes) +
+                                 " bytes with " + String(freeAllocatorMemory) + " bytes free in " +
+                                 (freePsram > 0 ? String("PSRAM") : String("internal RAM"))};
+    }
 
     NetworkClient client;
     client.setTimeout(timeoutMs);
     if (!client.connect(host.c_str(), port, static_cast<int32_t>(timeoutMs))) {
+        libssh2_session_free(session);
         libssh2_exit();
         return {false, "", "", "TCP connection to " + host + ":" + String(port) + " failed"};
     }
@@ -1993,29 +2076,20 @@ SshHostProbeResult probeSshHost(const String& host, std::uint16_t port,
         delay(10);
     }
     if (bannerPeek <= 0) {
+        libssh2_session_free(session);
         client.stop();
         libssh2_exit();
         return {false, "", "", "TCP connected to " + host + ":" + String(port) +
                                  ", but the SSH server banner did not arrive"};
     }
     if (bannerFirstByte != 'S') {
+        libssh2_session_free(session);
         client.stop();
         libssh2_exit();
         return {false, "", "", "TCP endpoint " + host + ":" + String(port) +
                                  " did not begin with an SSH banner"};
     }
 
-    SshAllocatorState allocator = {0, allocationCapabilities};
-    LIBSSH2_SESSION* session = libssh2_session_init_ex(
-        allocateSshMemory, releaseSshMemory, reallocateSshMemory, &allocator);
-    if (session == nullptr) {
-        client.stop();
-        libssh2_exit();
-        return {false, "", "", "libssh2 could not allocate an SSH session; "
-                                 "requested " + String(allocator.failedAllocationBytes) +
-                                 " bytes with " + String(freeAllocatorMemory) + " bytes free in " +
-                                 (freePsram > 0 ? String("PSRAM") : String("internal RAM"))};
-    }
     libssh2_session_set_blocking(session, 0);
     const int preference = libssh2_session_method_pref(
         session, LIBSSH2_METHOD_KEX, "diffie-hellman-group-exchange-sha256");
@@ -2095,7 +2169,7 @@ struct SshClient::Implementation {
     String hostKeyType;
 
     Implementation()
-        : allocator{0, static_cast<std::uint32_t>(MALLOC_CAP_8BIT)},
+        : allocator{0, static_cast<std::uint32_t>(MALLOC_CAP_8BIT), {}, 0, false, false},
           session(nullptr),
           channel(nullptr),
           sftp(nullptr),
@@ -2147,6 +2221,17 @@ OperationResult SshClient::connectControlled(
         return {false, "libssh2 initialization failed"};
     }
     implementation_->runtimeInitialized = true;
+    const std::size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    implementation_->allocator.capabilities = freePsram > 0
+        ? static_cast<std::uint32_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : static_cast<std::uint32_t>(MALLOC_CAP_8BIT);
+    implementation_->session = initializeReservedSshSession(implementation_->allocator);
+    if (implementation_->session == nullptr) {
+        const std::size_t requested = implementation_->allocator.failedAllocationBytes;
+        close();
+        return {false, "SSH session allocation failed; requested " + String(requested) +
+                       " bytes"};
+    }
     implementation_->network.setTimeout(timeoutMs);
     if (!implementation_->network.connect(profile.host.c_str(), profile.port,
                                            static_cast<int32_t>(timeoutMs))) {
@@ -2156,20 +2241,6 @@ OperationResult SshClient::connectControlled(
     if (isCancelled()) {
         close();
         return {false, "SSH connection canceled by user"};
-    }
-    implementation_->allocator.failedAllocationBytes = 0;
-    const std::size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    implementation_->allocator.capabilities = freePsram > 0
-        ? static_cast<std::uint32_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
-        : static_cast<std::uint32_t>(MALLOC_CAP_8BIT);
-    implementation_->session = libssh2_session_init_ex(
-        allocateSshMemory, releaseSshMemory, reallocateSshMemory,
-        &implementation_->allocator);
-    if (implementation_->session == nullptr) {
-        const std::size_t requested = implementation_->allocator.failedAllocationBytes;
-        close();
-        return {false, "SSH session allocation failed; requested " + String(requested) +
-                       " bytes"};
     }
     libssh2_session_set_blocking(implementation_->session, 0);
     const int preference = libssh2_session_method_pref(
