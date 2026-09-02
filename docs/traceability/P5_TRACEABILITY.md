@@ -86,6 +86,7 @@ partial protocol. The top-level execution matrix remains authoritative for atomi
 | P5-02g | Architect row closure, exact commit/push/remote verification | Reconciled row-owned diff/evidence, Architect closure GO, one exact row commit, immediate push and authenticated remote SHA | completed |
 | P5-02h | Reopened cancellation correction at the existing router/staging boundary | Cancellation is latched before staging and at the last reversible pre-run-commit point; request/temp exact-cleaned; no runnable run state, boot change or handoff; activity/result use existing canceled semantics | completed |
 | P5-02i | Reopened recovery ownership for ambiguous staging failures | Safely-cleaned failures retain ordinary handling; request/possible-run ambiguity preserves exact claimed pending, blocks continuation/clear/handoff/replay/acknowledgement and remains under startup recovery ownership | completed |
+| P5-02j | Reopened proof of Python artifact presence/absence/access | Cleanup and startup classify each exact request/result path as present, proven absent or access failure; access ambiguity preserves exact claimed recovery ownership | completed |
 | P5-03 | Phase reconciliation, CI/PR/review/merge to `develop` | Full phase audit, required regressions and documentation, green CI, reviewed PR and merge only to `develop` | completed |
 
 ## P5-01 active gate
@@ -1426,3 +1427,117 @@ P5 adds no serial selector, fixture, runner or diagnostic subsystem there.
   returned mandatory P5-02i closure `GO`. P5-02 and P5-02i are completed with zero active rows;
   staging, one exact atomic commit and remote publication are now authorized. P5-03 remains completed,
   exact-head phase closure stays frozen until publication, and Phase 6 remains untouched.
+
+## P5-02j Python artifact access/absence reopen gate
+
+**Started:** 2026-09-02T18:56:15+03:00.
+
+**Completed:** 2026-09-02T19:46:40+03:00.
+
+- P5-02i commit `993eb202e18c2346a4bcef83cf1d983cc2807be2` passed its local row-close
+  checker, was pushed, and matched authenticated exact-SHA and branch-head lookups with the exact six
+  paths and identity. Exact-head build-and-release run `33649846696`, job `100313783003`, passed and
+  PR #3 was clean, but these do not override the following full-phase recovery finding.
+- Fresh final Red Team and Architect returned mandatory full-phase `STOP`: pinned M5Stack ESP32
+  `3.2.1` `FS/src/vfs_api.cpp` implements `VFSImpl::exists()` with Boolean false both for proven
+  absence and mount/open/filesystem failure. Raw checks of the same four fixed artifacts occur in
+  `removeOwnedFile()`, `writeRequestFile()` before final rename,
+  `loadDetachedPythonRunRecovery()`, both the pre-read and anti-change post-read snapshots in
+  `validateDetachedPythonRunRequest()`, and every startup presence branch in
+  `consumePythonRunAtStartup()`. Any one of those checks can infer absence from access failure and
+  release or overwrite ownership while request or result evidence remains ambiguous.
+- P5-02 is reopened only as P5-02j and is the sole `in_progress` owner. P5-02i and P5-03 remain
+  completed. PR/merge and all Phase 6 work remain frozen; no production edit, test, build, runtime or
+  diagnostic may begin before a bounded vendor-backed design, exact inventory/proof and Architect
+  pre-edit `GO`.
+- Architect personally returned P5-02j pre-edit `GO` after verifying the corrected complete raw-check
+  inventory, typed classifier/aggregate contract, exact temporary-versus-final request ownership,
+  existing startup result shape, bounded four-file write set, proportional proof and exclusions.
+  Production implementation and only the frozen proof are authorized; staging, commit and push
+  remain forbidden until a separate mandatory Architect closure `GO`.
+- Required typed boundary: `python_mode` defines one three-way artifact state (`Present`,
+  `ProvenAbsent`, `AccessError`), one private exact-path classifier, and one no-argument aggregate for
+  request, request-temporary, result and result-temporary. The four path constants remain private;
+  no arbitrary-path public API is added. Aggregate fields default to `AccessError`, inspection stops
+  at the first error, and no consumer may use a presence value unless the complete aggregate is
+  successful.
+- The classifier reuses `requireSdCleanupAccess()`, whose existing owner checks card presence,
+  readable root, expected NVS identity, the on-card identity marker and replacement/restart state and
+  permits both `Ready` and `Full`. It checks that access immediately before the target probe, clears
+  `errno`, opens the target with `SD.open(..., FILE_READ)`, captures validity and `errno`, closes any
+  valid handle, and checks the same expected-card access again. Either access failure is
+  `AccessError`; a valid handle after both checks is `Present`; an invalid handle is
+  `ProvenAbsent` only when the captured error is `ENOENT` and both access checks succeeded. An
+  invalid handle with zero or any other error is `AccessError`. This uses the pinned vendor API and
+  does not hard-code the VFS mountpoint or create another storage owner.
+- `removeOwnedFile()` uses that classifier before and after removal. Pre-remove `ProvenAbsent` is
+  success, `AccessError` is failure, and only `Present` permits `SD.remove()`. After removal, only a
+  new `ProvenAbsent` classification succeeds; still-present and access-error outcomes fail. No raw
+  `SD.exists()` remains in that owner.
+- `writeRequestFile()` classifies the final request immediately before rename and may rename only on
+  `ProvenAbsent`; `Present` and `AccessError` fail without touching the final request. The fixed
+  request-temporary file becomes exact current-call-owned only after this invocation creates it, so
+  a local failure may exact-clean only that temporary file through the same checked removal owner.
+  A pre-existing or access-ambiguous final request is never current-call-owned and must not be
+  deleted or overwritten to obtain a successful rename.
+- `loadDetachedPythonRunRecovery()` and both artifact snapshots in
+  `validateDetachedPythonRunRequest()` use the complete aggregate. Either snapshot rejects
+  `AccessError`; validation may compare pre/post states only after both complete successfully, so
+  the second anti-change snapshot cannot treat an access failure as stable absence.
+- `consumePythonRunAtStartup()` loads persisted recovery and pending state without mutation, then
+  obtains one successful aggregate before any no-pending, foreign-pending, wrong-state or exact
+  `ClaimedApprove` branch uses artifact presence. `AccessError` returns the existing
+  `PythonRunStartupResult` with `success=false` and leaves the exact pending and all durable state
+  untouched. `PythonRunStartupResult` gains no field or status. Only a fully successful aggregate
+  may permit cleanup, continuation, pending clear, handoff, replay or acknowledgement decisions.
+  If access later becomes unknown during already-authorized cleanup, checked removal fails and
+  durable recovery ownership remains; success is never inferred.
+- Unmounted, removed or replaced-card access must not appear absent. No new module, framework,
+  route, persisted format, status field, Device/Web behavior, recovery manager or `sd_storage`
+  responsibility is allowed.
+- Preferred unopened write set is this trace, `firmware/CardputerAssistant/src/python_mode.h`,
+  `firmware/CardputerAssistant/src/python_mode.cpp` and
+  `firmware/CardputerAssistant/CardputerAssistant.ino`. Any growth requires evidence and Architect
+  approval before it occurs. Required proof is pinned vendor-source mapping; no remaining raw
+  `SD.exists()` for request, request-temporary, result or result-temporary in `python_mode.cpp` or
+  `CardputerAssistant.ino`; positive absence/access verification for request rename and every
+  removal success; successful complete pre/post detached-validation snapshots; and an access-error
+  guard before every startup presence branch or mutation. Complete with bounded source/order
+  inventory, the unchanged strict host suite, `diff --check`, one pinned compile/resource delta and
+  fresh focused code review. No upload, COM8, Device/Web, Browser or fault-injection runtime is
+  permitted.
+
+### P5-02j implementation evidence awaiting closure
+
+- The implementation stayed inside the frozen four-file boundary. `python_mode` now provides one
+  typed `Present`/`ProvenAbsent`/`AccessError` classifier and aggregate; checked removal, final
+  request pre-rename ownership, detached recovery, both detached-validation snapshots and every
+  startup presence branch use that boundary. Failed request creation/commit cleans only the exact
+  current-call temporary path and never removes the pre-existing or ambiguous final request.
+- Bounded static proof passed: `diff --check` reported no error; no raw `SD.exists()` remains for
+  request, request-temporary, result or result-temporary in `python_mode.cpp` or
+  `CardputerAssistant.ino`; and source/order assertions confirmed expected-card checks around the
+  target probe, pre/post removal classification, final-request proof before rename, complete
+  detached recovery and validation snapshots, aggregate success before startup presence branches,
+  and no startup-result status expansion.
+- The unchanged strict host command from `.github/workflows/firmware.yml` passed with
+  `host_tests: PASS`; its exact-owned WSL binary was deleted after success.
+- The single pinned compile passed with M5Stack ESP32 core `3.2.1` and exact FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom`. Program storage is
+  `3,484,350` bytes, `+2,576` bytes from P5-02i; global RAM is `65,732` bytes, unchanged. The binary
+  is `3,484,544` bytes (`+2,576`) with SHA-256
+  `5B850D7BE0867858CC8C41B167BF69DD61D2310D3F0B2A5F8EC8D7E770ECB5EC`.
+- The tracked row diff is exactly this trace, `python_mode.h`, `python_mode.cpp` and
+  `CardputerAssistant.ino`. Generated build output and the Architect-owned untracked `.codex/`
+  files remain untouched and excluded. No test, `sd_storage`, schema, route, module, framework, UI
+  or persisted-format file changed.
+- One fresh focused read-only code reviewer was started but produced no verdict within the Architect
+  timebox and was closed without replacement. Per Architect instruction, the completed diff and
+  evidence return directly for the mandatory independent closure review. This row remains
+  `in_progress`; no staging, commit or push is authorized before explicit closure `GO`.
+- No upload, COM8, Device/Web, Browser, runtime fault injection or additional proof was performed.
+- Architect personally reviewed the final actual four-file diff, pinned ESP32 `3.2.1` semantics,
+  every request/result producer and consumer, mutation ordering, recovery ownership, evidence,
+  resources, cleanup and exclusions and returned mandatory closure `GO`. The fresh independent code
+  review also returned `GO`. P5-02 and P5-02j are completed with zero active rows; only their exact
+  row commit, immediate push and authenticated remote-SHA verification are now authorized.

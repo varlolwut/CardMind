@@ -1,6 +1,7 @@
 #include "python_mode.h"
 
 #include "file_workspace.h"
+#include "sd_storage.h"
 #include "text_utils.h"
 
 #include <ArduinoJson.h>
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cctype>
 #include <cstring>
 #include <string>
@@ -242,12 +244,67 @@ OperationResult writeRunBlob(const PythonRunBlob& blob)
         : OperationResult{false, "Failed to persist and verify Python run state"};
 }
 
+struct PythonRunArtifactInspection {
+    PythonRunArtifactState state;
+    String error;
+};
+
+PythonRunArtifactInspection inspectPythonRunArtifact(const char* path)
+{
+    const OperationResult beforeAccess = requireSdCleanupAccess();
+    if (!beforeAccess.success) {
+        return {
+            PythonRunArtifactState::AccessError,
+            String("Failed to access microSD before inspecting Python run artifact: ") +
+                path + ": " + beforeAccess.error,
+        };
+    }
+
+    errno = 0;
+    File file = SD.open(path, FILE_READ);
+    const bool present = static_cast<bool>(file);
+    const int openError = errno;
+    if (file) file.close();
+
+    const OperationResult afterAccess = requireSdCleanupAccess();
+    if (!afterAccess.success) {
+        return {
+            PythonRunArtifactState::AccessError,
+            String("Failed to access microSD after inspecting Python run artifact: ") +
+                path + ": " + afterAccess.error,
+        };
+    }
+    if (present) return {PythonRunArtifactState::Present, ""};
+    if (openError == ENOENT) {
+        return {PythonRunArtifactState::ProvenAbsent, ""};
+    }
+    return {
+        PythonRunArtifactState::AccessError,
+        String("Failed to inspect Python run artifact: ") + path +
+            " (open errno " + String(openError) + ")",
+    };
+}
+
 OperationResult removeOwnedFile(const char* path)
 {
-    if (!SD.exists(path)) return {true, ""};
-    return SD.remove(path)
+    const PythonRunArtifactInspection before = inspectPythonRunArtifact(path);
+    if (before.state == PythonRunArtifactState::AccessError) {
+        return {false, before.error};
+    }
+    if (before.state == PythonRunArtifactState::ProvenAbsent) {
+        return {true, ""};
+    }
+    if (!SD.remove(path)) {
+        return {false, String("Failed to remove Python run artifact: ") + path};
+    }
+    const PythonRunArtifactInspection after = inspectPythonRunArtifact(path);
+    if (after.state == PythonRunArtifactState::AccessError) {
+        return {false, after.error};
+    }
+    return after.state == PythonRunArtifactState::ProvenAbsent
         ? OperationResult{true, ""}
-        : OperationResult{false, String("Failed to remove Python run artifact: ") + path};
+        : OperationResult{
+            false, String("Python run artifact remains after removal: ") + path};
 }
 
 OperationResult readBoundedFile(const char* path,
@@ -341,32 +398,34 @@ struct PythonRunRequestWriteResult {
     String error;
 };
 
-PythonRunRequestWriteResult failedRequestWrite(const String& error)
+PythonRunRequestWriteResult failedTemporaryRequestWrite(const String& error)
 {
     const OperationResult temporaryCleanup = removeOwnedFile(
         kPythonRunRequestTemporaryPath);
-    const OperationResult requestCleanup = removeOwnedFile(
-        kPythonRunRequestPath);
     String combinedError = error;
     if (!temporaryCleanup.success) {
         combinedError += "; temporary request cleanup failed: " +
             temporaryCleanup.error;
     }
-    if (!requestCleanup.success) {
-        combinedError += "; request cleanup failed: " + requestCleanup.error;
-    }
     return {
         false,
-        !temporaryCleanup.success || !requestCleanup.success,
+        !temporaryCleanup.success,
         combinedError,
     };
+}
+
+PythonRunRequestWriteResult failedRequestCommit(const String& error)
+{
+    PythonRunRequestWriteResult failure = failedTemporaryRequestWrite(error);
+    failure.startupRecoveryRequired = true;
+    return failure;
 }
 
 PythonRunRequestWriteResult writeRequestFile(const std::string& request)
 {
     File file = SD.open(kPythonRunRequestTemporaryPath, FILE_WRITE);
     if (!file) {
-        return failedRequestWrite(
+        return failedTemporaryRequestWrite(
             "Failed to create temporary Python run request");
     }
     const std::size_t written = file.write(
@@ -374,19 +433,27 @@ PythonRunRequestWriteResult writeRequestFile(const std::string& request)
     file.flush();
     file.close();
     if (written != request.size()) {
-        return failedRequestWrite("Python run request write was incomplete");
+        return failedTemporaryRequestWrite(
+            "Python run request write was incomplete");
     }
     std::string verified;
     OperationResult result = readBoundedFile(
         kPythonRunRequestTemporaryPath, kPythonRunRequestMaximumBytes, verified);
     if (!result.success || verified != request) {
-        return failedRequestWrite(result.success
+        return failedTemporaryRequestWrite(result.success
             ? String("Python run request readback does not match")
             : result.error);
     }
-    if (SD.exists(kPythonRunRequestPath) ||
-        !SD.rename(kPythonRunRequestTemporaryPath, kPythonRunRequestPath)) {
-        return failedRequestWrite("Failed to commit Python run request");
+    const PythonRunArtifactInspection finalRequest = inspectPythonRunArtifact(
+        kPythonRunRequestPath);
+    if (finalRequest.state != PythonRunArtifactState::ProvenAbsent) {
+        return failedRequestCommit(
+            finalRequest.state == PythonRunArtifactState::Present
+                ? String("Python run request already exists before commit")
+                : finalRequest.error);
+    }
+    if (!SD.rename(kPythonRunRequestTemporaryPath, kPythonRunRequestPath)) {
+        return failedRequestCommit("Failed to commit Python run request");
     }
     return {true, false, ""};
 }
@@ -768,6 +835,49 @@ OperationResult acknowledgePythonHandoffRequest()
     return {true, ""};
 }
 
+PythonRunArtifactsInspection inspectPythonRunArtifacts()
+{
+    PythonRunArtifactsInspection artifacts = {
+        false,
+        PythonRunArtifactState::AccessError,
+        PythonRunArtifactState::AccessError,
+        PythonRunArtifactState::AccessError,
+        PythonRunArtifactState::AccessError,
+        "",
+    };
+
+    const PythonRunArtifactInspection request = inspectPythonRunArtifact(
+        kPythonRunRequestPath);
+    artifacts.request = request.state;
+    if (request.state == PythonRunArtifactState::AccessError) {
+        artifacts.error = request.error;
+        return artifacts;
+    }
+    const PythonRunArtifactInspection requestTemporary = inspectPythonRunArtifact(
+        kPythonRunRequestTemporaryPath);
+    artifacts.requestTemporary = requestTemporary.state;
+    if (requestTemporary.state == PythonRunArtifactState::AccessError) {
+        artifacts.error = requestTemporary.error;
+        return artifacts;
+    }
+    const PythonRunArtifactInspection result = inspectPythonRunArtifact(
+        kPythonRunResultPath);
+    artifacts.result = result.state;
+    if (result.state == PythonRunArtifactState::AccessError) {
+        artifacts.error = result.error;
+        return artifacts;
+    }
+    const PythonRunArtifactInspection resultTemporary = inspectPythonRunArtifact(
+        kPythonRunResultTemporaryPath);
+    artifacts.resultTemporary = resultTemporary.state;
+    if (resultTemporary.state == PythonRunArtifactState::AccessError) {
+        artifacts.error = resultTemporary.error;
+        return artifacts;
+    }
+    artifacts.success = true;
+    return artifacts;
+}
+
 OperationResult cleanupPythonRunArtifacts()
 {
     const char* paths[] = {
@@ -927,16 +1037,26 @@ PythonRunRecoveryResult loadDetachedPythonRunRecovery(
 {
     PythonRunRecoveryResult recovery = {};
     recovery.returnSurface = PythonRunReturnSurface::Device;
-    const bool requestPresent = SD.exists(kPythonRunRequestPath);
-    const bool resultPresent = SD.exists(kPythonRunResultPath);
+    const PythonRunArtifactsInspection artifacts = inspectPythonRunArtifacts();
+    if (!artifacts.success) {
+        recovery.error = artifacts.error;
+        return recovery;
+    }
+    const bool requestPresent =
+        artifacts.request == PythonRunArtifactState::Present;
+    const bool requestTemporaryPresent =
+        artifacts.requestTemporary == PythonRunArtifactState::Present;
+    const bool resultPresent =
+        artifacts.result == PythonRunArtifactState::Present;
+    const bool resultTemporaryPresent =
+        artifacts.resultTemporary == PythonRunArtifactState::Present;
     recovery.found = requestPresent || resultPresent;
     if (!recovery.found) {
         recovery.success = true;
         return recovery;
     }
     if (!requestPresent || !resultPresent ||
-        SD.exists(kPythonRunRequestTemporaryPath) ||
-        SD.exists(kPythonRunResultTemporaryPath) ||
+        requestTemporaryPresent || resultTemporaryPresent ||
         !validPendingId(expectedPendingId)) {
         recovery.error =
             "Detached Python recovery requires both exact request and result files";
@@ -993,10 +1113,12 @@ OperationResult validateDetachedPythonRunRequest(
     std::uint64_t expectedSourceBytes,
     const std::string& expectedSourceSha256)
 {
-    if (!SD.exists(kPythonRunRequestPath) ||
-        SD.exists(kPythonRunRequestTemporaryPath) ||
-        SD.exists(kPythonRunResultPath) ||
-        SD.exists(kPythonRunResultTemporaryPath)) {
+    const PythonRunArtifactsInspection before = inspectPythonRunArtifacts();
+    if (!before.success) return {false, before.error};
+    if (before.request != PythonRunArtifactState::Present ||
+        before.requestTemporary != PythonRunArtifactState::ProvenAbsent ||
+        before.result != PythonRunArtifactState::ProvenAbsent ||
+        before.resultTemporary != PythonRunArtifactState::ProvenAbsent) {
         return {false, "Detached Python request is not the exact request-only state"};
     }
     std::string requestBytes;
@@ -1012,10 +1134,12 @@ OperationResult validateDetachedPythonRunRequest(
         request.sourceSha256 != expectedSourceSha256) {
         return {false, "Detached Python request does not match the frozen pending target"};
     }
-    if (!SD.exists(kPythonRunRequestPath) ||
-        SD.exists(kPythonRunRequestTemporaryPath) ||
-        SD.exists(kPythonRunResultPath) ||
-        SD.exists(kPythonRunResultTemporaryPath)) {
+    const PythonRunArtifactsInspection after = inspectPythonRunArtifacts();
+    if (!after.success) return {false, after.error};
+    if (after.request != PythonRunArtifactState::Present ||
+        after.requestTemporary != PythonRunArtifactState::ProvenAbsent ||
+        after.result != PythonRunArtifactState::ProvenAbsent ||
+        after.resultTemporary != PythonRunArtifactState::ProvenAbsent) {
         return {false, "Detached Python request artifacts changed during validation"};
     }
     return {true, ""};

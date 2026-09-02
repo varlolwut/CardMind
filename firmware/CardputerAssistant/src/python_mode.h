@@ -29,6 +29,21 @@ enum class PythonRunReturnSurface : std::uint8_t {
     Web = 2,
 };
 
+enum class PythonRunArtifactState : std::uint8_t {
+    Present,
+    ProvenAbsent,
+    AccessError,
+};
+
+struct PythonRunArtifactsInspection {
+    bool success;
+    PythonRunArtifactState request;
+    PythonRunArtifactState requestTemporary;
+    PythonRunArtifactState result;
+    PythonRunArtifactState resultTemporary;
+    String error;
+};
+
 struct PythonUtf8StreamState {
     std::uint32_t codePoint;
     std::uint32_t minimumCodePoint;
@@ -137,6 +152,7 @@ PythonHandoffRequest consumePythonHandoffRequest();
 PythonHandoffRequest consumePythonSdHandoffRequest();
 OperationResult acknowledgePythonHandoffRequest();
 OperationResult preparePythonRunStaging();
+PythonRunArtifactsInspection inspectPythonRunArtifacts();
 PythonRunStageResult stagePythonRun(
     const PythonRunStageRequest& request,
     const std::function<bool()>& isCancelled);

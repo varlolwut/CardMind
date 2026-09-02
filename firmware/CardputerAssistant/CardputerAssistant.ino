@@ -3176,6 +3176,23 @@ PythonRunStartupResult consumePythonRunAtStartup()
         return {false, false, false, recovery.error};
     }
 
+    const cardputer::PythonRunArtifactsInspection artifacts =
+        cardputer::inspectPythonRunArtifacts();
+    if (!artifacts.success) {
+        std::string().swap(pending.pending.continuation.call.arguments);
+        return {false, false, false, artifacts.error};
+    }
+    const bool requestPresent =
+        artifacts.request == cardputer::PythonRunArtifactState::Present;
+    const bool requestTemporaryPresent = artifacts.requestTemporary ==
+        cardputer::PythonRunArtifactState::Present;
+    const bool resultPresent =
+        artifacts.result == cardputer::PythonRunArtifactState::Present;
+    const bool resultTemporaryPresent = artifacts.resultTemporary ==
+        cardputer::PythonRunArtifactState::Present;
+    const bool pythonArtifactsPresent = requestPresent ||
+        requestTemporaryPresent || resultPresent || resultTemporaryPresent;
+
     bool pendingIsPython = false;
     if (pending.found) {
         const cardputer::ToolCatalogEntry* entry =
@@ -3188,11 +3205,7 @@ PythonRunStartupResult consumePythonRunAtStartup()
         }
         pendingIsPython = entry->schema == cardputer::ToolSchemaId::PythonRun;
         if (!pendingIsPython) {
-            const bool p5StatePresent = recovery.found ||
-                SD.exists("/assistant/v2/python_run_request.json") ||
-                SD.exists("/assistant/v2/python_run_request.json.tmp") ||
-                SD.exists("/assistant/v2/python_run_result.json") ||
-                SD.exists("/assistant/v2/python_run_result.json.tmp");
+            const bool p5StatePresent = recovery.found || pythonArtifactsPresent;
             std::string().swap(pending.pending.continuation.call.arguments);
             return p5StatePresent
                 ? PythonRunStartupResult{
@@ -3202,11 +3215,7 @@ PythonRunStartupResult consumePythonRunAtStartup()
         }
         if (pending.pending.state !=
                 cardputer::PendingToolCallState::ClaimedApprove) {
-            const bool p5StatePresent = recovery.found ||
-                SD.exists("/assistant/v2/python_run_request.json") ||
-                SD.exists("/assistant/v2/python_run_request.json.tmp") ||
-                SD.exists("/assistant/v2/python_run_result.json") ||
-                SD.exists("/assistant/v2/python_run_result.json.tmp");
+            const bool p5StatePresent = recovery.found || pythonArtifactsPresent;
             std::string().swap(pending.pending.continuation.call.arguments);
             return p5StatePresent
                 ? PythonRunStartupResult{
@@ -3217,14 +3226,6 @@ PythonRunStartupResult consumePythonRunAtStartup()
     }
 
     if (!recovery.found && pending.found && pendingIsPython) {
-        const bool requestPresent =
-            SD.exists("/assistant/v2/python_run_request.json");
-        const bool requestTemporaryPresent =
-            SD.exists("/assistant/v2/python_run_request.json.tmp");
-        const bool resultPresent =
-            SD.exists("/assistant/v2/python_run_result.json");
-        const bool resultTemporaryPresent =
-            SD.exists("/assistant/v2/python_run_result.json.tmp");
         if (requestPresent && resultPresent &&
             !requestTemporaryPresent && !resultTemporaryPresent) {
             cardputer::PythonRunRecoveryResult detached =
