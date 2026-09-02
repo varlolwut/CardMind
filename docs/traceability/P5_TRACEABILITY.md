@@ -1541,3 +1541,74 @@ P5 adds no serial selector, fixture, runner or diagnostic subsystem there.
   resources, cleanup and exclusions and returned mandatory closure `GO`. The fresh independent code
   review also returned `GO`. P5-02 and P5-02j are completed with zero active rows; only their exact
   row commit, immediate push and authenticated remote-SHA verification are now authorized.
+
+## P5-03 exact-head closure reopen
+
+**Reopened:** 2026-09-02T20:46:31+03:00.
+
+**Completed:** 2026-09-02T20:59:50+03:00.
+
+- Official GitHub MCP publication resolved the platform-blocked local transport without another
+  correction checkpoint. The local and remote phase branch now both resolve to
+  `a68e7582002f02f690ddd54963886a5652a203d4`; Architect verified that its tree is byte-identical to
+  the reviewed P5-02j four-file tree and that GitHub reports exactly this trace,
+  `CardputerAssistant.ino`, `python_mode.cpp` and `python_mode.h`.
+- The authenticated MCP publication identity is GitHub login `varlolwut`, account ID `30726976` and
+  the exact project noreply email. GitHub used account-profile spelling `Alexej Bulygin`; Architect
+  explicitly accepted this one platform-enforced transport representation because the canonical
+  local row checker had already passed the exact `Alexey Bulygin` author/committer identity and the
+  published tree is identical. No suffix, code amend or replacement checkpoint is permitted.
+- P5-03 is reopened as the sole `in_progress` row only to verify refreshed exact-head CI and PR state,
+  update the existing PR description for P5-02j, retain the smallest final closure record, and obtain
+  Architect's personal phase-closure review before merge. P5-02 and P5-02j remain completed.
+- No new production, test, build, upload, COM8, Device, Web, Browser, runtime or recovery work is
+  authorized. Phase 6 remains frozen; after successful Phase 5 closure the task stops for the user's
+  system reboot instead of preparing or starting the next phase.
+
+### Refreshed exact-head CI and PR evidence
+
+**Observed:** 2026-09-02T20:48:12+03:00.
+
+- Authenticated GitHub MCP resolved commit and phase-branch head to
+  `a68e7582002f02f690ddd54963886a5652a203d4`, tree
+  `8d76684666f9ad75c3bd07d9b296105765495291`. The immutable commit reports exactly four paths: this
+  trace, `CardputerAssistant.ino`, `python_mode.cpp` and `python_mode.h`, with 302 additions and 46
+  deletions. Local `HEAD` resolves to the same commit; only the Architect-owned `.codex/` files are
+  untracked, while this P5-03 closure record is the sole new tracked working-tree change.
+- Exact-head Firmware workflow run `33662557420` and `build-and-release` job `100356361558` completed
+  successfully on the same SHA. The PR check-run view reports one completed `success` check; its
+  legacy combined-status view has no status contexts and therefore remains `pending` with count zero,
+  which does not contradict the successful required check run.
+- PR #3, `Phase 5: Python workspace and one-shot execution`, is open, non-draft and clean, with head
+  `feature/phase-5-python-one-shot` at the exact SHA and base `develop` at
+  `89163c43a997ba4779446c63146c8cf2f539a9bf`. Its body now includes P5-02j typed artifact ownership,
+  proportional proof/resource delta, exact-head CI, trust boundary and retained residuals.
+- P5-02j retained proof remains: strict host `PASS`; bounded source/order and `diff --check` pass;
+  pinned M5Stack ESP32 core `3.2.1`; exact FQBN; flash `3,484,350` bytes (`+2,576`); global RAM
+  `65,732` bytes (unchanged); binary `3,484,544` bytes with SHA-256
+  `5B850D7BE0867858CC8C41B167BF69DD61D2310D3F0B2A5F8EC8D7E770ECB5EC`; fresh independent and
+  Architect closure reviews both `GO`.
+- No Device or SD fixture was created by P5-02j. Its exact-owned WSL host binary was removed, build
+  output remains generated and excluded, and no additional cleanup applies. Previously accepted P5
+  installed Complete and Claimed/WDT evidence, exact cleanup and resource observations remain the
+  proportional runtime acceptance; no upload, Device/Web, Browser or fault injection was repeated.
+- Final residuals are unchanged and explicit: approved source is privileged rather than sandboxed;
+  marker content was not externally observed, so no external-side-effect exactly-once claim is made;
+  maximum-64-KiB latency is unclaimed; ambiguous NVS/SD faults were not injected on-device; and the
+  one MCP-enforced `Alexej` profile spelling is the accepted authenticated transport representation
+  for an otherwise exact checked tree and noreply identity.
+- Every Phase 5 roadmap behavior and exclusion maps to completed P5-01/P5-02 evidence. P5-03 remains
+  the sole `in_progress` row pending Architect's personal final phase-closure review. Merge, ROADMAP
+  phase transition and any Phase 6 preparation remain forbidden until explicit final `GO`; after a
+  successful P5 merge this task stops for the user's system reboot.
+- Architect personally completed the full-phase review at exact published head
+  `a68e7582002f02f690ddd54963886a5652a203d4` against the complete ROADMAP contract, trace, actual
+  production boundaries and producer/consumer paths, supervisor semantics, pending/approval/audit/
+  recovery ownership, resource and output ceilings, Device/Web behavior, security exclusions,
+  cleanup, remote commit chain, clean PR #3 and successful exact-head CI, and returned final Phase 5
+  closure `GO`. No production, scope, evidence, cleanup, resource or pinned-vendor blocker remains.
+- Accepted residuals remain exactly: no external-side-effect exactly-once guarantee after reset/WDT,
+  no maximum-64-KiB runtime latency claim, and no additional Device rerun for unchanged boundaries.
+  P5-03 is completed with every Phase 5 row completed and no `in_progress` row. Only this trace-only
+  closure commit and Architect-owned authenticated MCP publication, CI verification and merge to
+  `develop` remain; Phase 6 must not start before the user's system reboot.
