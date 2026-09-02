@@ -293,6 +293,22 @@ CanonicalToolArgumentsResult canonicalizeParsedToolArguments(
                 content.c_str(), content.size(), JsonString::Linked);
             break;
         }
+        case ToolSchemaId::PythonRun: {
+            static constexpr const char* kFields[] = {"name"};
+            if (!hasExactFields(input, kFields, 1) ||
+                !input["name"].is<const char*>()) {
+                return failArguments(
+                    "python_run requires exactly one string field: name");
+            }
+            fileName = input["name"].as<const char*>();
+            if (!isValidWorkspaceFilename(fileName.c_str()) ||
+                !fileName.endsWith(".py")) {
+                return failArguments(
+                    "python_run requires an exact normalized case-sensitive .py workspace path");
+            }
+            normalized["name"] = fileName;
+            break;
+        }
         case ToolSchemaId::SshCommand: {
             if (input.size() < 1 || input.size() > 3 ||
                 !input["command"].is<const char*>()) {
@@ -547,7 +563,7 @@ OperationResult validateProjectTarget(const String& projectId,
                                       PendingToolTargetIdentity& target)
 {
     if (schema != ToolSchemaId::ReadFile && schema != ToolSchemaId::WriteFile &&
-        schema != ToolSchemaId::AppendFile) {
+        schema != ToolSchemaId::AppendFile && schema != ToolSchemaId::PythonRun) {
         return {true, ""};
     }
     const SharedFileLinkResult link = projectHasSharedFileLink(projectId, fileName);
@@ -579,8 +595,15 @@ OperationResult validateProjectTarget(const String& projectId,
         return {false, "Failed to open pending file target: " + fileName};
     }
     target.size = file.size();
+    if (schema == ToolSchemaId::PythonRun && target.size > 65536U) {
+        file.close();
+        return {false, "python_run source exceeds 65536 bytes"};
+    }
     OperationResult result = hashOpenFile(file, target.sha256);
     file.close();
+    if (result.success && schema == ToolSchemaId::PythonRun) {
+        result = validateWorkspaceFileUtf8(fileName);
+    }
     return result;
 }
 
@@ -800,6 +823,12 @@ PendingToolCallBuildResult buildPendingToolCall(
     if (!toolRequestPlanIncludesSchema(plan, arguments.schema)) {
         return {false, {}, "Pending tool schema is absent from the exact request plan"};
     }
+    if (!pendingToolContinuationAllowsSchema(
+            arguments.schema,
+            continuation.remainingRequiredGroupsAfterCall)) {
+        return {false, {},
+                "python_run must be the final required tool group before handoff"};
+    }
     const std::uint8_t groupBit = static_cast<std::uint8_t>(
         1U << static_cast<std::uint8_t>(
             toolCatalog()[static_cast<std::size_t>(arguments.schema)].group));
@@ -825,6 +854,7 @@ PendingToolCallBuildResult buildPendingToolCall(
     }
     const ToolPermissionDecision decision = toolRequestPlanDecision(plan, arguments.schema);
     const bool mandatory = arguments.schema == ToolSchemaId::SshCommand ||
+        arguments.schema == ToolSchemaId::PythonRun ||
         (arguments.schema == ToolSchemaId::WriteFile && target.exists) ||
         ((arguments.schema == ToolSchemaId::SftpWrite ||
           arguments.schema == ToolSchemaId::SftpMove) && arguments.overwrite);
@@ -1071,6 +1101,9 @@ PendingToolCallResult loadPendingToolCall()
     if ((pending.continuation.remainingRequiredGroupsAfterCall &
          static_cast<std::uint8_t>(~pending.continuation.intent.requiredGroups)) != 0 ||
         (pending.continuation.remainingRequiredGroupsAfterCall & groupBit) != 0 ||
+        !pendingToolContinuationAllowsSchema(
+            arguments.schema,
+            pending.continuation.remainingRequiredGroupsAfterCall) ||
         pending.continuation.completedToolRoundsBeforeCall >= kMaximumCompletedToolRounds ||
         pending.continuation.toolOutputBytesBeforeCall > kMaximumPriorToolOutputBytes) {
         return corrupted("continuation counters are invalid");
@@ -1139,15 +1172,18 @@ PendingToolCallResult loadPendingToolCall()
     }
     const bool fileMutation = arguments.schema == ToolSchemaId::WriteFile ||
         arguments.schema == ToolSchemaId::AppendFile;
+    const bool pythonTarget = arguments.schema == ToolSchemaId::PythonRun;
     const bool mandatory = arguments.schema == ToolSchemaId::SshCommand ||
+        pythonTarget ||
         (arguments.schema == ToolSchemaId::WriteFile && pending.target.exists) ||
         ((arguments.schema == ToolSchemaId::SftpWrite ||
           arguments.schema == ToolSchemaId::SftpMove) && arguments.overwrite);
     const bool sftpTarget = isModelSftpSchema(arguments.schema);
-    if ((fileMutation &&
-         (pending.target.kind != PendingToolTargetKind::File ||
-          pending.target.name != arguments.fileName)) ||
-        (!fileMutation && arguments.schema != ToolSchemaId::SshCommand &&
+    if (((fileMutation || pythonTarget) &&
+          (pending.target.kind != PendingToolTargetKind::File ||
+           pending.target.name != arguments.fileName)) ||
+        (!fileMutation && !pythonTarget &&
+         arguments.schema != ToolSchemaId::SshCommand &&
          arguments.schema != ToolSchemaId::SshSafeAction &&
          !sftpTarget &&
          pending.target.kind != PendingToolTargetKind::None) ||
@@ -1271,6 +1307,27 @@ PendingToolPreviewResult loadPendingToolPreview(const String& pendingId)
         preview.kind = PendingToolPreviewKind::SshCommand;
         preview.proposedBytes = static_cast<std::uint32_t>(body.body.size());
         preview.body = std::move(body.body);
+    } else if (entry->schema == ToolSchemaId::PythonRun) {
+        std::string().swap(pending.continuation.call.arguments);
+        const WorkspaceChunkResult source = readWorkspaceFileChunk(
+            identity.target.name, 0, 1536);
+        if (!source.success || source.offset != 0 ||
+            source.totalBytes != identity.target.size) {
+            return {false, {}, source.success
+                ? String("Pending Python source changed while its preview was being read")
+                : source.error};
+        }
+        PendingToolPreviewBodyResult body = buildPendingPythonSourcePreview(
+            identity.target.name, source.totalBytes, identity.target.sha256,
+            source.content, source.eof);
+        if (!body.success) {
+            return {false, {}, body.error};
+        }
+        preview.kind = PendingToolPreviewKind::PythonSource;
+        preview.currentBytes = source.totalBytes;
+        preview.proposedBytes = source.totalBytes;
+        preview.body = std::move(body.body);
+        preview.truncated = body.truncated;
     } else if (entry->schema == ToolSchemaId::SshSafeAction) {
         const json_reader::JsonStringValueResult actionId =
             readCanonicalStringArgument(
@@ -1374,6 +1431,28 @@ PendingToolCallResult claimPendingToolCallApproval(
     }
     pending.state = PendingToolCallState::ClaimedApprove;
     return storePendingToolCall(std::move(pending));
+}
+
+OperationResult revalidateClaimedPendingToolCall(
+    const PendingToolCall& pending)
+{
+    if (pending.state != PendingToolCallState::ClaimedApprove) {
+        return {false, "Python run revalidation requires a claimed approval"};
+    }
+    const CanonicalToolArgumentsResult arguments =
+        canonicalizeToolArguments(pending.continuation.call);
+    if (!arguments.success || arguments.schema != ToolSchemaId::PythonRun ||
+        arguments.canonical != pending.continuation.call.arguments) {
+        return {false, arguments.success
+            ? String("Claimed Python run arguments are not canonical")
+            : arguments.error};
+    }
+    const CurrentPendingIdentityResult identity =
+        validateCurrentPendingIdentity(
+            pending, arguments.schema, arguments.fileName);
+    return identity.success
+        ? OperationResult{true, ""}
+        : OperationResult{false, identity.error};
 }
 
 PendingToolCallResult denyPendingToolCall(const String& pendingId)

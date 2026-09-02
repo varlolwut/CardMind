@@ -56,6 +56,8 @@ bool targetForTool(const std::string& tool, ToolActivityTarget& target)
             target = ToolActivityTarget::SelectedSsh;
             return true;
         case ToolCapabilityGroup::Python:
+            target = ToolActivityTarget::Python;
+            return true;
         case ToolCapabilityGroup::Count:
             return false;
     }
@@ -77,6 +79,10 @@ bool parseTarget(const char* value, ToolActivityTarget& target)
     }
     if (std::strcmp(value, "selected_ssh") == 0) {
         target = ToolActivityTarget::SelectedSsh;
+        return true;
+    }
+    if (std::strcmp(value, "python") == 0) {
+        target = ToolActivityTarget::Python;
         return true;
     }
     return false;
@@ -121,7 +127,8 @@ OperationResult serializeActivity(const ToolActivityRecord& activity,
          (activity.durationMs != 0 || activity.outputBytes != 0 ||
           activity.exitStatus.present)) ||
         (activity.exitStatus.present &&
-         activity.target != ToolActivityTarget::SelectedSsh)) {
+         activity.target != ToolActivityTarget::SelectedSsh &&
+         activity.target != ToolActivityTarget::Python)) {
         return {false, "Tool activity fields are inconsistent"};
     }
     JsonDocument document;
@@ -199,7 +206,8 @@ ToolActivityResult parseActivityLine(const String& line)
          (activity.durationMs != 0 || activity.outputBytes != 0 ||
           activity.exitStatus.present)) ||
         (activity.exitStatus.present &&
-         activity.target != ToolActivityTarget::SelectedSsh)) {
+         activity.target != ToolActivityTarget::SelectedSsh &&
+         activity.target != ToolActivityTarget::Python)) {
         return {false, {}, "Tool activity state fields are inconsistent"};
     }
     return {true, std::move(activity), ""};
@@ -414,6 +422,7 @@ const char* toolActivityTargetName(ToolActivityTarget target)
         case ToolActivityTarget::Web: return "web";
         case ToolActivityTarget::ProjectFiles: return "project_files";
         case ToolActivityTarget::SelectedSsh: return "selected_ssh";
+        case ToolActivityTarget::Python: return "python";
     }
     return "invalid";
 }
@@ -538,6 +547,78 @@ OperationResult finishToolActivity(
         return appended;
     }
     return {true, ""};
+}
+
+OperationResult finishPersistedToolActivity(
+    std::uint64_t sequence,
+    ToolActivityStatus status,
+    std::uint32_t durationMs,
+    std::uint32_t outputBytes,
+    ToolActivityExitStatus exitStatus)
+{
+    if (sequence == 0 || status == ToolActivityStatus::Running ||
+        status == ToolActivityStatus::Interrupted) {
+        return {false, "Persisted tool activity finish requires an exact terminal sequence"};
+    }
+    if (!journalInitialized) {
+        const OperationResult initialized = initializeToolActivityJournal();
+        if (!initialized.success) {
+            return initialized;
+        }
+    }
+    std::vector<ToolActivityRecord> events;
+    std::uint64_t maximumSequence = 0;
+    OperationResult result = readJournal(
+        kPreviousToolActivityPath, events, maximumSequence);
+    if (result.success) {
+        result = readJournal(kToolActivityPath, events, maximumSequence);
+    }
+    if (!result.success) {
+        return result;
+    }
+    const ToolActivityRecord* running = nullptr;
+    const ToolActivityRecord* terminal = nullptr;
+    for (const ToolActivityRecord& event : events) {
+        if (event.sequence != sequence) continue;
+        if (event.tool != "python_run" ||
+            event.target != ToolActivityTarget::Python) {
+            return {false, "Persisted Python activity sequence belongs to another tool"};
+        }
+        if (event.status == ToolActivityStatus::Running) {
+            if (running != nullptr) {
+                return {false, "Persisted Python activity contains duplicate running events"};
+            }
+            running = &event;
+        } else {
+            if (terminal != nullptr) {
+                return {false, "Persisted Python activity contains duplicate terminal events"};
+            }
+            terminal = &event;
+        }
+    }
+    if (running == nullptr) {
+        return {false, "Persisted Python activity running sequence was not found"};
+    }
+    if (terminal != nullptr) {
+        return terminal->status == status &&
+                terminal->durationMs == durationMs &&
+                terminal->outputBytes == outputBytes &&
+                terminal->exitStatus.present == exitStatus.present &&
+                (!exitStatus.present ||
+                 terminal->exitStatus.value == exitStatus.value)
+            ? OperationResult{true, ""}
+            : OperationResult{false,
+                "Persisted Python activity terminal event conflicts with recovery"};
+    }
+    return appendActivity({
+        sequence,
+        "python_run",
+        ToolActivityTarget::Python,
+        status,
+        durationMs,
+        outputBytes,
+        exitStatus,
+    });
 }
 
 ToolActivitiesResult loadRecentToolActivities()

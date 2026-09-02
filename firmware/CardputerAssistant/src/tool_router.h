@@ -2,6 +2,7 @@
 
 #include "api_client.h"
 #include "app_types.h"
+#include "python_mode.h"
 #include "tool_catalog.h"
 
 #include <string>
@@ -10,6 +11,7 @@ namespace cardputer {
 
 struct PendingToolDecisionResult {
     bool success;
+    bool pythonHandoff;
     PendingToolCall pending;
     ToolExecutionResult toolResult;
     String error;
@@ -23,6 +25,7 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
+    bool pythonAvailable,
     std::uint64_t selectedSshProfileId);
 ToolRequestPlan resolveChatToolRequestPlan(
     const Settings& settings,
@@ -32,6 +35,7 @@ ToolRequestPlan resolveChatToolRequestPlan(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
+    bool pythonAvailable,
     std::uint64_t selectedSshProfileId);
 ToolExecutionResult routeToolCall(const Settings& settings,
                                   const ToolRequestPlan& plan,
@@ -46,6 +50,7 @@ PendingToolDecisionResult approvePendingProjectToolCall(
     const Settings& settings,
     const ToolRequestPlan& currentPlan,
     const String& pendingId,
+    PythonRunReturnSurface returnSurface,
     const CancelCallback& isCancelled);
 PendingToolDecisionResult denyPendingProjectToolCall(
     const String& pendingId);

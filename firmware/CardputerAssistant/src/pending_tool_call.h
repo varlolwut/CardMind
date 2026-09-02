@@ -34,6 +34,7 @@ enum class PendingToolPreviewKind : std::uint8_t {
     Generic,
     FileReplacement,
     SshCommand,
+    PythonSource,
 };
 
 struct PendingToolTargetIdentity {
@@ -52,6 +53,14 @@ struct PendingToolContinuation {
     std::uint32_t toolOutputBytesBeforeCall;
     bool completedWorkspaceWriteBeforeCall;
 };
+
+inline bool pendingToolContinuationAllowsSchema(
+    ToolSchemaId schema,
+    std::uint8_t remainingRequiredGroupsAfterCall)
+{
+    return schema != ToolSchemaId::PythonRun ||
+        remainingRequiredGroupsAfterCall == 0;
+}
 
 struct PendingToolCall {
     String pendingId;
@@ -110,6 +119,8 @@ bool pendingToolCallIsResumableThisBoot(const String& pendingId);
 PendingToolCallResult claimPendingToolCallApproval(
     const String& pendingId,
     const ToolRequestPlan& currentPlan);
+OperationResult revalidateClaimedPendingToolCall(
+    const PendingToolCall& pending);
 PendingToolCallResult denyPendingToolCall(const String& pendingId);
 OperationResult clearPendingToolCall(
     const String& pendingId,

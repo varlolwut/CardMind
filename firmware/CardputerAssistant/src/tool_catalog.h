@@ -22,7 +22,8 @@ enum class ToolSchemaId : std::uint8_t {
     SftpWrite = 9,
     SftpMove = 10,
     SshSafeAction = 11,
-    Count = 12,
+    PythonRun = 12,
+    Count = 13,
 };
 
 enum class ToolConfirmationReason : std::uint8_t {

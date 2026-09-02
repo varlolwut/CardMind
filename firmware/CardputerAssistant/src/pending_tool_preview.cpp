@@ -308,4 +308,39 @@ PendingToolPreviewBodyResult buildPendingSshCommandPreview(
     return {true, std::move(command), false, ""};
 }
 
+PendingToolPreviewBodyResult buildPendingPythonSourcePreview(
+    const String& name,
+    std::uint32_t sourceBytes,
+    const std::string& sha256,
+    std::string sourcePrefix,
+    bool sourceComplete)
+{
+    if (name.length() == 0 || sourcePrefix.size() > sourceBytes ||
+        sourceComplete != (sourcePrefix.size() == sourceBytes) ||
+        sha256.size() != 64 || !isValidUtf8(sourcePrefix)) {
+        return {false, "", false,
+                "Python preview input is outside the exact bounded limits"};
+    }
+    std::string body =
+        "Privileged one-run MicroPython code; no sandbox.\n"
+        "Output is stored durably in the originating chat.\n"
+        "Watchdog and next-boot selection are recovery aids, not adversarial containment.\n"
+        "Open Files and inspect the complete source before approval.\n"
+        "Path: " + std::string(name.c_str()) + "\nBytes: " +
+        std::to_string(sourceBytes) + "\nSHA-256: " + sha256 + "\n\n";
+    const std::size_t available = kMaximumPendingToolPreviewBodyBytes -
+        std::min(body.size(), kMaximumPendingToolPreviewBodyBytes);
+    bool truncated = !sourceComplete || sourcePrefix.size() > available;
+    if (sourcePrefix.size() > available) {
+        sourcePrefix.resize(utf8BoundaryAtOrBefore(sourcePrefix, available));
+    }
+    body += sourcePrefix;
+    if (body.size() > kMaximumPendingToolPreviewBodyBytes ||
+        !isValidUtf8(body)) {
+        return {false, "", false,
+                "Python preview output exceeds its byte or UTF-8 limit"};
+    }
+    return {true, std::move(body), truncated, ""};
+}
+
 }  // namespace cardputer

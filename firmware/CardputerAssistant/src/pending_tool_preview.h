@@ -32,5 +32,11 @@ PendingToolPreviewBodyResult buildPendingFileReplacementPreview(
     const std::string& proposed);
 PendingToolPreviewBodyResult buildPendingSshCommandPreview(
     std::string command);
+PendingToolPreviewBodyResult buildPendingPythonSourcePreview(
+    const String& name,
+    std::uint32_t sourceBytes,
+    const std::string& sha256,
+    std::string sourcePrefix,
+    bool sourceComplete);
 
 }  // namespace cardputer

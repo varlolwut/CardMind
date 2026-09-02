@@ -2107,6 +2107,9 @@ void submitPrompt()
             fileWorkspaceReady &&
                 currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+            fileWorkspaceReady &&
+                currentSdStorageStatus.state == cardputer::SdStorageState::Ready &&
+                cardputer::pythonOneShotAvailable(),
             cachedSshToolProfileId);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {
@@ -2262,6 +2265,9 @@ cardputer::ToolPolicyResolutionResult activeChatToolPermissionResolution()
         fileWorkspaceReady &&
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
         currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+        fileWorkspaceReady &&
+            currentSdStorageStatus.state == cardputer::SdStorageState::Ready &&
+            cardputer::pythonOneShotAvailable(),
         cachedSshToolProfileId);
 }
 
@@ -2344,6 +2350,9 @@ void renderChatCapabilityStatus()
                 fileWorkspaceReady &&
                     currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
                 currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+                fileWorkspaceReady &&
+                    currentSdStorageStatus.state == cardputer::SdStorageState::Ready &&
+                    cardputer::pythonOneShotAvailable(),
                 cachedSshToolProfileId);
         if (resolution.error != cardputer::ToolPolicyContractError::None) {
             lines.push_back("Invalid capability policy");
@@ -2540,6 +2549,12 @@ std::vector<String> pendingToolActionItems()
 {
     cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
     if (!pending.success || !pending.found) return {"Back"};
+    const cardputer::ToolCatalogEntry* entry =
+        cardputer::toolCatalogEntryForName(
+            pending.pending.continuation.call.name);
+    const bool pythonClaimed =
+        pending.pending.state == cardputer::PendingToolCallState::ClaimedApprove &&
+        entry != nullptr && entry->schema == cardputer::ToolSchemaId::PythonRun;
     std::string().swap(pending.pending.continuation.call.arguments);
     if (pendingToolPreviewActionable &&
         pending.pending.state == cardputer::PendingToolCallState::Awaiting &&
@@ -2553,6 +2568,7 @@ std::vector<String> pendingToolActionItems()
         return {"Allow once", "Deny", "Back"};
     }
     if (pending.pending.state == cardputer::PendingToolCallState::ClaimedApprove) {
+        if (pythonClaimed) return {"Back"};
         return {"Acknowledge unknown effect", "Back"};
     }
     if (pending.pending.state == cardputer::PendingToolCallState::Denied) {
@@ -2638,6 +2654,9 @@ PendingContinuationInputs loadPendingContinuationInputs()
         fileWorkspaceReady &&
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
         currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+        fileWorkspaceReady &&
+            currentSdStorageStatus.state == cardputer::SdStorageState::Ready &&
+            cardputer::pythonOneShotAvailable(),
         cachedSshToolProfileId);
     result.error = toolRequestPlanError(result.plan);
     const cardputer::ToolCatalogEntry* entry = cardputer::toolCatalogEntryForName(
@@ -2857,9 +2876,20 @@ void allowPendingToolOnce()
     };
     cardputer::PendingToolDecisionResult decision =
         cardputer::approvePendingProjectToolCall(
-            settings, inputs.plan, inputs.pendingId, isCancelled);
+            settings, inputs.plan, inputs.pendingId,
+            cardputer::PythonRunReturnSurface::Device, isCancelled);
     if (!decision.success) {
         showPendingDecisionError(decision.error);
+        return;
+    }
+    if (decision.pythonHandoff) {
+        clearPendingToolPreviewCache();
+        clearDevicePendingContext();
+        cardputer::showBusyScreen(
+            "PYTHON RUN",
+            "Exact approved script staged. Restarting for one foreground run...");
+        delay(350);
+        ESP.restart();
         return;
     }
     const cardputer::ToolRequestPlan continuationPlan = inputs.plan;
@@ -2889,7 +2919,8 @@ void allowPendingToolForChat()
     };
     cardputer::PendingToolDecisionResult decision =
         cardputer::approvePendingProjectToolCall(
-            settings, inputs.plan, inputs.pendingId, isCancelled);
+            settings, inputs.plan, inputs.pendingId,
+            cardputer::PythonRunReturnSurface::Device, isCancelled);
     if (!decision.success) {
         showPendingDecisionError(decision.error);
         return;
@@ -2934,6 +2965,10 @@ void allowPendingToolForChat()
                                 cardputer::SdStorageState::Ready,
                         currentSdStorageStatus.state ==
                             cardputer::SdStorageState::Ready,
+                        fileWorkspaceReady &&
+                            currentSdStorageStatus.state ==
+                                cardputer::SdStorageState::Ready &&
+                            cardputer::pythonOneShotAvailable(),
                         cachedSshToolProfileId);
                 if (toolRequestPlanError(updatedPlan).isEmpty()) {
                     continuationPlan = updatedPlan;
@@ -2979,6 +3014,18 @@ void acknowledgeInterruptedPendingTool()
     if (!pending.success || !pending.found) {
         showPendingDecisionError(
             pending.success ? String("No pending confirmation") : pending.error);
+        return;
+    }
+    const cardputer::ToolCatalogEntry* entry =
+        cardputer::toolCatalogEntryForName(
+            pending.pending.continuation.call.name);
+    if (pending.pending.state ==
+            cardputer::PendingToolCallState::ClaimedApprove &&
+        entry != nullptr &&
+        entry->schema == cardputer::ToolSchemaId::PythonRun) {
+        std::string().swap(pending.pending.continuation.call.arguments);
+        showPendingDecisionError(
+            "Python run recovery must complete before pending cleanup");
         return;
     }
     const String pendingId = pending.pending.pendingId;
@@ -3103,6 +3150,209 @@ void runUiSearchEndToEndTest()
 }
 
 }  // namespace
+
+struct PythonRunStartupResult {
+    bool success;
+    bool chatChanged;
+    bool openWebConsole;
+    String error;
+};
+
+PythonRunStartupResult consumePythonRunAtStartup();
+
+PythonRunStartupResult consumePythonRunAtStartup()
+{
+    static const std::string kInterruptedBeforeStaging =
+        "Python approval was interrupted before runnable staging; no code executed.";
+
+    cardputer::PythonRunRecoveryResult recovery =
+        cardputer::loadPythonRunRecovery();
+    cardputer::PendingToolCallResult pending = cardputer::loadPendingToolCall();
+    if (!pending.success) {
+        return {false, false, false, pending.error};
+    }
+    if (!recovery.success) {
+        std::string().swap(pending.pending.continuation.call.arguments);
+        return {false, false, false, recovery.error};
+    }
+
+    bool pendingIsPython = false;
+    if (pending.found) {
+        const cardputer::ToolCatalogEntry* entry =
+            cardputer::toolCatalogEntryForName(
+                pending.pending.continuation.call.name);
+        if (entry == nullptr) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return {false, false, false,
+                    "Pending tool call is absent from the exact catalog"};
+        }
+        pendingIsPython = entry->schema == cardputer::ToolSchemaId::PythonRun;
+        if (!pendingIsPython) {
+            const bool p5StatePresent = recovery.found ||
+                SD.exists("/assistant/v2/python_run_request.json") ||
+                SD.exists("/assistant/v2/python_run_request.json.tmp") ||
+                SD.exists("/assistant/v2/python_run_result.json") ||
+                SD.exists("/assistant/v2/python_run_result.json.tmp");
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return p5StatePresent
+                ? PythonRunStartupResult{
+                    false, false, false,
+                    "Python run state is paired with a foreign pending tool call"}
+                : PythonRunStartupResult{true, false, false, ""};
+        }
+        if (pending.pending.state !=
+                cardputer::PendingToolCallState::ClaimedApprove) {
+            const bool p5StatePresent = recovery.found ||
+                SD.exists("/assistant/v2/python_run_request.json") ||
+                SD.exists("/assistant/v2/python_run_request.json.tmp") ||
+                SD.exists("/assistant/v2/python_run_result.json") ||
+                SD.exists("/assistant/v2/python_run_result.json.tmp");
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return p5StatePresent
+                ? PythonRunStartupResult{
+                    false, false, false,
+                    "Python run state requires the exact claimed approval"}
+                : PythonRunStartupResult{true, false, false, ""};
+        }
+    }
+
+    if (!recovery.found && pending.found && pendingIsPython) {
+        const bool requestPresent =
+            SD.exists("/assistant/v2/python_run_request.json");
+        const bool requestTemporaryPresent =
+            SD.exists("/assistant/v2/python_run_request.json.tmp");
+        const bool resultPresent =
+            SD.exists("/assistant/v2/python_run_result.json");
+        const bool resultTemporaryPresent =
+            SD.exists("/assistant/v2/python_run_result.json.tmp");
+        if (requestPresent && resultPresent &&
+            !requestTemporaryPresent && !resultTemporaryPresent) {
+            cardputer::PythonRunRecoveryResult detached =
+                cardputer::loadDetachedPythonRunRecovery(
+                    pending.pending.pendingId,
+                    pending.pending.target.name,
+                    pending.pending.target.size,
+                    pending.pending.target.sha256);
+            if (!detached.success || !detached.found) {
+                std::string().swap(pending.pending.continuation.call.arguments);
+                return {false, false, false, detached.error};
+            }
+            recovery = std::move(detached);
+        } else if (requestPresent && !resultPresent &&
+                   !requestTemporaryPresent && !resultTemporaryPresent) {
+            const cardputer::OperationResult validated =
+                cardputer::validateDetachedPythonRunRequest(
+                    pending.pending.pendingId,
+                    pending.pending.target.name,
+                    pending.pending.target.size,
+                    pending.pending.target.sha256);
+            if (!validated.success) {
+                std::string().swap(pending.pending.continuation.call.arguments);
+                return {false, false, false, validated.error};
+            }
+        } else if (requestPresent || requestTemporaryPresent ||
+                   resultPresent || resultTemporaryPresent) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return {false, false, false,
+                    "Detached Python artifacts are malformed or ambiguous"};
+        }
+    }
+
+    if (!recovery.found && !pending.found) {
+        const cardputer::OperationResult cleaned =
+            cardputer::cleanupPythonRunArtifacts();
+        return {cleaned.success, false, false, cleaned.error};
+    }
+    if (!pending.found) {
+        const cardputer::OperationResult discarded =
+            cardputer::discardPythonRunState();
+        const cardputer::OperationResult cleaned = discarded.success
+            ? cardputer::cleanupPythonRunArtifacts() : discarded;
+        return {false, false, false, cleaned.success
+            ? String("Orphan Python run state was removed without chat attachment")
+            : cleaned.error};
+    }
+    if ((recovery.found &&
+         recovery.pendingId != pending.pending.pendingId)) {
+        std::string().swap(pending.pending.continuation.call.arguments);
+        return {false, false, false,
+                "Python run state does not match the exact claimed pending call"};
+    }
+
+    std::string message;
+    bool attachmentAllowed = true;
+    if (recovery.found) {
+        message = recovery.assistantMessage;
+        attachmentAllowed = recovery.attachmentAllowed;
+        const cardputer::OperationResult audit =
+            cardputer::finishPersistedToolActivity(
+                recovery.auditSequence,
+                recovery.executionSucceeded
+                    ? cardputer::ToolActivityStatus::Succeeded
+                    : cardputer::ToolActivityStatus::Failed,
+                0, recovery.outputBytes,
+                {recovery.hasExitStatus, recovery.exitStatus});
+        if (!audit.success) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return {false, false, false, audit.error};
+        }
+    } else {
+        message = kInterruptedBeforeStaging;
+    }
+
+    const cardputer::ChatDocumentResult stored = cardputer::loadProjectChat(
+        pending.pending.projectId, pending.pending.chatId, 2, 32768);
+    if (!stored.success) {
+        std::string().swap(pending.pending.continuation.call.arguments);
+        return {false, false, false, stored.error};
+    }
+    bool appended = false;
+    if (stored.chat.summary.messageCount == pending.pending.chatMessageCount) {
+        if (!attachmentAllowed) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return {false, false, false,
+                    "Detached Python result is not authorized for a new chat attachment"};
+        }
+        const cardputer::OperationResult saved = cardputer::appendProjectChatMessages(
+            pending.pending.projectId, pending.pending.chatId,
+            {{"assistant", message}}, currentChatTimestamp(),
+            settings.projectChatHistoryQuotaBytes);
+        if (!saved.success) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return {false, false, false, saved.error};
+        }
+        appended = true;
+    } else if (stored.chat.summary.messageCount !=
+                   pending.pending.chatMessageCount + 1U ||
+               stored.chat.messages.empty() ||
+               stored.chat.messages.back().role != "assistant" ||
+               stored.chat.messages.back().content != message) {
+        std::string().swap(pending.pending.continuation.call.arguments);
+        return {false, false, false,
+                "Originating chat history does not match the exact Python result"};
+    }
+
+    const bool openWeb = recovery.found &&
+        recovery.returnSurface == cardputer::PythonRunReturnSurface::Web;
+    if (recovery.found && recovery.attachmentAllowed) {
+        const cardputer::OperationResult finalized =
+            cardputer::finalizePythonRunHandoff(recovery.returnSurface);
+        if (!finalized.success) {
+            std::string().swap(pending.pending.continuation.call.arguments);
+            return {false, appended, false, finalized.error};
+        }
+    }
+    const cardputer::OperationResult cleared = cardputer::clearPendingToolCall(
+        pending.pending.pendingId, pending.pending.state);
+    if (!cleared.success) {
+        std::string().swap(pending.pending.continuation.call.arguments);
+        return {false, appended, openWeb, cleared.error};
+    }
+    const cardputer::OperationResult cleaned =
+        cardputer::cleanupPythonRunArtifacts();
+    std::string().swap(pending.pending.continuation.call.arguments);
+    return {cleaned.success, appended, openWeb, cleaned.error};
+}
 
 void setup()
 {
@@ -3260,6 +3510,23 @@ void setup()
     Serial.printf("TOOL_ACTIVITY result=%s\n",
                   toolActivityResult.success ? "ready" : "failed");
 
+    PythonRunStartupResult pythonRunStartup = {true, false, false, ""};
+    if (fileWorkspaceReady && toolActivityResult.success) {
+        pythonRunStartup = consumePythonRunAtStartup();
+        if (pythonRunStartup.chatChanged) {
+            const cardputer::OperationResult refreshedChats = initializeChats();
+            if (!refreshedChats.success) {
+                pythonRunStartup.success = false;
+                pythonRunStartup.error = refreshedChats.error;
+            }
+        }
+        if (pythonRunStartup.openWebConsole) {
+            pythonHandoff.openWebConsole = true;
+        }
+    }
+    Serial.printf("PYTHON_RUN_CONSUME result=%s\n",
+                  pythonRunStartup.success ? "ready" : "failed");
+
     const cardputer::OperationResult sshStorageResult = fileWorkspaceReady
         ? cardputer::initializeSshStorage()
         : cardputer::OperationResult{false, fileWorkspaceError};
@@ -3275,6 +3542,8 @@ void setup()
     carouselIndex = 0;
     menuStatus = !pythonHandoff.success
         ? pythonHandoff.error
+        : !pythonRunStartup.success
+        ? pythonRunStartup.error
         : !fileWorkspaceReady
         ? fileWorkspaceError
         : (!crashJournalReady ? crashJournalError

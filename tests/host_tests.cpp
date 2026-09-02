@@ -5,6 +5,8 @@
 #include "../firmware/CardputerAssistant/src/json_string_reader.h"
 #include "../firmware/CardputerAssistant/src/offline_tools.h"
 #include "../firmware/CardputerAssistant/src/pending_tool_preview.h"
+#include "../firmware/CardputerAssistant/src/pending_tool_call.h"
+#include "../firmware/CardputerAssistant/src/python_mode.h"
 #include "../firmware/CardputerAssistant/src/ssh_terminal.h"
 #include "../firmware/CardputerAssistant/src/ssh_command_options.h"
 #include "../firmware/CardputerAssistant/src/tool_catalog.h"
@@ -292,13 +294,13 @@ cardputer::ToolPolicyResolutionResult uniformToolResolution(
 void testToolCatalogAndRequestPlan()
 {
     const auto& catalog = cardputer::toolCatalog();
-    const std::array<std::string, 12> expectedNames = {
+    const std::array<std::string, 13> expectedNames = {
         "web_search", "web_fetch", "list_files", "read_file",
         "write_file", "append_file", "ssh_command",
         "sftp_list", "sftp_read", "sftp_write", "sftp_move",
-        "ssh_safe_action",
+        "ssh_safe_action", "python_run",
     };
-    const std::array<cardputer::ToolCapabilityGroup, 12> expectedGroups = {
+    const std::array<cardputer::ToolCapabilityGroup, 13> expectedGroups = {
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Web,
         cardputer::ToolCapabilityGroup::Files,
@@ -311,8 +313,9 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapabilityGroup::Ssh,
         cardputer::ToolCapabilityGroup::Ssh,
         cardputer::ToolCapabilityGroup::Ssh,
+        cardputer::ToolCapabilityGroup::Python,
     };
-    const std::array<cardputer::ToolCapability, 12> expectedPrimary = {
+    const std::array<cardputer::ToolCapability, 13> expectedPrimary = {
         cardputer::ToolCapability::WebSearch,
         cardputer::ToolCapability::WebFetch,
         cardputer::ToolCapability::FilesRead,
@@ -325,8 +328,9 @@ void testToolCatalogAndRequestPlan()
         cardputer::ToolCapability::SftpReadWrite,
         cardputer::ToolCapability::SftpReadWrite,
         cardputer::ToolCapability::SshRead,
+        cardputer::ToolCapability::PythonWriteRun,
     };
-    require(catalog.size() == 12, "Tool catalog size changed");
+    require(catalog.size() == 13, "Tool catalog size changed");
     for (std::size_t index = 0; index < catalog.size(); ++index) {
         require(static_cast<std::size_t>(catalog[index].schema) == index &&
                     expectedNames[index] == catalog[index].name &&
@@ -342,9 +346,10 @@ void testToolCatalogAndRequestPlan()
                     &catalog[index],
                 "Canonical tool name did not resolve to its catalog row");
     }
-    const std::array<std::string, 8> noncanonicalNames = {
+    const std::array<std::string, 10> noncanonicalNames = {
         "WebSearch", "web-search", "SSH_COMMAND", "ssh-command",
         "SFTP_LIST", "sftp-list", "SSH_SAFE_ACTION", "ssh-safe-action",
+        "PYTHON_RUN", "python-run",
     };
     for (const std::string& name : noncanonicalNames) {
         require(cardputer::toolCatalogEntryForName(name) == nullptr,
@@ -553,8 +558,12 @@ void testToolCatalogAndRequestPlan()
                 toolCapabilityGroupMask(cardputer::ToolCapabilityGroup::Web),
             "Inconsistent denied schema satisfied a required group");
     forged = plan;
+    constexpr std::uint8_t firstUnknownSchemaBit =
+        static_cast<std::uint8_t>(cardputer::ToolSchemaId::Count);
+    static_assert(firstUnknownSchemaBit < sizeof(cardputer::ToolSchemaMask) * 8U,
+                  "Tool schema mask has no bit available for the unknown-schema test");
     forged.schemas = static_cast<cardputer::ToolSchemaMask>(
-        forged.schemas | 0x1000U);
+        forged.schemas | (1U << firstUnknownSchemaBit));
     require(!cardputer::toolRequestPlanIsConsistent(forged),
             "Plan with an unknown schema bit was accepted");
     forged = plan;
@@ -587,7 +596,8 @@ void testToolCatalogAndRequestPlan()
 
     for (const cardputer::ToolCatalogEntry& entry : catalog) {
         const bool alwaysMandatory =
-            entry.schema == cardputer::ToolSchemaId::SshCommand;
+            entry.schema == cardputer::ToolSchemaId::SshCommand ||
+            entry.schema == cardputer::ToolSchemaId::PythonRun;
         require(cardputer::toolConfirmationReason(
                     cardputer::ToolPermissionDecision::Deny,
                     entry.schema, true) ==
@@ -784,6 +794,49 @@ void testPendingToolPreview()
                 !cardputer::buildPendingSshCommandPreview(
                     std::string(1025, 'x')).success,
             "SSH command preview accepted input outside its exact limits");
+
+    const auto python = cardputer::buildPendingPythonSourcePreview(
+        "tools/check.py", 4096,
+        std::string(64, 'a'), std::string(1536, 'x'), false);
+    require(python.success && python.truncated &&
+                python.body.size() <=
+                    cardputer::kMaximumPendingToolPreviewBodyBytes &&
+                python.body.find("Privileged one-run MicroPython code") !=
+                    std::string::npos &&
+                python.body.find("stored durably in the originating chat") !=
+                    std::string::npos &&
+                python.body.find("not adversarial containment") !=
+                    std::string::npos &&
+                python.body.find("tools/check.py") != std::string::npos &&
+                python.body.find(std::string(64, 'a')) != std::string::npos,
+            "Python approval preview omitted trust or exact-byte identity");
+    std::string maximumPythonSource(65533, 'x');
+    maximumPythonSource += "\xe2\x82\xac";
+    cardputer::PythonUtf8StreamState utf8 = {0, 0, 0, true};
+    utf8 = cardputer::consumePythonUtf8Chunk(
+        utf8,
+        reinterpret_cast<const std::uint8_t*>(maximumPythonSource.data()),
+        65534);
+    require(utf8.valid && !cardputer::pythonUtf8StreamComplete(utf8),
+            "Streaming UTF-8 verifier lost a split maximum-size code point");
+    utf8 = cardputer::consumePythonUtf8Chunk(
+        utf8,
+        reinterpret_cast<const std::uint8_t*>(maximumPythonSource.data() + 65534),
+        2);
+    require(cardputer::pythonUtf8StreamComplete(utf8),
+            "Streaming UTF-8 verifier rejected the exact 65536-byte source ceiling");
+    const std::uint8_t invalidUtf8[] = {0xe2U, 0x28U, 0xa1U};
+    utf8 = cardputer::consumePythonUtf8Chunk(
+        {0, 0, 0, true}, invalidUtf8, sizeof(invalidUtf8));
+    require(!utf8.valid,
+            "Streaming UTF-8 verifier accepted an invalid continuation byte");
+    require(!cardputer::pendingToolContinuationAllowsSchema(
+                cardputer::ToolSchemaId::PythonRun, 1U) &&
+                cardputer::pendingToolContinuationAllowsSchema(
+                    cardputer::ToolSchemaId::PythonRun, 0U) &&
+                cardputer::pendingToolContinuationAllowsSchema(
+                    cardputer::ToolSchemaId::WebSearch, 1U),
+            "Python handoff was not constrained to the final required tool group");
 
     require(!cardputer::buildPendingFileReplacementPreview(
                  "x", 2, true, "y").success,

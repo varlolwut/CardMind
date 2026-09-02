@@ -988,7 +988,8 @@ WebPendingContinuationInputs loadWebPendingContinuationInputs()
     const bool writable = storage.state == SdStorageState::Ready;
     result.plan = resolveChatToolRequestPlan(
         consoleSettings, project.project, chat.chat, webPendingContext.intent,
-        readable, writable, writable, sshToolAvailableProfileId());
+        readable, writable, writable,
+        writable && pythonOneShotAvailable(), sshToolAvailableProfileId());
     result.error = webToolRequestPlanError(result.plan);
     if (result.error.isEmpty() &&
         (entry == nullptr ||
@@ -1549,6 +1550,7 @@ const char* webPendingPreviewKindName(PendingToolPreviewKind kind)
         case PendingToolPreviewKind::Generic: return "generic";
         case PendingToolPreviewKind::FileReplacement: return "file_replacement";
         case PendingToolPreviewKind::SshCommand: return "ssh_command";
+        case PendingToolPreviewKind::PythonSource: return "python_source";
     }
     return "generic";
 }
@@ -1590,6 +1592,11 @@ void handlePending()
     document["state"] = webPendingStateName(pending.pending.state);
     document["reason"] = webPendingReasonName(pending.pending.reason);
     document["tool"] = pending.pending.continuation.call.name;
+    const ToolCatalogEntry* entry = toolCatalogEntryForName(
+        pending.pending.continuation.call.name);
+    const bool pythonClaimed =
+        pending.pending.state == PendingToolCallState::ClaimedApprove &&
+        entry != nullptr && entry->schema == ToolSchemaId::PythonRun;
     std::string().swap(pending.pending.continuation.call.arguments);
     if (pending.pending.state == PendingToolCallState::Awaiting) {
         const WebPendingContinuationInputs inputs =
@@ -1616,9 +1623,10 @@ void handlePending()
             ? String("Confirmation required")
             : String("Request interrupted; execution is disabled");
     } else {
-        document["can_acknowledge"] = true;
-        document["message"] = pending.pending.state ==
-                PendingToolCallState::ClaimedApprove
+        document["can_acknowledge"] = !pythonClaimed;
+        document["message"] = pythonClaimed
+            ? String("Python run recovery is pending; acknowledgement is disabled")
+            : pending.pending.state == PendingToolCallState::ClaimedApprove
             ? String("Tool outcome is unknown; acknowledge to clear")
             : String("Response continuation was interrupted; acknowledge to clear");
     }
@@ -1709,7 +1717,8 @@ void handleState()
             resolveChatToolPermissions(
                 consoleSettings, activeProject, activeChat,
                 {ToolMessageIntentMode::Auto, 0}, readable, writable,
-                writable, availableSshProfileId);
+                writable, writable && pythonOneShotAvailable(),
+                availableSshProfileId);
         const OperationResult built = buildWebConsoleChatState(
             requestSettings, activeProject, activeChat, toolPermissions,
             availableSshProfileId, activeProject.contextByteBudget,
@@ -2074,6 +2083,7 @@ void processWebPrompt(std::string prompt,
     const ToolRequestPlan toolPlan = resolveChatToolRequestPlan(
         consoleSettings, activeProject, storedChat.chat, intent,
         toolStorageReadable, toolStorageWritable, toolStorageWritable,
+        toolStorageWritable && pythonOneShotAvailable(),
         sshToolAvailableProfileId());
     if (toolPlan.error != ToolPolicyContractError::None) {
         sendWebJsonError(server, 500, "Tool permission policy could not be resolved");
@@ -2204,6 +2214,7 @@ void handlePromptRetry()
     const ToolRequestPlan toolPlan = resolveChatToolRequestPlan(
         consoleSettings, activeProject, stored.chat, retryIntent,
         toolStorageReadable, toolStorageWritable, toolStorageWritable,
+        toolStorageWritable && pythonOneShotAvailable(),
         sshToolAvailableProfileId());
     if (toolPlan.error != ToolPolicyContractError::None) {
         sendWebJsonError(server, 500, "Tool permission policy could not be resolved");
@@ -2447,9 +2458,20 @@ void handlePendingAllowOnce()
         return consoleEscapePressed() || !server.client().connected();
     };
     PendingToolDecisionResult decision = approvePendingProjectToolCall(
-        consoleSettings, inputs.plan, inputs.pendingId, isCancelled);
+        consoleSettings, inputs.plan, inputs.pendingId,
+        PythonRunReturnSurface::Web, isCancelled);
     if (!decision.success) {
         sendWebJsonError(server, 409, decision.error);
+        return;
+    }
+    if (decision.pythonHandoff) {
+        clearWebPendingContext();
+        consoleStatus = "Approved Python run is restarting the device";
+        server.sendHeader("Cache-Control", "no-store");
+        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+        server.send(200, "text/event-stream; charset=utf-8", "");
+        sendWebSse(server, "handoff", "", consoleStatus);
+        pythonRestartRequested = true;
         return;
     }
     const ToolRequestPlan continuationPlan = inputs.plan;
@@ -2483,7 +2505,8 @@ void handlePendingAllowChat()
         return consoleEscapePressed() || !server.client().connected();
     };
     PendingToolDecisionResult decision = approvePendingProjectToolCall(
-        consoleSettings, inputs.plan, inputs.pendingId, isCancelled);
+        consoleSettings, inputs.plan, inputs.pendingId,
+        PythonRunReturnSurface::Web, isCancelled);
     if (!decision.success) {
         sendWebJsonError(server, 409, decision.error);
         return;
@@ -2525,6 +2548,7 @@ void handlePendingAllowChat()
                 const ToolRequestPlan updatedPlan = resolveChatToolRequestPlan(
                     consoleSettings, project.project, updatedChat.chat,
                     webPendingContext.intent, readable, writable, writable,
+                    writable && pythonOneShotAvailable(),
                     sshToolAvailableProfileId());
                 if (webToolRequestPlanError(updatedPlan).isEmpty() &&
                     entry != nullptr &&
@@ -2582,6 +2606,17 @@ void handlePendingAcknowledge()
                 pending.pending.continuation.call.arguments);
         }
         sendWebJsonError(server, 409, "Pending request no longer matches");
+        return;
+    }
+    const ToolCatalogEntry* entry = toolCatalogEntryForName(
+        pending.pending.continuation.call.name);
+    if (pending.pending.state == PendingToolCallState::ClaimedApprove &&
+        entry != nullptr && entry->schema == ToolSchemaId::PythonRun) {
+        std::string().swap(
+            pending.pending.continuation.call.arguments);
+        sendWebJsonError(
+            server, 409,
+            "Python run recovery must complete before pending cleanup");
         return;
     }
     const bool contextMatches = webPendingContextMatches(pending.pending);
@@ -5213,6 +5248,14 @@ WebConsoleResult runWebConsole(const Settings& settings, const String& initialCh
         Serial.println("WEB_CONSOLE stage=server_ready");
         Serial.flush();
         serverStarted = true;
+    }
+    const OperationResult handoffAcknowledged =
+        acknowledgePythonHandoffRequest();
+    if (!handoffAcknowledged.success) {
+        Serial.printf(
+            "ERROR event=python_handoff_ack reason=%s\n",
+            handoffAcknowledged.error.c_str());
+        consoleStatus = handoffAcknowledged.error;
     }
     Serial.printf("WEB_CONSOLE result=ready address=http://%s/\n",
                   WiFi.localIP().toString().c_str());
