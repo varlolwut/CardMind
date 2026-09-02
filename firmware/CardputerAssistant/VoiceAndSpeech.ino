@@ -328,6 +328,9 @@ void retryLastRequest()
             fileWorkspaceReady &&
                 currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
             currentSdStorageStatus.state == cardputer::SdStorageState::Ready,
+            fileWorkspaceReady &&
+                currentSdStorageStatus.state == cardputer::SdStorageState::Ready &&
+                cardputer::pythonOneShotAvailable(),
             cachedSshToolProfileId);
     const String planError = toolRequestPlanError(requestPlan);
     if (!planError.isEmpty()) {

@@ -369,6 +369,17 @@ void addToolSchema(JsonArray tools, ToolSchemaId schema)
             required.add("action");
             break;
         }
+        case ToolSchemaId::PythonRun: {
+            function["description"] =
+                "Request one foreground run of an existing project-linked UTF-8 .py file. "
+                "The user must inspect and approve the exact path, size, and SHA-256 before reboot.";
+            parameters["properties"]["name"]["type"] = "string";
+            parameters["properties"]["name"]["description"] =
+                "Exact case-sensitive Shared workspace .py path already linked to the active project.";
+            JsonArray required = parameters["required"].to<JsonArray>();
+            required.add("name");
+            break;
+        }
         case ToolSchemaId::Count:
             return;
     }
@@ -406,6 +417,7 @@ String buildToolChatRequest(const Settings& settings,
         includesGroup(ToolCapabilityGroup::Files);
     const bool webSearchAvailable = includesGroup(ToolCapabilityGroup::Web);
     const bool sshToolAvailable = includesGroup(ToolCapabilityGroup::Ssh);
+    const bool pythonToolAvailable = includesGroup(ToolCapabilityGroup::Python);
     const bool respondInRussian = !history.empty() && containsCyrillicUtf8(history.back().content);
     String systemPrompt = respondInRussian
         ? String("The required response language is Russian. Answer only in Russian unless the user explicitly asks for another language. ")
@@ -446,6 +458,17 @@ String buildToolChatRequest(const Settings& settings,
         if (requiresGroup(ToolCapabilityGroup::Ssh)) {
             systemPrompt +=
                 " The current request requires an SSH tool call before the final answer.";
+        }
+    }
+    if (pythonToolAvailable) {
+        systemPrompt +=
+            " The python_run tool can request one foreground run of an existing project-linked .py file. "
+            "Every run requires the user to inspect and approve the exact bytes before CardMind reboots; "
+            "never claim that approved MicroPython code is sandboxed. "
+            "Call python_run only after all other required tool groups are complete.";
+        if (requiresGroup(ToolCapabilityGroup::Python)) {
+            systemPrompt +=
+                " The current request requires a python_run tool call before the final answer.";
         }
     }
     const std::string userInstructionScopes = buildUserInstructionScopes(

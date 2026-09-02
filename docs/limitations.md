@@ -56,6 +56,26 @@ files. Open **Web Console → Start Python workspace**. Browser launches hand of
 current authenticated session automatically; launches from the Cardputer show the IP
 address and installation password before restart.
 
+A model-requested run is a separate one-shot path. It always stops for **Allow once**,
+even when Python policy is Allow. Approval covers one normalized project-linked `.py`
+path, exact byte size, and SHA-256; review the complete source before approving. A
+changed file or identity, another run, or stale approval after restart requires new
+approval. Off, Deny, malformed tool input, or lack of one-run approval prevents the
+handoff. Before switching modes, CardMind rechecks the approved path, size, SHA-256,
+and source. After the switch, MicroPython rechecks the staged request and source before
+execution; a mismatch there returns to CardMind without running the script. A later
+result-integrity failure may mean effects are unknown; CardMind reports that and never
+replays the run.
+
+Approved bytes run as privileged MicroPython code with full device access; this is not
+a sandbox. CardMind runs one foreground script, then returns bounded stdout, stderr,
+and exit state to the originating chat. The fixed watchdog returns from an ordinary
+unresponsive one-shot, but approved privileged code can feed or disable the watchdog or
+alter boot behavior. It is recovery for accidental hangs, not a sandbox, containment
+boundary, or adversarial timeout guarantee. If execution may already have had effects
+but no valid complete result survived, CardMind reports that uncertainty and never
+automatically replays the script.
+
 This is MicroPython, not desktop CPython. Native CPython wheels, large data-science
 packages, subprocesses, and operating-system APIs are unavailable. Only one user
 script runs at a time. A runaway script cannot be force-stopped safely; use **Restart

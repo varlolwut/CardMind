@@ -15,6 +15,7 @@ enum class ToolActivityTarget : std::uint8_t {
     Web,
     ProjectFiles,
     SelectedSsh,
+    Python,
 };
 
 enum class ToolActivityStatus : std::uint8_t {
@@ -58,6 +59,12 @@ OperationResult initializeToolActivityJournal();
 ToolActivityResult startToolActivity(const std::string& tool);
 OperationResult finishToolActivity(
     const ToolActivityRecord& running,
+    ToolActivityStatus status,
+    std::uint32_t durationMs,
+    std::uint32_t outputBytes,
+    ToolActivityExitStatus exitStatus);
+OperationResult finishPersistedToolActivity(
+    std::uint64_t sequence,
     ToolActivityStatus status,
     std::uint32_t durationMs,
     std::uint32_t outputBytes,

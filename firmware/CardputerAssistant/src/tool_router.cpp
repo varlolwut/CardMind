@@ -1,6 +1,7 @@
 #include "tool_router.h"
 
 #include "file_workspace.h"
+#include "python_mode.h"
 #include "sftp_tool.h"
 #include "ssh_tool.h"
 #include "storage.h"
@@ -135,7 +136,8 @@ bool isFilesSchema(ToolSchemaId schema) noexcept
     return schema == ToolSchemaId::ListFiles ||
         schema == ToolSchemaId::ReadFile ||
         schema == ToolSchemaId::WriteFile ||
-        schema == ToolSchemaId::AppendFile;
+        schema == ToolSchemaId::AppendFile ||
+        schema == ToolSchemaId::PythonRun;
 }
 
 ToolExecutionResult dispatchToolCall(
@@ -166,6 +168,8 @@ ToolExecutionResult dispatchToolCall(
             return executeSftpWriteTool(call, isCancelled);
         case ToolSchemaId::SftpMove:
             return executeSftpMoveTool(call, isCancelled);
+        case ToolSchemaId::PythonRun:
+            return confirmationRequiredTool(call.name);
         case ToolSchemaId::Count:
             break;
     }
@@ -179,6 +183,9 @@ ToolExecutionResult dispatchProjectToolCall(
     const ToolCall& call,
     const CancelCallback& isCancelled)
 {
+    if (schema == ToolSchemaId::PythonRun) {
+        return confirmationRequiredTool(call.name);
+    }
     if (isFilesSchema(schema)) {
         return executeControlledProjectWorkspaceTool(
             projectId, call, isCancelled);
@@ -241,6 +248,7 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
+    bool pythonAvailable,
     std::uint64_t selectedSshProfileId)
 {
     ToolAvailabilitySet availability = {};
@@ -264,8 +272,13 @@ ToolPolicyResolutionResult resolveChatToolPermissions(
         sshAvailable;
     availability[static_cast<std::size_t>(ToolCapability::SftpReadWrite)] =
         sshAvailable;
+    availability[static_cast<std::size_t>(ToolCapability::PythonWriteRun)] =
+        pythonAvailable;
+    ToolPermissionPolicy builtIn = defaultGlobalToolPermissionPolicy();
+    builtIn[static_cast<std::size_t>(ToolCapability::PythonWriteRun)] =
+        ToolPermission::Allow;
     return resolveToolPolicy(
-        defaultGlobalToolPermissionPolicy(), settings.masterToolPolicy,
+        builtIn, settings.masterToolPolicy,
         project.toolPolicy, chat.toolPolicy, intent, availability);
 }
 
@@ -277,11 +290,12 @@ ToolRequestPlan resolveChatToolRequestPlan(
     bool filesReadable,
     bool filesWritable,
     bool webStorageWritable,
+    bool pythonAvailable,
     std::uint64_t selectedSshProfileId)
 {
     const ToolPolicyResolutionResult resolution = resolveChatToolPermissions(
         settings, project, chat, intent, filesReadable, filesWritable,
-        webStorageWritable, selectedSshProfileId);
+        webStorageWritable, pythonAvailable, selectedSshProfileId);
     return buildToolRequestPlan(resolution, intent);
 }
 
@@ -351,6 +365,11 @@ ToolExecutionResult routeProjectToolCall(const Settings& settings,
     if (authorization != ToolRouteAuthorization::Allow) {
         return toolAuthorizationFailure(authorization, call.name);
     }
+    if (toolConfirmationReason(
+            ToolPermissionDecision::Allow, entry->schema, false) !=
+        ToolConfirmationReason::None) {
+        return confirmationRequiredTool(call.name);
+    }
     if (entry->schema == ToolSchemaId::WriteFile) {
         const WorkspaceWriteTargetResult target =
             inspectProjectWorkspaceWriteTarget(projectId, call);
@@ -395,18 +414,108 @@ PendingToolDecisionResult approvePendingProjectToolCall(
     const Settings& settings,
     const ToolRequestPlan& currentPlan,
     const String& pendingId,
+    PythonRunReturnSurface returnSurface,
     const CancelCallback& isCancelled)
 {
     PendingToolCallResult claimed = claimPendingToolCallApproval(
         pendingId, currentPlan);
     if (!claimed.success) {
-        return {false, {}, {}, claimed.error};
+        return {false, false, {}, {}, claimed.error};
+    }
+    const ToolCatalogEntry* entry = toolCatalogEntryForName(
+        claimed.pending.continuation.call.name);
+    if (entry != nullptr && entry->schema == ToolSchemaId::PythonRun) {
+        OperationResult ready = revalidateClaimedPendingToolCall(
+            claimed.pending);
+        if (!ready.success) {
+            return {
+                true, false, std::move(claimed.pending),
+                invalidToolCall(ready.error), "",
+            };
+        }
+        const OperationResult prepared = preparePythonRunStaging();
+        if (!prepared.success) {
+            return {
+                false, false, std::move(claimed.pending), {}, prepared.error,
+            };
+        }
+        ToolActivityResult started = startToolActivity("python_run");
+        if (!started.success) {
+            return {
+                true, false, std::move(claimed.pending),
+                activityUnavailable(started.error), "",
+            };
+        }
+        bool cancelled = false;
+        const CancelCallback latchedCancellation = [&]() {
+            cancelled = cancelled || isCancelled();
+            return cancelled;
+        };
+        PythonRunStageResult staged = {
+            false, false, false, "Tool execution canceled by user",
+        };
+        if (!latchedCancellation()) {
+            staged = stagePythonRun({
+                claimed.pending.pendingId,
+                claimed.pending.target.name,
+                claimed.pending.target.size,
+                claimed.pending.target.sha256,
+                started.activity.sequence,
+                returnSurface,
+            }, latchedCancellation);
+        }
+        if (cancelled) {
+            const OperationResult finished = finishToolActivity(
+                started.activity, ToolActivityStatus::Canceled, 0, 0,
+                {false, 0});
+            String error = staged.error;
+            if (error.isEmpty()) error = "Tool execution canceled by user";
+            if (!finished.success) {
+                error += "; audit finish failed: " + finished.error;
+            }
+            if (!pythonRunStageFailureAllowsContinuation(staged)) {
+                return {
+                    false, false, std::move(claimed.pending), {}, error,
+                };
+            }
+            return {
+                true, false, std::move(claimed.pending),
+                {
+                    false, "", error, ToolExecutionOutcome::Cancelled,
+                    false, 0,
+                },
+                "",
+            };
+        }
+        if (!staged.success) {
+            const OperationResult finished = finishToolActivity(
+                started.activity, ToolActivityStatus::Failed, 0, 0,
+                {false, 0});
+            String error = staged.error;
+            if (!finished.success) {
+                error += "; audit finish failed: " + finished.error;
+            }
+            if (!pythonRunStageFailureAllowsContinuation(staged)) {
+                return {
+                    false, false, std::move(claimed.pending), {}, error,
+                };
+            }
+            return {
+                true, false, std::move(claimed.pending),
+                invalidToolCall(error), "",
+            };
+        }
+        return {
+            true, true, std::move(claimed.pending),
+            {true, "", ""}, "",
+        };
     }
     ToolExecutionResult executed = executeConfirmedProjectToolCall(
         settings, claimed.pending.projectId,
         claimed.pending.continuation.call, isCancelled);
     return {
         true,
+        false,
         std::move(claimed.pending),
         std::move(executed),
         "",
@@ -418,13 +527,14 @@ PendingToolDecisionResult denyPendingProjectToolCall(
 {
     PendingToolCallResult denied = denyPendingToolCall(pendingId);
     if (!denied.success) {
-        return {false, {}, {}, denied.error};
+        return {false, false, {}, {}, denied.error};
     }
     const String error = "Tool '" +
         String(denied.pending.continuation.call.name.c_str()) +
         "' was denied by the user";
     return {
         true,
+        false,
         std::move(denied.pending),
         {
             false,

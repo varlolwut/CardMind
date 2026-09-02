@@ -19,8 +19,8 @@ the device; it does not run alongside Bruce or another firmware.
   file lists, and bounded viewing, editing, upload, download, and SFTP transfers.
 - Standalone SSH terminal and SFTP browser on the Cardputer and in the protected Web
   console.
-- A MicroPython mode for small scripts stored in the same microSD workspace that
-  CardMind and the model use.
+- A MicroPython mode for small scripts in the shared microSD workspace, including
+  one approved foreground model run that returns bounded output to its originating chat.
 - Offline notes, checklists, timers, calculator, QR rendering, diagnostics, and
   verified firmware updates.
 

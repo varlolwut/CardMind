@@ -224,6 +224,10 @@ const requiredFragments = [
     'new_chat_tool_policy:',
     '>Default model</label>',
     "event.type==='pending'",
+    "event.type==='handoff'",
+    'function showPythonRunHandoff()',
+    'Date.now()+60000',
+    'python_run_return=',
 ];
 
 for (const fragment of requiredFragments) {
@@ -517,6 +521,9 @@ if (promptStreamCompletionError("", "done", "") !== "") {
 if (promptStreamCompletionError("", "pending", "Waiting for confirmation") !== "") {
     throw new Error("A pending SSE terminal event was rejected");
 }
+if (promptStreamCompletionError("", "handoff", "Python is running") !== "") {
+    throw new Error("A Python handoff SSE terminal event was rejected");
+}
 if (!promptStreamCompletionError(firstChunk.buffer, "", "").includes("incomplete")) {
     throw new Error("A partial final SSE event was accepted");
 }
@@ -542,6 +549,14 @@ const summaryWithPending = summarizeSseEvents([{
 if (summaryWithPending.terminalType !== "pending" ||
     summaryWithPending.streamError !== "Waiting for confirmation") {
     throw new Error("A pending SSE event was not treated as terminal");
+}
+const summaryWithHandoff = summarizeSseEvents([{
+    type: "handoff",
+    message: "Python is running",
+}], "", "");
+if (summaryWithHandoff.terminalType !== "handoff" ||
+    summaryWithHandoff.streamError !== "Python is running") {
+    throw new Error("A Python handoff SSE event was not treated as terminal");
 }
 
 const terminalStart = page.indexOf("const terminalScreen=");

@@ -28,6 +28,8 @@ constexpr std::array<ToolCatalogEntry, kToolCatalogSize> kToolCatalog = {{
      ToolCapability::SftpReadWrite},
     {ToolSchemaId::SshSafeAction, "ssh_safe_action",
      ToolCapabilityGroup::Ssh, ToolCapability::SshRead},
+    {ToolSchemaId::PythonRun, "python_run",
+     ToolCapabilityGroup::Python, ToolCapability::PythonWriteRun},
 }};
 
 constexpr std::array<SshSafeActionEntry, kSshSafeActionCount>
@@ -208,6 +210,7 @@ ToolConfirmationReason toolConfirmationReason(
         return ToolConfirmationReason::None;
     }
     if (schema == ToolSchemaId::SshCommand ||
+        schema == ToolSchemaId::PythonRun ||
         ((schema == ToolSchemaId::WriteFile ||
           schema == ToolSchemaId::SftpWrite ||
           schema == ToolSchemaId::SftpMove) && mutatesExistingTarget)) {

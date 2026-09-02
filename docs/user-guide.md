@@ -110,6 +110,23 @@ and **Start Python workspace** action.
 The **AI** carousel card contains the **Default model**, API and service setup, global
 instructions, **Master access**, **Defaults for new chats**, pending confirmations, and
 recent tool activity.
+
+### Run a model-written Python script
+
+Ask the model to create a project-linked `.py` file, then ask it to run that file. Every
+run requires **Allow once**, including when Python policy is Allow. Before approving,
+open the complete source and check the displayed path, byte size, and SHA-256. Approval
+authorizes only those exact bytes for that one run; changed or stale input requires a
+new approval. The code has full MicroPython device access and is not sandboxed.
+
+After approval, CardMind restarts into MicroPython and runs one foreground script under a
+fixed watchdog. On the ordinary path, normal completion or the fixed watchdog returns the
+device to CardMind. Authorized privileged code is not sandboxed and can defeat that recovery
+or alter boot behavior. The originating chat receives bounded stdout, stderr, and exit state,
+or an effects-unknown failure when execution may have started without a valid durable result.
+CardMind never automatically retries that run.
+The existing manual Python workspace remains available for interactive work.
+
 Device contains display and power preferences, API setup, firmware update, and
 diagnostics. Network and Python controls have dedicated carousel
 cards. Help lists the global shortcuts; feature screens show their local controls.

@@ -1,8 +1,10 @@
 import _thread
 import binascii
+import builtins
 import esp32
 import gc
 import hashlib
+import io
 import json
 import machine
 import network
@@ -20,6 +22,17 @@ _UPDATE_PATH = "/sd/assistant/update.bin"
 _SCRIPT_ROOT = "/sd/assistant/files"
 _MAXIMUM_SCRIPT_BYTES = 65536
 _MAXIMUM_OUTPUT_BYTES = 16384
+_RUN_REQUEST_PATH = "/sd/assistant/v2/python_run_request.json"
+_RUN_RESULT_PATH = "/sd/assistant/v2/python_run_result.json"
+_RUN_RESULT_TEMPORARY_PATH = "/sd/assistant/v2/python_run_result.json.tmp"
+_RUN_BLOB_BYTES = 91
+_RUN_REQUEST_MAXIMUM_BYTES = 1024
+_RUN_RESULT_MAXIMUM_BYTES = 24576
+_RUN_VERSION = 1
+_RUN_PENDING = 1
+_RUN_CLAIMED = 2
+_RUN_COMPLETE = 3
+_RUN_WDT_MS = 30000
 _HTTP_LIMIT_BYTES = 73728
 _SESSION_SECONDS = 900
 
@@ -55,6 +68,338 @@ def _clear_key(namespace, key):
     except OSError as error:
         if error.args[0] != -4354:
             raise
+
+
+def _read_bounded_bytes(path, maximum_bytes):
+    size = os.stat(path)[6]
+    if size < 0 or size > maximum_bytes:
+        raise ValueError("{} exceeds its byte limit".format(path))
+    with open(path, "rb") as source:
+        value = source.read(size + 1)
+    if len(value) != size:
+        raise ValueError("{} changed or ended before its exact size".format(path))
+    return value
+
+
+def _sha256(value):
+    return hashlib.sha256(value).digest()
+
+
+def _decode_u64(value, offset):
+    result = 0
+    for index in range(8):
+        result |= value[offset + index] << (index * 8)
+    return result
+
+
+def _valid_hex(value, length):
+    if len(value) != length:
+        return False
+    for character in value:
+        if character not in "0123456789abcdef":
+            return False
+    return True
+
+
+def _parse_run_blob(value):
+    if len(value) != _RUN_BLOB_BYTES or value[0] != _RUN_VERSION:
+        raise ValueError("Python run state must be the exact 91-byte version 1 record")
+    state = value[1]
+    surface = value[2]
+    pending_id = bytes(value[3:19]).decode("ascii")
+    request_sha = bytes(value[19:51])
+    result_sha = bytes(value[51:83])
+    audit_sequence = _decode_u64(value, 83)
+    if state not in (_RUN_PENDING, _RUN_CLAIMED, _RUN_COMPLETE):
+        raise ValueError("Python run state value is invalid")
+    if surface not in (1, 2) or not _valid_hex(pending_id, 16):
+        raise ValueError("Python run identity or return surface is invalid")
+    if audit_sequence == 0 or request_sha == b"\x00" * 32:
+        raise ValueError("Python run hash or audit sequence is invalid")
+    if state == _RUN_COMPLETE:
+        if result_sha == b"\x00" * 32:
+            raise ValueError("Complete Python run has no result hash")
+    elif result_sha != b"\x00" * 32:
+        raise ValueError("Incomplete Python run unexpectedly has a result hash")
+    return {
+        "state": state,
+        "surface": surface,
+        "pending_id": pending_id,
+        "request_sha": request_sha,
+        "audit_sequence": audit_sequence,
+    }
+
+
+def _persist_run_blob(namespace, value):
+    namespace.set_blob("run", bytes(value))
+    namespace.commit()
+
+
+def _safe_one_shot_path(value):
+    if not isinstance(value, str) or not value.endswith(".py"):
+        return False
+    encoded = value.encode("utf-8")
+    if not encoded or len(encoded) > 512 or value.startswith("/") or value.endswith("/"):
+        return False
+    if "\\" in value or "\x00" in value:
+        return False
+    for segment in value.split("/"):
+        if not segment or segment in (".", ".."):
+            return False
+    return True
+
+
+def _strict_request(blob):
+    request_bytes = _read_bounded_bytes(_RUN_REQUEST_PATH, _RUN_REQUEST_MAXIMUM_BYTES)
+    if _sha256(request_bytes) != blob["request_sha"]:
+        raise ValueError("Python run request SHA-256 mismatch")
+    request = json.loads(request_bytes.decode("utf-8"))
+    fields = {
+        "version", "pending_id", "path", "size", "sha256",
+        "audit_sequence", "surface",
+    }
+    if not isinstance(request, dict) or set(request.keys()) != fields:
+        raise ValueError("Python run request fields are invalid")
+    if type(request["version"]) is not int or request["version"] != _RUN_VERSION or type(request["size"]) is not int:
+        raise ValueError("Python run request version or size type is invalid")
+    if type(request["audit_sequence"]) is not int:
+        raise ValueError("Python run audit sequence type is invalid")
+    surface = "web" if blob["surface"] == 2 else "device"
+    if request["pending_id"] != blob["pending_id"] or request["surface"] != surface:
+        raise ValueError("Python run request identity or surface mismatch")
+    if request["audit_sequence"] != blob["audit_sequence"]:
+        raise ValueError("Python run request audit sequence mismatch")
+    if not _safe_one_shot_path(request["path"]):
+        raise ValueError("Python run path is not a normalized Shared .py path")
+    if request["size"] < 0 or request["size"] > _MAXIMUM_SCRIPT_BYTES:
+        raise ValueError("Python run source size is outside 0..65536 bytes")
+    if not isinstance(request["sha256"], str) or not _valid_hex(request["sha256"], 64):
+        raise ValueError("Python run source SHA-256 is invalid")
+    path = _SCRIPT_ROOT + "/" + request["path"]
+    source_bytes = _read_bounded_bytes(path, _MAXIMUM_SCRIPT_BYTES)
+    if len(source_bytes) != request["size"]:
+        raise ValueError("Python run source size mismatch")
+    if binascii.hexlify(_sha256(source_bytes)).decode() != request["sha256"]:
+        raise ValueError("Python run source SHA-256 mismatch")
+    source = source_bytes.decode("utf-8")
+    return path, source
+
+
+class _OneShotBudget:
+    def __init__(self):
+        self.remaining = _MAXIMUM_OUTPUT_BYTES
+
+
+class _OneShotWriter(io.IOBase):
+    def __init__(self, budget):
+        self._budget = budget
+        self._parts = []
+        self.truncated = False
+
+    def write(self, value):
+        if isinstance(value, str):
+            encoded = value.encode("utf-8")
+            consumed = len(value)
+        elif isinstance(value, bytearray):
+            encoded = value
+            consumed = len(value)
+        else:
+            raise TypeError("One-shot output accepts only str or bytearray")
+        take = min(len(encoded), self._budget.remaining)
+        while take > 0 and take < len(encoded) and encoded[take] & 0xC0 == 0x80:
+            take -= 1
+        if take:
+            self._parts.append(encoded[:take].decode("utf-8"))
+            self._budget.remaining -= take
+        if take != len(encoded):
+            self.truncated = True
+        return consumed
+
+    def flush(self):
+        return None
+
+    def value(self):
+        return "".join(self._parts)
+
+
+class _OneShotSys:
+    def __init__(self, original, stdout, stderr):
+        self._original = original
+        self.stdout = stdout
+        self.stderr = stderr
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+def _make_one_shot_print(native_print, native_stdout, native_stderr, stdout, stderr):
+    def one_shot_print(*values, **options):
+        routed = dict(options)
+        if "file" not in routed or routed["file"] is native_stdout:
+            routed["file"] = stdout
+        elif routed["file"] is native_stderr:
+            routed["file"] = stderr
+        return native_print(*values, **routed)
+
+    return one_shot_print
+
+
+def _restore_module_entry(modules, name, existed, value):
+    if existed:
+        modules[name] = value
+    elif name in modules:
+        del modules[name]
+
+
+def _base64_utf8(value):
+    return binascii.b2a_base64(value.encode("utf-8")).strip().decode("ascii") if value else ""
+
+
+def _path_exists(path):
+    try:
+        os.stat(path)
+        return True
+    except OSError as error:
+        if error.args[0] == 2:
+            return False
+        raise
+
+
+def _verify_file_hash(path, maximum_bytes, expected_size, expected_sha):
+    value = _read_bounded_bytes(path, maximum_bytes)
+    if len(value) != expected_size or _sha256(value) != expected_sha:
+        raise RuntimeError("Python run result durability readback mismatch")
+
+
+def _persist_result(namespace, run_blob, blob, exit_status, stdout, stderr):
+    result = {
+        "version": _RUN_VERSION,
+        "pending_id": blob["pending_id"],
+        "audit_sequence": blob["audit_sequence"],
+        "exit_status": exit_status,
+        "stdout_b64": _base64_utf8(stdout.value()),
+        "stderr_b64": _base64_utf8(stderr.value()),
+        "stdout_truncated": stdout.truncated,
+        "stderr_truncated": stderr.truncated,
+    }
+    serialized = json.dumps(result).encode("utf-8")
+    if len(serialized) > _RUN_RESULT_MAXIMUM_BYTES:
+        raise RuntimeError("Python run result exceeds 24576 bytes")
+    if _path_exists(_RUN_RESULT_TEMPORARY_PATH) or _path_exists(_RUN_RESULT_PATH):
+        raise RuntimeError("Python run result path is not clean")
+    output = open(_RUN_RESULT_TEMPORARY_PATH, "wb")
+    try:
+        written = output.write(serialized)
+        if written != len(serialized):
+            raise OSError("Python run result write was incomplete")
+        output.flush()
+    finally:
+        output.close()
+    os.sync()
+    result_sha = _sha256(serialized)
+    _verify_file_hash(
+        _RUN_RESULT_TEMPORARY_PATH, _RUN_RESULT_MAXIMUM_BYTES,
+        len(serialized), result_sha,
+    )
+    if _path_exists(_RUN_RESULT_PATH):
+        raise RuntimeError("Python run final result unexpectedly exists")
+    os.rename(_RUN_RESULT_TEMPORARY_PATH, _RUN_RESULT_PATH)
+    os.sync()
+    _verify_file_hash(
+        _RUN_RESULT_PATH, _RUN_RESULT_MAXIMUM_BYTES,
+        len(serialized), result_sha,
+    )
+    run_blob[1] = _RUN_COMPLETE
+    run_blob[51:83] = result_sha
+    _persist_run_blob(namespace, run_blob)
+
+
+def _normalize_exit_status(error, stderr):
+    code = error.args[0] if error.args else 0
+    if type(code) is int and -2147483648 <= code <= 2147483647:
+        return code
+    stderr.write("SystemExit status is not a signed 32-bit integer; using 1\n")
+    return 1
+
+
+def _execute_one_shot(namespace, run_blob, blob):
+    _cardmind_partition().set_boot()
+    run_blob[1] = _RUN_CLAIMED
+    _persist_run_blob(namespace, run_blob)
+    watchdog = machine.WDT(0, timeout=_RUN_WDT_MS)
+    _mount_sd()
+    budget = _OneShotBudget()
+    stdout = _OneShotWriter(budget)
+    stderr = _OneShotWriter(budget)
+    exit_status = 0
+    modules = sys.modules
+    sys_existed = "sys" in modules
+    original_sys = modules.get("sys")
+    usys_existed = "usys" in modules
+    original_usys = modules.get("usys")
+    native_print = builtins.print
+    proxy = _OneShotSys(sys, stdout, stderr)
+    print_adapter = _make_one_shot_print(
+        native_print, sys.stdout, sys.stderr, stdout, stderr
+    )
+    sys_hooked = False
+    usys_hooked = False
+    print_hooked = False
+    try:
+        modules["sys"] = proxy
+        sys_hooked = True
+        modules["usys"] = proxy
+        usys_hooked = True
+        builtins.print = print_adapter
+        print_hooked = True
+        path, source = _strict_request(blob)
+        scope = {"__name__": "__main__", "__file__": path}
+        exec(source, scope, scope)
+    except SystemExit as error:
+        exit_status = _normalize_exit_status(error, stderr)
+    except BaseException as error:
+        exit_status = 1
+        sys.print_exception(error, stderr)
+    finally:
+        if print_hooked:
+            del builtins.print
+        if usys_hooked:
+            _restore_module_entry(modules, "usys", usys_existed, original_usys)
+        if sys_hooked:
+            _restore_module_entry(modules, "sys", sys_existed, original_sys)
+    _persist_result(namespace, run_blob, blob, exit_status, stdout, stderr)
+    print("PYTHON_RUN result=complete pending_id={} exit_status={}".format(
+        blob["pending_id"], exit_status
+    ))
+    time.sleep_ms(100)
+    machine.reset()
+    return watchdog
+
+
+def _start_one_shot_if_present(namespace):
+    run_blob = bytearray(_RUN_BLOB_BYTES)
+    try:
+        length = namespace.get_blob("run", run_blob)
+    except OSError as error:
+        if error.args[0] == -4354:
+            return False
+        raise
+    if length != _RUN_BLOB_BYTES:
+        _cardmind_partition().set_boot()
+        machine.reset()
+        return True
+    try:
+        blob = _parse_run_blob(run_blob)
+    except ValueError:
+        _cardmind_partition().set_boot()
+        machine.reset()
+        return True
+    if blob["state"] != _RUN_PENDING:
+        _cardmind_partition().set_boot()
+        machine.reset()
+        return True
+    _execute_one_shot(namespace, run_blob, blob)
+    return True
 
 
 def _mount_sd():
@@ -532,6 +877,8 @@ def _serve(password, address, namespace):
 def start():
     esp32.Partition.mark_app_valid_cancel_rollback()
     namespace = esp32.NVS(_CONFIG_NAMESPACE)
+    if _start_one_shot_if_present(namespace):
+        return
     _clear_key(namespace, "mode_error")
     namespace.commit()
     _mount_sd()
