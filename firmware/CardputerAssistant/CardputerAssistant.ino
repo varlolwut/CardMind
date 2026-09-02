@@ -3250,8 +3250,7 @@ PythonRunStartupResult consumePythonRunAtStartup()
                 std::string().swap(pending.pending.continuation.call.arguments);
                 return {false, false, false, validated.error};
             }
-        } else if (requestPresent || requestTemporaryPresent ||
-                   resultPresent || resultTemporaryPresent) {
+        } else if (resultPresent || resultTemporaryPresent) {
             std::string().swap(pending.pending.continuation.call.arguments);
             return {false, false, false,
                     "Detached Python artifacts are malformed or ambiguous"};

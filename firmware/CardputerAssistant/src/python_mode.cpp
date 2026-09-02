@@ -335,35 +335,60 @@ OperationResult decodePythonRunRequest(
     return {true, ""};
 }
 
-OperationResult writeRequestFile(const std::string& request)
+struct PythonRunRequestWriteResult {
+    bool success;
+    bool startupRecoveryRequired;
+    String error;
+};
+
+PythonRunRequestWriteResult failedRequestWrite(const String& error)
+{
+    const OperationResult temporaryCleanup = removeOwnedFile(
+        kPythonRunRequestTemporaryPath);
+    const OperationResult requestCleanup = removeOwnedFile(
+        kPythonRunRequestPath);
+    String combinedError = error;
+    if (!temporaryCleanup.success) {
+        combinedError += "; temporary request cleanup failed: " +
+            temporaryCleanup.error;
+    }
+    if (!requestCleanup.success) {
+        combinedError += "; request cleanup failed: " + requestCleanup.error;
+    }
+    return {
+        false,
+        !temporaryCleanup.success || !requestCleanup.success,
+        combinedError,
+    };
+}
+
+PythonRunRequestWriteResult writeRequestFile(const std::string& request)
 {
     File file = SD.open(kPythonRunRequestTemporaryPath, FILE_WRITE);
     if (!file) {
-        return {false, "Failed to create temporary Python run request"};
+        return failedRequestWrite(
+            "Failed to create temporary Python run request");
     }
     const std::size_t written = file.write(
         reinterpret_cast<const std::uint8_t*>(request.data()), request.size());
     file.flush();
     file.close();
     if (written != request.size()) {
-        removeOwnedFile(kPythonRunRequestTemporaryPath);
-        return {false, "Python run request write was incomplete"};
+        return failedRequestWrite("Python run request write was incomplete");
     }
     std::string verified;
     OperationResult result = readBoundedFile(
         kPythonRunRequestTemporaryPath, kPythonRunRequestMaximumBytes, verified);
     if (!result.success || verified != request) {
-        removeOwnedFile(kPythonRunRequestTemporaryPath);
-        return {false, result.success
+        return failedRequestWrite(result.success
             ? String("Python run request readback does not match")
-            : result.error};
+            : result.error);
     }
     if (SD.exists(kPythonRunRequestPath) ||
         !SD.rename(kPythonRunRequestTemporaryPath, kPythonRunRequestPath)) {
-        removeOwnedFile(kPythonRunRequestTemporaryPath);
-        return {false, "Failed to commit Python run request"};
+        return failedRequestWrite("Failed to commit Python run request");
     }
-    return {true, ""};
+    return {true, false, ""};
 }
 
 OperationResult verifyPythonSource(const PythonRunStageRequest& request)
@@ -775,7 +800,7 @@ PythonRunStageResult stagePythonRun(
     const std::function<bool()>& isCancelled)
 {
     OperationResult result = verifyPythonSource(request);
-    if (!result.success) return {false, false, result.error};
+    if (!result.success) return {false, false, false, result.error};
 
     JsonDocument document;
     document["version"] = kPythonRunVersion;
@@ -790,16 +815,23 @@ PythonRunStageResult stagePythonRun(
     serialized.reserve(measureJson(document));
     serializeJson(document, serialized);
     if (serialized.empty() || serialized.size() > kPythonRunRequestMaximumBytes) {
-        return {false, false, "Python run request exceeds 1024 bytes"};
+        return {false, false, false,
+                "Python run request exceeds 1024 bytes"};
     }
     std::array<std::uint8_t, 32> requestDigest = {};
     if (!sha256Bytes(
             reinterpret_cast<const std::uint8_t*>(serialized.data()),
             serialized.size(), requestDigest)) {
-        return {false, false, "Failed to hash Python run request"};
+        return {false, false, false, "Failed to hash Python run request"};
     }
-    result = writeRequestFile(serialized);
-    if (!result.success) return {false, false, result.error};
+    const PythonRunRequestWriteResult writtenRequest =
+        writeRequestFile(serialized);
+    if (!writtenRequest.success) {
+        return {
+            false, false, writtenRequest.startupRecoveryRequired,
+            writtenRequest.error,
+        };
+    }
 
     PythonRunBlob blob = {
         PythonRunState::Pending,
@@ -822,11 +854,15 @@ PythonRunStageResult stagePythonRun(
         if (!requestCleanup.success) {
             error += "; request cleanup failed: " + requestCleanup.error;
         }
-        return {false, false, error};
+        return {
+            false, false,
+            !temporaryCleanup.success || !requestCleanup.success,
+            error,
+        };
     }
     result = writeRunBlob(blob);
     if (!result.success) {
-        return {false, false,
+        return {false, false, true,
                 result.error +
                     "; request and run state retained for startup recovery"};
     }
@@ -840,9 +876,11 @@ PythonRunStageResult stagePythonRun(
         String error = String("Failed to select MicroPython for approved run: ESP error ") +
             static_cast<int>(selected);
         if (!cleaned.success) error += "; cleanup failed: " + cleaned.error;
-        return {false, false, error};
+        return {
+            false, false, !discarded.success || !cleaned.success, error,
+        };
     }
-    return {true, true, ""};
+    return {true, true, false, ""};
 }
 
 PythonRunRecoveryResult loadPythonRunRecovery()

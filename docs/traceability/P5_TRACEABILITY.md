@@ -85,6 +85,7 @@ partial protocol. The top-level execution matrix remains authoritative for atomi
 | P5-02f | Exact installed-image delivery plus bounded staged Web proofs for `complete` and `claimed`, no replay, originating-chat return, resources and exact cleanup | Architect accepted both installed runtime boundaries with the claimed marker limitation retained explicitly; no repeat, physical step, recovery chain or retained/broad harness | completed |
 | P5-02g | Architect row closure, exact commit/push/remote verification | Reconciled row-owned diff/evidence, Architect closure GO, one exact row commit, immediate push and authenticated remote SHA | completed |
 | P5-02h | Reopened cancellation correction at the existing router/staging boundary | Cancellation is latched before staging and at the last reversible pre-run-commit point; request/temp exact-cleaned; no runnable run state, boot change or handoff; activity/result use existing canceled semantics | completed |
+| P5-02i | Reopened recovery ownership for ambiguous staging failures | Safely-cleaned failures retain ordinary handling; request/possible-run ambiguity preserves exact claimed pending, blocks continuation/clear/handoff/replay/acknowledgement and remains under startup recovery ownership | completed |
 | P5-03 | Phase reconciliation, CI/PR/review/merge to `develop` | Full phase audit, required regressions and documentation, green CI, reviewed PR and merge only to `develop` | completed |
 
 ## P5-01 active gate
@@ -1267,3 +1268,161 @@ P5 adds no serial selector, fixture, runner or diagnostic subsystem there.
   MCP lookups with the exact identity and four row-owned paths. P5-03 has passed its mandatory
   closure review and is completed, leaving zero active rows while its exact atomic commit and remote
   publication are performed.
+
+## P5-02i recovery-owned staging failure reopen gate
+
+**Started:** 2026-09-02T17:40:03+03:00.
+
+**Completed:** 2026-09-02T18:36:00+03:00.
+
+- Architect's full-phase review at exact published head
+  `60356ebe73983944485b999f6f1ef6381e32172e` returned `STOP` on one production crash-ownership
+  defect. `stagePythonRun()` can report failure after `writeRunBlob()` while retaining the request
+  and possibly durable run state, but `approvePendingProjectToolCall()` currently converts every
+  staging failure into a successful pending decision with an ordinary invalid-tool result. Device
+  and Web consumers can then continue the model and clear the exact `ClaimedApprove` pending,
+  contradicting the retained startup-recovery/no-generic-continuation contract.
+- P5-02 is reopened only as P5-02i and is the sole `in_progress` owner. P5-03 remains completed;
+  exact-head PR/CI/full-phase closure and merge are frozen. Phase 6 remains untouched and cannot be
+  activated after P5 closure because the user will restart the system first.
+- The correction must distinguish safely-cleaned ordinary staging failure from recovery-owned or
+  ambiguous staging failure through one explicit typed signal in existing owners. `writeRunBlob()`
+  failure is recovery-owned. Boot-selection failure is ordinary only when both run-state discard and
+  artifact cleanup are verified successful; otherwise it is recovery-owned. Recovery-owned failure
+  attempts the existing Failed audit, returns a non-success pending decision, preserves exact
+  `ClaimedApprove`, and performs no model continuation, pending clear, boot handoff, replay or generic
+  acknowledgement. Deterministic pre-run, cancellation and safely-cleaned failure behavior remains
+  unchanged.
+- No recovery manager, persistence/status store, route, module, framework, error-text parsing, broad
+  fault-injection harness, NVS/SD mock, build, CI, Device, Web or runtime action is authorized before
+  the producer/consumer inventory, minimal design, executable proof and exact write set receive
+  Architect pre-edit `GO`.
+- Frozen producer inventory: `stagePythonRun()` is the sole producer of `PythonRunStageResult` and
+  `approvePendingProjectToolCall()` is its sole caller. Source verification, request serialization
+  bounds and request hashing fail before an SD artifact can be created and remain ordinary.
+  `writeRequestFile()` is the sole request writer; after any open/write/readback/rename failure it
+  must attempt and retain the exact cleanup results for both temporary and committed request paths.
+  Its failure is ordinary only when those exact-owned artifacts are verified absent/removed;
+  otherwise it is recovery-owned. After a committed request, cancellation is ordinary only when both
+  temporary/request cleanup results verify success; either failure is recovery-owned. A
+  `writeRunBlob()` failure remains recovery-owned because the request remains and `run` may be absent,
+  partial or durable. After boot selection failure, ordinary ownership requires verified success
+  from both `discardPythonRunState()` and `cleanupPythonRunArtifacts()`; either failure is
+  recovery-owned. The successful handoff remains unchanged. The router's one local canceled
+  initializer is the only other stage-result initializer.
+- Frozen consumer inventory: Device `allowPendingToolOnce()` and `allowPendingToolForChat()`, plus Web
+  `handlePendingAllowOnce()` and `handlePendingAllowChat()`, all stop before continuation when the
+  pending decision has `success == false`. Their existing continuation helpers are the only paths
+  that can continue the model and later clear the terminal pending; they require a successful
+  decision and therefore need no production edit. Mandatory Python approval cannot save Allow for a
+  chat, but both generic Allow-for-chat callers remain mapped and protected by the same failure gate.
+- Frozen pre-stage ownership: after durable `ClaimedApprove`, keep
+  `revalidateClaimedPendingToolCall()` failure as the existing ordinary bounded result because the
+  current approval has not begun staging. Call `preparePythonRunStaging()` only in a separate branch.
+  Any preparation failure returns `PendingToolDecisionResult.success == false` with the exact claimed
+  pending and error, before activity creation or `stagePythonRun()`. This conservatively preserves an
+  unreadable/unknown run, an already-present run, or failed orphan-artifact cleanup for startup; it
+  performs no continuation, pending clear, handoff, replay or acknowledgement and creates no audit
+  record because no activity started. No preparation type, field, helper or persisted state is added.
+- Frozen minimal design: add one explicit `startupRecoveryRequired` Boolean to
+  `PythonRunStageResult` and one pure inline `pythonRunStageFailureAllowsContinuation()` predicate in
+  the existing host-compatible `python_mode.h`. Every initializer sets the field explicitly. In
+  `python_mode.cpp`, one small local typed request-write result carries success, recovery ownership
+  and error; one failure helper attempts both exact-owned request cleanups and aggregates their
+  outcomes without an output parameter or mode flag. The router attempts the existing Canceled audit
+  for observed cancellation and the existing Failed audit for every other staging failure. A
+  recovery-owned result then returns `PendingToolDecisionResult.success == false` with the claimed
+  pending and aggregated error. An ordinary failure retains the accepted Canceled or
+  `invalidToolCall()` continuation. No error-string parsing or new persisted state is introduced.
+- Frozen crash mapping: ambiguous request-write cleanup and canceled-request cleanup preserve the
+  request residue, the appropriate Failed/Canceled audit attempt and durable `ClaimedApprove` for
+  startup ownership. The same applies after ambiguous NVS run write, or after boot-selection failure
+  whose run discard/artifact cleanup is not fully verified. No boot handoff, continuation, pending
+  clear, replay or acknowledgement occurs. If request cleanup verifies success, or boot selection
+  fails and both later cleanup operations verify success, no runnable state remains and the accepted
+  ordinary continuation is safe. Audit-finish failure is appended to the returned error but cannot
+  convert a recovery-owned result into an ordinary decision.
+- A failed pre-stage preparation has no new audit sequence and preserves the claimed pending plus all
+  unknown/existing run or artifact state unchanged for the startup owner. It cannot be converted to
+  `invalidToolCall()` continuation; only the preceding stale-authority revalidation failure retains
+  that ordinary path.
+- Frozen startup reuse: after `loadPythonRunRecovery()` authoritatively reports no `run` and the
+  catalogued pending is proven to be the exact Python `ClaimedApprove`, retain the existing valid
+  detached request/result recovery and validated request-only paths. Any other final or temporary
+  result residue remains ambiguous execution evidence and is preserved fail-closed. Only when both
+  result paths are absent may no artifact, committed request, temporary request or both request paths
+  be treated as the bounded pre-staging/no-code-executed outcome and fall through the existing
+  `kInterruptedBeforeStaging` idempotent chat attachment, followed by existing pending-clear-before-
+  artifact-cleanup ordering. If authoritative run absence or exact pending ownership is unproven,
+  existing fail-closed preservation remains unchanged. No recovery mode, manager, status or route is
+  added.
+- Frozen exact write set is `firmware/CardputerAssistant/src/python_mode.h`,
+  `firmware/CardputerAssistant/src/python_mode.cpp`,
+  `firmware/CardputerAssistant/src/tool_router.cpp`,
+  `firmware/CardputerAssistant/CardputerAssistant.ino`, `tests/host_tests.cpp` and this trace. Device
+  and Web approval handlers, persistence schemas, routes, assets, supervisor, build configuration
+  and documentation are excluded.
+- Frozen smallest proof: extend the existing strict host binary, which already includes
+  `python_mode.h`, with one focused test executing the production continuation predicate for ordinary
+  failure, recovery-owned failure and success. A bounded source-order/inventory check maps every
+  request-writer cleanup result, all stage-result initializers, NVS/boot-cleanup classifications, the
+  cancellation-specific Canceled-audit/non-success ordering, the non-cancel Failed-audit branch, and
+  the exact startup no-run/claimed-residue path through idempotent attachment and pending-before-
+  artifact cleanup. It also proves revalidation stays before a separate preparation call, every
+  preparation failure returns non-success before activity creation/staging, and only revalidation
+  failure reaches the ordinary pre-stage continuation; it is supporting evidence, not the sole
+  oracle. Then run the existing strict
+  host suite, one exact pinned firmware compile for production/caller compatibility, `diff --check`,
+  and resource-size comparison. The startup mapping must separately prove that result-bearing
+  ambiguity is preserved while request-only residue reaches the no-code attach/cleanup path. No
+  NVS/SD mock, retained fault injector, upload, COM8, Device, Web, Browser, CI or runtime rerun is in
+  the proof.
+- The first independent reviewer `GO` is superseded: Architect personally confirmed that it missed
+  discarded request-cleanup failures, recovery-owned canceled cleanup and the exact startup
+  no-run/claimed residue branch. The revised consolidated gate requires a fresh independent review
+  and final Architect pre-edit `GO`; production and tests remain frozen.
+- The fresh reviewer returned `STOP` on one startup distinction: an invalid final/temporary result
+  can be execution evidence and must not be replaced by the no-code message or destroyed. The
+  corrected gate preserves every unvalidated result-bearing combination fail-closed and limits the
+  no-code fallback to no-result request/request-temporary residue after exact run absence and pending
+  ownership are proven. The same reviewer may verify this one correction once; production and tests
+  remain frozen.
+- The same fresh reviewer performed the permitted one-time verification of that exact correction and
+  returned `GO`; no additional blocker or scope expansion was found. Architect final pre-edit review
+  remains mandatory before any production or test change.
+- Architect's corrected-gate review then returned `STOP` on the earlier
+  `preparePythonRunStaging()` branch, which also follows durable claim but precedes the stage-result
+  signal. The gate now separates ordinary stale revalidation from non-success preparation failure as
+  specified above. Architect directed no third reviewer cycle; production and tests remain frozen
+  pending immediate personal re-review.
+- Architect personally rechecked the corrected trace and producer/consumer code and returned final
+  pre-edit `GO` for exactly the frozen six-file design and proof. Implementation now uses the one
+  reviewed request-write cleanup result, stage recovery signal/continuation predicate, separate
+  non-success preparation branch, Canceled/Failed audit split, conservative boot cleanup ownership,
+  result-bearing startup preservation and no-result request-residue attach path. No excluded owner,
+  persistence format, route, module, framework or runtime surface is added. Verification remains
+  pending and no closure status is claimed.
+- The bounded source/order inventory passed across the exact six-file write set: all four request-
+  writer failures use the exact cleanup result, request-write and cancellation ambiguity set recovery
+  ownership, NVS-write and boot-cleanup ownership are explicit, stale revalidation precedes the
+  separate non-success preparation branch and activity creation, both Canceled and Failed audit
+  paths consult the production continuation predicate, result-bearing startup residue remains
+  fail-closed, and no-result request residue reaches idempotent attachment followed by pending-before-
+  artifact cleanup. Result: `P5_02I_SOURCE_ORDER result=pass paths=6 request_failures=4
+  predicate_cases=3`.
+- The pinned dependency check passed. The existing strict WSL host suite compiled with
+  `-std=c++17 -Wall -Wextra -Werror`, executed the retained production-predicate cases and all existing
+  host coverage, returned `host_tests: PASS`, and removed its exact-owned temporary ELF. The six-file
+  `git diff --check` also passed.
+- One exact pinned firmware compile passed with FQBN occurrence count `1` and unique resolved M5Stack
+  core `3.2.1`. Flash is `3,481,774` bytes, `+884` from the accepted P5-02h build; global RAM remains
+  `65,732` bytes with `261,948` available, a delta of `0`. The app binary is `3,481,968` bytes,
+  SHA-256 `10D78E446BBAE861280688EB6F735165D9089BF05EC3121C4A3755E570316D76`, and is newer than every
+  changed production source. No upload, COM8, Device, Web, Browser, CI or accepted-runtime scenario
+  ran.
+- A fresh independent code reviewer inspected the actual six-path implementation and returned `GO`
+  with no blocker. Architect then personally reviewed the complete diff line by line, crash contract,
+  producers/consumers, NVS/SD ambiguity, audit ordering, proof, resources, cleanup and residuals and
+  returned mandatory P5-02i closure `GO`. P5-02 and P5-02i are completed with zero active rows;
+  staging, one exact atomic commit and remote publication are now authorized. P5-03 remains completed,
+  exact-head phase closure stays frozen until publication, and Phase 6 remains untouched.

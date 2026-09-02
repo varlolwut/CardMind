@@ -427,13 +427,16 @@ PendingToolDecisionResult approvePendingProjectToolCall(
     if (entry != nullptr && entry->schema == ToolSchemaId::PythonRun) {
         OperationResult ready = revalidateClaimedPendingToolCall(
             claimed.pending);
-        if (ready.success) {
-            ready = preparePythonRunStaging();
-        }
         if (!ready.success) {
             return {
                 true, false, std::move(claimed.pending),
                 invalidToolCall(ready.error), "",
+            };
+        }
+        const OperationResult prepared = preparePythonRunStaging();
+        if (!prepared.success) {
+            return {
+                false, false, std::move(claimed.pending), {}, prepared.error,
             };
         }
         ToolActivityResult started = startToolActivity("python_run");
@@ -449,7 +452,7 @@ PendingToolDecisionResult approvePendingProjectToolCall(
             return cancelled;
         };
         PythonRunStageResult staged = {
-            false, false, "Tool execution canceled by user",
+            false, false, false, "Tool execution canceled by user",
         };
         if (!latchedCancellation()) {
             staged = stagePythonRun({
@@ -470,6 +473,11 @@ PendingToolDecisionResult approvePendingProjectToolCall(
             if (!finished.success) {
                 error += "; audit finish failed: " + finished.error;
             }
+            if (!pythonRunStageFailureAllowsContinuation(staged)) {
+                return {
+                    false, false, std::move(claimed.pending), {}, error,
+                };
+            }
             return {
                 true, false, std::move(claimed.pending),
                 {
@@ -486,6 +494,11 @@ PendingToolDecisionResult approvePendingProjectToolCall(
             String error = staged.error;
             if (!finished.success) {
                 error += "; audit finish failed: " + finished.error;
+            }
+            if (!pythonRunStageFailureAllowsContinuation(staged)) {
+                return {
+                    false, false, std::move(claimed.pending), {}, error,
+                };
             }
             return {
                 true, false, std::move(claimed.pending),

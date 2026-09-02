@@ -99,8 +99,15 @@ struct PythonRunStageRequest {
 struct PythonRunStageResult {
     bool success;
     bool restartRequired;
+    bool startupRecoveryRequired;
     String error;
 };
+
+inline bool pythonRunStageFailureAllowsContinuation(
+    const PythonRunStageResult& result)
+{
+    return !result.success && !result.startupRecoveryRequired;
+}
 
 struct PythonRunRecoveryResult {
     bool success;

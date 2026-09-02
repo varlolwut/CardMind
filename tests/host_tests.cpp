@@ -668,6 +668,26 @@ void testToolCatalogAndRequestPlan()
             "No-tools intent retained a model schema");
 }
 
+void testPythonRunStageFailureOwnership()
+{
+    const cardputer::PythonRunStageResult ordinaryFailure = {
+        false, false, false, "ordinary",
+    };
+    const cardputer::PythonRunStageResult recoveryOwnedFailure = {
+        false, false, true, "recovery",
+    };
+    const cardputer::PythonRunStageResult successfulHandoff = {
+        true, true, false, "",
+    };
+    require(cardputer::pythonRunStageFailureAllowsContinuation(ordinaryFailure),
+            "Ordinary Python staging failure blocked bounded continuation");
+    require(!cardputer::pythonRunStageFailureAllowsContinuation(
+                recoveryOwnedFailure),
+            "Recovery-owned Python staging failure allowed continuation");
+    require(!cardputer::pythonRunStageFailureAllowsContinuation(successfulHandoff),
+            "Successful Python staging was classified as a failure continuation");
+}
+
 void testPendingToolPreview()
 {
     const auto ordinary = cardputer::buildPendingFileReplacementPreview(
@@ -2077,6 +2097,7 @@ int main()
         testToolMessageIntent();
         testToolMessageIntentCodec();
         testToolCatalogAndRequestPlan();
+        testPythonRunStageFailureOwnership();
         testPendingToolPreview();
         testToolPolicyPrecedence();
         testToolPolicyRoadmapExamples();
