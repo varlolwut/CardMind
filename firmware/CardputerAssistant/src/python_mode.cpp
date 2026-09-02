@@ -770,7 +770,9 @@ OperationResult preparePythonRunStaging()
     return cleanupPythonRunArtifacts();
 }
 
-PythonRunStageResult stagePythonRun(const PythonRunStageRequest& request)
+PythonRunStageResult stagePythonRun(
+    const PythonRunStageRequest& request,
+    const std::function<bool()>& isCancelled)
 {
     OperationResult result = verifyPythonSource(request);
     if (!result.success) return {false, false, result.error};
@@ -807,6 +809,21 @@ PythonRunStageResult stagePythonRun(const PythonRunStageRequest& request)
         {},
         request.auditSequence,
     };
+    if (isCancelled()) {
+        String error = "Tool execution canceled by user";
+        const OperationResult temporaryCleanup = removeOwnedFile(
+            kPythonRunRequestTemporaryPath);
+        const OperationResult requestCleanup = removeOwnedFile(
+            kPythonRunRequestPath);
+        if (!temporaryCleanup.success) {
+            error += "; temporary request cleanup failed: " +
+                temporaryCleanup.error;
+        }
+        if (!requestCleanup.success) {
+            error += "; request cleanup failed: " + requestCleanup.error;
+        }
+        return {false, false, error};
+    }
     result = writeRunBlob(blob);
     if (!result.success) {
         return {false, false,

@@ -84,6 +84,7 @@ partial protocol. The top-level execution matrix remains authoritative for atomi
 | P5-02e | Web handoff/reconnect wiring, generated asset consistency and UI smoke | Terminal handoff SSE, same-address polling, generated asset consistency and UI smoke; browser behavior remains delegated to P5-02f | completed |
 | P5-02f | Exact installed-image delivery plus bounded staged Web proofs for `complete` and `claimed`, no replay, originating-chat return, resources and exact cleanup | Architect accepted both installed runtime boundaries with the claimed marker limitation retained explicitly; no repeat, physical step, recovery chain or retained/broad harness | completed |
 | P5-02g | Architect row closure, exact commit/push/remote verification | Reconciled row-owned diff/evidence, Architect closure GO, one exact row commit, immediate push and authenticated remote SHA | completed |
+| P5-02h | Reopened cancellation correction at the existing router/staging boundary | Cancellation is latched before staging and at the last reversible pre-run-commit point; request/temp exact-cleaned; no runnable run state, boot change or handoff; activity/result use existing canceled semantics | completed |
 | P5-03 | Phase reconciliation, CI/PR/review/merge to `develop` | Full phase audit, required regressions and documentation, green CI, reviewed PR and merge only to `develop` | pending |
 
 ## P5-01 active gate
@@ -1097,3 +1098,68 @@ P5 adds no serial selector, fixture, runner or diagnostic subsystem there.
   execution, project/file deletion, build, upload, reset or recovery occurred. The ownership blocker
   is cleared, but P5-02f remains frozen pending review of a smaller direct proof; the repeated
   489-line one-shot harness is retired from further runtime use.
+
+## P5-02h cancellation reopen gate
+
+**Reopened:** 2026-09-02T16:05:00.816+03:00.
+
+- Architect's personal Phase 5 closure review found that the existing Python branch in
+  `approvePendingProjectToolCall()` accepted an `isCancelled` callback but never observed or forwarded it;
+  cancellation remained active only on the non-Python path. Because `stagePythonRun()` can create
+  the request, commit runnable `run=pending` state and select MicroPython, this is a real omitted
+  ROADMAP cancellation boundary and reopens P5-02 rather than being absorbed into P5-03.
+- P5-02h owns only a minimal correction in the existing router/staging/activity/result owners and
+  the smallest production-linked proof. Cancellation must latch before Python staging and at the
+  last reversible point before runnable run-state commit. Cancellation observed after request
+  creation exact-cleans only the request/temp, commits no runnable run state, changes no boot
+  selection, emits no handoff, finishes the started activity as Canceled with zero output/no exit,
+  and returns the existing canceled tool result while preserving the existing continuation and
+  `ClaimedApprove` ownership.
+- No new file, module, route, status, queue, framework, broad harness, Device/Web run, build, upload
+  or runtime action is authorized before the bounded design and smallest executable proof are
+  reviewed. P5-03 remains pending; its existing five-path documentation diff is preserved unstaged.
+- Architect returned pre-edit `GO` for exactly `tool_router.cpp`, `python_mode.h`,
+  `python_mode.cpp` and the P5-02h trace hunks, and rejected the proposed disposable router/stage
+  stub as disproportionate mock evidence. The implemented approval owner now uses one monotonic
+  latched callback, polls it before staging, forwards it to `stagePythonRun()`, and maps either
+  observed cancellation to the existing canceled tool result plus a Canceled activity with zero
+  output and no exit. No caller, pending, continuation, activity format or persisted state changed.
+- `stagePythonRun()` now performs its second callback poll after the exact request has been written
+  and the local run blob constructed but immediately before the first `writeRunBlob()` call. On
+  cancellation it independently checks removal of only request temporary and request paths and
+  returns without NVS commit, partition selection or handoff. Cleanup failure remains explicit and
+  may retain only a non-runnable detached request for the existing startup owner. A callback that
+  remains false follows the previous run-blob, boot-selection and handoff path unchanged; a callback
+  changing after the final false observation is intentionally beyond the reversible boundary.
+- The approved production static/order check passed over the real functions: pre-stage poll before
+  stage call, callback forwarding, request write before the second poll, both request-only cleanup
+  attempts before run commit, run commit before boot selection, no broad cleanup or forbidden owner
+  in the cancel block, and retained false/false handoff. `git diff --check` passed, all eight current
+  working paths are the three P5-02h production owners plus the frozen five-path P5-03 docs/trace
+  set, and nothing is staged.
+- A fresh independent read-only code review returned `GO` with no findings. It confirmed both cancel
+  branches, cleanup-failure behavior, Canceled/zero-output/no-exit activity, standard canceled result,
+  unchanged `ClaimedApprove`/continuation ownership, compatible signature/aggregate initialization,
+  unchanged false/false handoff and no new persisted format, helper, route or framework. Residual risk
+  is the intentionally unobserved late cancel after the irreversible boundary and a possible
+  non-runnable request artifact after an explicitly reported SD cleanup failure.
+- One exact pinned compile passed with FQBN
+  `m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=custom` and one unique M5Stack core
+  `3.2.1`. Flash is `3,480,890` bytes, global RAM remains `65,732` bytes and available RAM remains
+  `261,948` bytes; versus the accepted P5-02 build this is `+1,164` flash bytes and zero global-RAM
+  growth. The app binary is `3,481,072` bytes with SHA-256
+  `5D6B1262E79833B97F7C3B9F078495AA8C3588EFFD07812AA1094C64E413164E` and is newer than all three
+  changed sources. No second build, upload, COM8, Device/Web, browser, model, reset or runtime action
+  occurred, and no retained or disposable test/harness file was added.
+
+### P5-02h Architect closure GO
+
+**Completed:** 2026-09-02T16:41:50.265+03:00.
+
+- Architect personally reviewed the actual three-file production diff, all unchanged callback
+  producers and continuation/recovery consumers, the two reversible cancellation windows, exact
+  request-only cleanup, activity/result semantics, false/false preservation, static/order evidence,
+  fresh independent review, build pins/resources and residuals, then returned explicit P5-02h
+  closure `GO`. No further P5-02h production change is authorized.
+- P5-02 and P5-02h are completed. P5-03 remains pending, leaving zero active rows until one exact
+  P5-02h commit is pushed and independently verified at the authenticated remote SHA.

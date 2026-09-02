@@ -443,14 +443,42 @@ PendingToolDecisionResult approvePendingProjectToolCall(
                 activityUnavailable(started.error), "",
             };
         }
-        const PythonRunStageResult staged = stagePythonRun({
-            claimed.pending.pendingId,
-            claimed.pending.target.name,
-            claimed.pending.target.size,
-            claimed.pending.target.sha256,
-            started.activity.sequence,
-            returnSurface,
-        });
+        bool cancelled = false;
+        const CancelCallback latchedCancellation = [&]() {
+            cancelled = cancelled || isCancelled();
+            return cancelled;
+        };
+        PythonRunStageResult staged = {
+            false, false, "Tool execution canceled by user",
+        };
+        if (!latchedCancellation()) {
+            staged = stagePythonRun({
+                claimed.pending.pendingId,
+                claimed.pending.target.name,
+                claimed.pending.target.size,
+                claimed.pending.target.sha256,
+                started.activity.sequence,
+                returnSurface,
+            }, latchedCancellation);
+        }
+        if (cancelled) {
+            const OperationResult finished = finishToolActivity(
+                started.activity, ToolActivityStatus::Canceled, 0, 0,
+                {false, 0});
+            String error = staged.error;
+            if (error.isEmpty()) error = "Tool execution canceled by user";
+            if (!finished.success) {
+                error += "; audit finish failed: " + finished.error;
+            }
+            return {
+                true, false, std::move(claimed.pending),
+                {
+                    false, "", error, ToolExecutionOutcome::Cancelled,
+                    false, 0,
+                },
+                "",
+            };
+        }
         if (!staged.success) {
             const OperationResult finished = finishToolActivity(
                 started.activity, ToolActivityStatus::Failed, 0, 0,

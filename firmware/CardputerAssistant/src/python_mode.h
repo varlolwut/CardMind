@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace cardputer {
@@ -129,7 +130,9 @@ PythonHandoffRequest consumePythonHandoffRequest();
 PythonHandoffRequest consumePythonSdHandoffRequest();
 OperationResult acknowledgePythonHandoffRequest();
 OperationResult preparePythonRunStaging();
-PythonRunStageResult stagePythonRun(const PythonRunStageRequest& request);
+PythonRunStageResult stagePythonRun(
+    const PythonRunStageRequest& request,
+    const std::function<bool()>& isCancelled);
 PythonRunRecoveryResult loadPythonRunRecovery();
 PythonRunRecoveryResult loadDetachedPythonRunRecovery(
     const String& expectedPendingId,
