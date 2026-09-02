@@ -160,6 +160,16 @@ CardMind partition and performs the required controlled restart. If the Python p
 is unavailable, reconnect the Cardputer to its configured 2.4 GHz network and reopen
 the address shown before the mode switch. `RST` alone restarts the selected mode.
 
+A model-requested one-shot run starts from the originating chat rather than the manual
+workspace page. The pending view requires **Allow once** and shows a bounded source
+preview plus the normalized path, byte size, and SHA-256. If the preview is truncated,
+review the complete linked source through Files before approval. Approved code is
+privileged and not sandboxed. The Web Console shows the handoff and polls the same address
+while the device restarts. If normal completion or the fixed watchdog returns the device to
+CardMind, the Web Console resumes with one bounded result in the original chat. Authorized
+privileged code can defeat that recovery or alter boot behavior. The Web Console does not
+repost approval or automatically replay a timed-out, reset, or otherwise uncertain run.
+
 ## Security model
 
 - The server listens only while the Web console screen is open on the Cardputer.

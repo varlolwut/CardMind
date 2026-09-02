@@ -65,7 +65,7 @@ Status values are `pending`, `in_progress`, and `completed`.
 | --- | --- | --- | --- |
 | P5-01 | Phase kickoff: reconcile canonical scope and P4 inheritance; inventory every existing producer, consumer, persisted representation and vendor contract; freeze the one-shot design, proof matrix, non-goals and exact write set | Exact source/branch/clean-state evidence, complete inventory, proportional proof, bounded crash/cleanup contract and independent pre-edit GO before production | completed |
 | P5-02 | Implement the complete one-shot vertical cycle through existing P3 policy/approval, Shared workspace, mode switch, supervisor, Device UI and WebUI/reconnect owners | Exact one-run approval and full-source review; fail-closed no-effect cases; success/exception/reset/watchdog/power-loss return; exactly-once originating-chat result; no replay; exact cleanup; manual workspace preserved | completed |
-| P5-03 | Phase closure and publication | Focused host/build/COM8/browser acceptance, resource/latency/SD ownership, compatibility and documentation checks, exact cleanup, independent review, per-row publication evidence, green CI and reviewed merge only to `develop` | pending |
+| P5-03 | Phase closure and publication | Focused host/build/COM8/browser acceptance, resource/latency/SD ownership, compatibility and documentation checks, exact cleanup, independent review, per-row publication evidence, green CI and reviewed merge only to `develop` | completed |
 
 ## P5-02 execution checkpoints
 
@@ -85,7 +85,7 @@ partial protocol. The top-level execution matrix remains authoritative for atomi
 | P5-02f | Exact installed-image delivery plus bounded staged Web proofs for `complete` and `claimed`, no replay, originating-chat return, resources and exact cleanup | Architect accepted both installed runtime boundaries with the claimed marker limitation retained explicitly; no repeat, physical step, recovery chain or retained/broad harness | completed |
 | P5-02g | Architect row closure, exact commit/push/remote verification | Reconciled row-owned diff/evidence, Architect closure GO, one exact row commit, immediate push and authenticated remote SHA | completed |
 | P5-02h | Reopened cancellation correction at the existing router/staging boundary | Cancellation is latched before staging and at the last reversible pre-run-commit point; request/temp exact-cleaned; no runnable run state, boot change or handoff; activity/result use existing canceled semantics | completed |
-| P5-03 | Phase reconciliation, CI/PR/review/merge to `develop` | Full phase audit, required regressions and documentation, green CI, reviewed PR and merge only to `develop` | pending |
+| P5-03 | Phase reconciliation, CI/PR/review/merge to `develop` | Full phase audit, required regressions and documentation, green CI, reviewed PR and merge only to `develop` | completed |
 
 ## P5-01 active gate
 
@@ -1098,6 +1098,106 @@ P5 adds no serial selector, fixture, runner or diagnostic subsystem there.
   execution, project/file deletion, build, upload, reset or recovery occurred. The ownership blocker
   is cleared, but P5-02f remains frozen pending review of a smaller direct proof; the repeated
   489-line one-shot harness is retired from further runtime use.
+## P5-02 publication evidence
+
+- Final row commit `4913e4f1d6ab89f83751a6995691af088ddac4d4` has subject
+  `P5-02: add one-shot Python execution`, unchanged tree
+  `6ae36331d37e6d49c98f69de267ffdf5ce43cf09` and exactly the Architect-approved 24 paths.
+  Author and Committer are both exactly
+  `Alexey Bulygin <30726976+varlolwut@users.noreply.github.com>`.
+- The repository-local row checker returned
+  `ROW_LOCAL_CHECK result=pass row=P5-02 sha=4913e4f1d6ab89f83751a6995691af088ddac4d4 paths=24`.
+  The commit was pushed immediately to `feature/phase-5-python-one-shot`; authenticated GitHub MCP
+  user `varlolwut` returned both that branch head and the commit at the exact same SHA with all 24
+  paths. No production, runtime, Device, Web, fixture or secret state changed during publication.
+
+## P5-03 closure evidence
+
+**Started:** 2026-09-02T15:09:06+03:00.
+
+**Completed:** 2026-09-02T17:16:34+03:00.
+
+- Current hypothesis: Phase 5 can close through canonical scope/evidence reconciliation, proportional
+  retained regression and CI/PR/merge gates without new P5 production behavior or re-running the two
+  frozen installed scenarios. Any omitted acceptance, foreign defect or new runtime requirement is
+  classified before mutation and reported to Architect under the normal ownership rules.
+- P5-03 became the sole active row after P5-02h passed its local row-close check, was pushed to the
+  phase branch and matched both authenticated exact-SHA and branch-head GitHub lookups. Its
+  five-file documentation/trace diff remained P5-03-owned through review; no production or runtime
+  work was reopened.
+- After successful P5 closure, stop without activating, preparing or modifying Phase 6; the user
+  will restart the system before any later phase transition.
+- Architect's mandatory P5-03 closure review returned `STOP` on one consolidated documentation
+  consistency defect: the user guide and Web Console made ordinary return/resumption absolute, and
+  the limitations text omitted the implemented durable-but-invalid complete-result case. The three
+  P5-03-owned statements now qualify normal completion/fixed-watchdog return, state that authorized
+  privileged code can defeat recovery or alter boot behavior, and require a valid complete result.
+  Only diff-check and local Markdown-link sanity are rerun before immediate personal re-review.
+- The permitted `git diff --check` and local Markdown-link sanity both passed. Architect then
+  personally inspected the actual five-file working-tree diff and returned explicit P5-03 closure
+  `GO`; a fresh independent final wording review also returned `GO` with no scope expansion. The
+  exact row ownership is `README.md`, `docs/limitations.md`, `docs/user-guide.md`,
+  `docs/web-console.md` and this trace. No runtime, production, test, asset, schema, route, persisted
+  state, Device/Web state or vendor contract changed.
+
+### P5-03 reconciliation and local evidence
+
+- The complete canonical Phase 5 clauses reconcile to the accepted P5-02 implementation and
+  installed evidence: separate-image/manual-workspace reuse, mandatory exact-byte approval,
+  CardMind and MicroPython hash checks, bounded consume-once handoff/result, preselected CardMind
+  return plus fixed WDT, originating-chat exactly-once attachment/no replay, exact cleanup and
+  same-address Web transition. The accepted marker-observation and maximum-64-KiB latency residuals
+  remain explicit; no removed package, automation, queue, retry, background or recovery framework
+  has re-entered scope.
+- A CI-equivalent local closure run passed third-party/license verification, Python tool syntax,
+  all MicroPython VFS syntax, the supervisor integration suite, strict host C++ tests, the retained
+  Web Console UI suite and `diff --check`. Results included
+  `THIRD_PARTY result=pass components=8`, `MICROPYTHON_SUPERVISOR_TEST result=pass`,
+  `host_tests: PASS` and `WEB_CONSOLE_UI_TEST result=pass`; its exact-owned WSL temporary directory,
+  host binary and bytecode were removed. No Device, COM8, upload, HTTP, Browser, model, reset or
+  runtime scenario was repeated.
+- The tracked filename-only secret scan found zero secret-like filenames and inspected no secret
+  contents. There is no repository pull-request template. The documentation audit found that the
+  retained user docs described only the inherited manual Python workspace; P5-03 therefore owns the
+  minimal one-shot/trust/reconnect guidance in `README.md`, `docs/limitations.md`,
+  `docs/user-guide.md` and `docs/web-console.md`. Together with this trace, these five files are the
+  complete P5-03 write set; production, tests, assets, build configuration and vendor inputs remain
+  unchanged. At this reconciliation checkpoint, CI, final independent/Architect review, row
+  publication and merge remained pending.
+- Architect's focused documentation review returned one `STOP`: the first limitations wording
+  incorrectly grouped every hash mismatch with pre-handoff denial, while result integrity is also
+  checked after execution. The bounded correction now distinguishes no-handoff approval/input
+  failures, CardMind's pre-switch exact-source check, MicroPython's post-switch/pre-exec request and
+  source check, and a post-exec result-integrity failure whose effects are unknown and which is never
+  replayed. No other prose, production behavior, proof, build or runtime action changed.
+- The comparable retained P4 Web/API sample is free heap `98,804`, largest block `35,828`, minimum
+  heap `74,880` and stack free `5,588`. P5 Complete pre/post samples are
+  `98,348 / 99,408`, `34,804 / 36,852`, `84,564 / 90,800` and `5,272 / 5,272`; their
+  deltas from P4 are `-456 / +604`, `-1,024 / +1,024`, `+9,684 / +15,920` and
+  `-316 / -316`. P5 Claimed pre/post samples are `98,596 / 99,448`,
+  `32,756 / 34,804`, `87,508 / 90,888` and `5,272 / 5,256`; their deltas are
+  `-208 / +644`, `-3,072 / -1,024`, `+12,628 / +16,008` and `-316 / -332`.
+  Across the comparable Web-active observations, free heap remains at least `98,348`, largest block
+  at least `32,756` and stack free at least `5,256`, while minimum heap improves; this is no material
+  P5 regression against the retained P4 sample and requires no rerun.
+- P5-02 initially completed remote publication no later than the observed P5-03 start at
+  `2026-09-02T15:09:06+03:00`, after starting at `2026-09-01T21:49:32+03:00`: the wall interval is
+  `17h19m34s`. Exact primary-agent active duration cannot be reconstructed because retained task
+  history exposes turn-level intervals but not per-item active/wait accounting. The interval includes
+  excluded overnight inactivity, Architect and specialist review waits, platform/tool waits, the
+  external COM8 absence and user restoration interval, and bounded hardware/HTTP/CI waits. Therefore
+  neither the 12-hour target nor compliance with the normal 16-hour active ceiling is claimed; closure
+  conservatively classifies the ceiling as exceeded/unproven rather than subtracting invented time.
+  The required 60-minute material pivot is retained in the task turn whose observable wall window was
+  `2026-09-02T06:25:01+03:00` through `2026-09-02T08:37:22+03:00`; item-level timestamps are not
+  exposed, so an exact minute is unavailable. Its materially different approach was the reviewed
+  policy-isolated direct five-stage lifecycle already recorded above, replacing the invalid combined
+  proof path rather than repeating it. P5-02h has its separate reopen timestamp and clock.
+- The authoritative Device-state boundary for closure preserves only API credentials and Wi-Fi
+  configuration because losing them would require user intervention. All other settings, projects,
+  chats, files, Python/SSH state and selections are disposable; historical restoration observations
+  remain facts, but P5-03 requires only those two protected values and a documented coherent final
+  baseline and spends no further proof effort restoring disposable state.
 
 ## P5-02h cancellation reopen gate
 
@@ -1161,5 +1261,9 @@ P5 adds no serial selector, fixture, runner or diagnostic subsystem there.
   request-only cleanup, activity/result semantics, false/false preservation, static/order evidence,
   fresh independent review, build pins/resources and residuals, then returned explicit P5-02h
   closure `GO`. No further P5-02h production change is authorized.
-- P5-02 and P5-02h are completed. P5-03 remains pending, leaving zero active rows until one exact
-  P5-02h commit is pushed and independently verified at the authenticated remote SHA.
+- P5-02 and P5-02h are completed. P5-02h commit
+  `ccfbf602a7e8fe4358d36f9888d1e931c82743e6` passed the local row-close check, was pushed to
+  `feature/phase-5-python-one-shot`, and matched both authenticated exact-SHA and branch-head GitHub
+  MCP lookups with the exact identity and four row-owned paths. P5-03 has passed its mandatory
+  closure review and is completed, leaving zero active rows while its exact atomic commit and remote
+  publication are performed.
