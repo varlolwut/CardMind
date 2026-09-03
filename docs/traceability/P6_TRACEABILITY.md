@@ -714,3 +714,114 @@ The ordered replacement gates are:
   root file `m[1])`, Architect-owned `.codex/agents` files and retained stash remain untouched.
   Residual risk is limited to this artifact being a reviewed design/proof rather than production;
   P6-02 and all later production work remain separately gated.
+
+## P6-01 reopened acceptance correction
+
+**Reopened:** 2026-09-03 after Architect's explicit ownership verdict. The user's visual STOP
+invalidated the recorded P6-01 closure. The accepted-path artifact at SHA-256
+`3217A5068BE741A20BC369FFC9B13B664C798C299A65A4BAFE07F1169E7B309D` has independently and
+personally reproduced interaction, responsive-layout, action-hierarchy and preset-semantics
+defects. P6-01 is again the sole `in_progress` row; P6-02 is pending and any locally retained P6-02
+design package is historical prepared input only, not an active or approved implementation contract.
+
+The correction is limited to the existing task-owned P6-01 artifact and this trace. It must:
+
+1. make Project settings navigate to its owning workspace from Chat, Shared files, Terminal and
+   Settings rather than unhide only Chat descendants;
+2. replace the desktop in-flow Other chat actions expansion with a bounded anchored disclosure or
+   overlay while retaining a usable mobile in-flow disclosure;
+3. give 720x450 a compact/single-pane treatment where needed, collapse project/session utilities
+   behind one clear disclosure, compact healthy status while leaving warnings/errors immediate,
+   and keep the main title plus first useful action inside each retained initial viewport;
+4. keep destructive API-profile, model-preset and optional-service key-removal actions local,
+   content-sized and behind their selected-resource/service edit or danger disclosure, with
+   STT/Search/TTS visibly grouped as services;
+5. fit Allow once, Allow for chat and Deny inside every retained narrow viewport with pointer and
+   keyboard reachability and no horizontal scrolling;
+6. add explicit Web and Device `Apply to active project` for the selected model preset. Apply copies
+   only model and output tokens through the existing project-settings owner, selection/creation does
+   not apply, failure preserves prior project values, and no preset reference is persisted. Update
+   the coverage row and a scenario to prove both the effect and forbidden effects.
+
+The correction preserves the graphite/warm/rust visual direction, Wi-Fi discovered/hidden paths,
+separate Terminal/Files and SSH/SFTP disclosure, terminal fullscreen/resize, grouped Shared/project
+settings actions, nine icon-led Device destinations, every prior function/stable ID and the already
+corrected Project capability-grid association. It adds no production asset, route, schema,
+framework, design-system module, build or Device action.
+
+Before another closure request, clean-load evidence must cover 1440x900, 1024x768, 720x450,
+390x844 and 320x568; every product action/decision without overlap or clipping; title/first-action
+reachability; Project settings from every non-Chat view; unchanged conversation header/work-canvas
+geometry when opening Other chat actions; Web and Device preset Apply behavior and forbidden
+effects; all seven composite scenarios; the complete 76-row and 9-destination/67-item/118-page
+catalogs or explicitly corrected counts; zero console errors; exact artifact hash/size; and fresh
+independent visual and functional red-team verdicts. P6-01 may not be marked completed, staged or
+committed and P6-02 may not resume before a new explicit Architect closure `GO`.
+
+## P6-01 reopened correction evidence-ready checkpoint
+
+**Evidence-ready:** 2026-09-03T09:37:04+03:00. P6-01 remains the sole `in_progress` row and
+P6-02 remains pending while this exact checkpoint awaits Architect's personal closure verdict.
+
+- The corrected task-owned artifact is
+  `C:\Users\84vs1\.codex\visualizations\2026\09\02\01a06386-22d5-7833-bb82-40a4f499f52e\p6-01-neutral-coverage-ia.html`,
+  exact SHA-256 `DA69622052F935FB5033E2A0EE7631FE56F71F3D8C68F995B9370FEBA50C1714`,
+  291,978 bytes. It remains below the 1 MiB budget and contains no external script, Fetch, XHR,
+  WebSocket or project-to-preset reference. Script parsing passed, all 355 IDs are unique, and every
+  queried correction control exists.
+- Clean direct loads at 1440x900, 1024x768, 720x450, 390x844 and 320x568 had document scroll width
+  equal to client width, no horizontally overflowing visible control and no console warning or
+  error. The compact initial views retained the main title and first useful action above the fixed
+  navigation. At 1024 and below one Console-actions disclosure owns project/session utilities, one
+  compact healthy summary replaces healthy detail, and a forced provider warning remained
+  immediately visible as both the aggregate warning and detailed provider failure.
+- Project settings navigated to the owning settings workspace from Chat, Shared files, Terminal and
+  Settings at both 1440 and 1024 widths. Each Back action restored the exact source view and focus to
+  the Project-settings opener. Opening Other chat actions at 1440 left the conversation header at
+  `[444,184.35,980.8,154]` and work canvas at `[444,338.35,980.8,296.85]`; at 1024 their heights and
+  boundary remained 147 and 331.35 CSS pixels. The menu stayed inside the viewport at both desktop
+  widths and became an in-flow eight-action disclosure without overflow at 720, 390 and 320.
+- API-profile and model-preset deletion were absent from the closed state and appeared only as
+  local content-sized actions inside their selected-resource danger disclosures. STT, Search and
+  TTS rendered as three distinct service groups, and each key-removal action was absent until its
+  own local danger disclosure opened. At 390 every opened action remained inside its settings pane.
+- At 390 the pending-decision dialog/content measured 338/298 CSS pixels in both client and scroll
+  width; at 320 they measured 268/228. Allow once, Allow for chat and Deny were fully visible,
+  stacked at both widths, and keyboard order was exactly once, chat, deny without duplicate or
+  hidden stops.
+- Web preset selection and creation left the active project's model and output tokens unchanged.
+  Applying `Fast` copied only `gpt-5-mini` and `1024`; no preset reference was stored. A forced
+  settings/storage failure preserved the exact prior project values. The Device representative
+  flow separately reproduced select-only, explicit apply confirmation, successful two-field copy,
+  no-reference result and failure preservation; reselection remained inert.
+- Direct-load coverage remained exactly 76/76 rows. The exhaustive Device catalog remained nine
+  destinations, 67 items and 118 pages with per-destination page totals
+  `16,19,6,6,19,12,17,19,4`. Baseline, authority, storage, remote, session, settings and Device
+  composite scenarios each completed a full cycle in its owning surface with zero console errors.
+- A fresh functional proof red-team reproduced every correction, count, Web/Device preset success
+  and forbidden effect, all seven scenario cycles and the empty console, then returned `GO` on the
+  exact hash and size above. A separately dispatched fresh visual red-team returned `GO` on the same
+  bytes after independently checking all five required viewports, responsive reachability and
+  clearance, Project-settings routing, anchored-menu geometry, danger hierarchy, service grouping,
+  pending-decision fit/order and the graphite/warm/rust visual hierarchy.
+- No firmware, production Web asset, generated header, schema, persistence, route, test, build,
+  upload, Device state or secret changed. The disposable browser viewport was reset, the
+  exact-owned artifact tab and server were closed, and TCP port 65429 was verified free. The
+  unrelated root file `m[1])`, `.codex/` state and retained stash remain untouched. Residual risk is
+  limited to this being a reviewed interaction/design proof rather than production behavior; P6-02
+  and every production boundary remain separately gated.
+
+## P6-01 reopened correction closure
+
+**Completed:** 2026-09-03T09:40:13+03:00.
+
+- Architect personally reconciled the exact six-clause correction contract, row-owned artifact and
+  trace diff, every affected producer/consumer, native browser semantics, all retained proof,
+  cleanup, resource budget and residual risk. Architect issued explicit `ARCHITECT CLOSURE GO` for
+  exact artifact SHA-256 `DA69622052F935FB5033E2A0EE7631FE56F71F3D8C68F995B9370FEBA50C1714`,
+  291,978 bytes, after the fresh functional and visual red-team verdicts both returned `GO` on those
+  same bytes.
+- The publication boundary contains only the P6-01 reopened contract, evidence and closure record.
+  The locally retained P6-02 activation/pre-edit package is not P6-01-owned and must remain unstaged
+  until this correction commit is pushed and its exact remote SHA is verified. P6-02 remains pending and no
+  production work is authorized during this zero-active-row publication window.
